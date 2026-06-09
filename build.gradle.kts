@@ -8,6 +8,11 @@ repositories {
     mavenCentral()
 }
 
+dependencies {
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.16.1")
+    implementation("org.xerial:sqlite-jdbc:3.44.1.0")
+}
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(26)
