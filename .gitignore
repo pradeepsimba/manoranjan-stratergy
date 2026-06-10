@@ -33,6 +33,7 @@ nbdist/
 
 # Package files
 *.jar
+*.db
 *.war
 *.nar
 *.ear

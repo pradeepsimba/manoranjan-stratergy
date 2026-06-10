@@ -48,6 +48,9 @@ public final class AppState {
     public volatile BNIndicators bnIndicators = null;
     public volatile String globalSignal      = "NEUTRAL";
 
+    // Big Trades cached snapshot (replaced atomically every 5s)
+    public volatile Object bigTradesSnapshot = null;
+
     public volatile EntryDiagnostics entryDiagnostics = null;
 
     // S/R levels per stock for 5m and 15m

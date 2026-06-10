@@ -91,4 +91,11 @@ public class DashboardController {
         state.availableFunds = funds;
         return Map.of("status", "ok", "funds", funds);
     }
+
+    // ── Big Trades ────────────────────────────────────────────────────────────────
+
+    @PostMapping("/big-trades/check")
+    public Map<String, Object> bigTradesCheck() {
+        return dbService.auditStockQtyStorage(200);
+    }
 }

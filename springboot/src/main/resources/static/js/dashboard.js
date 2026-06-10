@@ -52,6 +52,7 @@ function render(d) {
   renderStocks(d.stocks || [], d.candleCounts || []);
   renderTrades(d.trades || []);
   renderSR(d.srLevels || []);
+  if (d.bigTrades) renderBigTrades(d.bigTrades);
 }
 
 // ── Signal banner ─────────────────────────────────────────────────────────────
@@ -490,6 +491,97 @@ function fmtQty(n) {
   if (!n) return '—';
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
   return n.toFixed(0);
+}
+
+// ── Big Trades ────────────────────────────────────────────────────────────────
+
+const BT_LEADER_STOCKS = [
+  'HDFC BANK','ICICI BANK','AXIS BANK',
+  'STATE BANK OF INDIA','KOTAK MAHINDRA BANK','INDUSIND BANK'
+];
+const BT_THRESHOLDS = {
+  'HDFC BANK': 1000, 'ICICI BANK': 1000, 'AXIS BANK': 1000,
+  'STATE BANK OF INDIA': 1000, 'KOTAK MAHINDRA BANK': 1000, 'INDUSIND BANK': 1000
+};
+
+function renderBigTrades(bt) {
+  const zone     = document.getElementById('bigTradeZone');
+  const statusEl = document.getElementById('bigTradeStatus');
+  const auditEl  = document.getElementById('bigTradeAudit');
+  if (!zone || !bt) return;
+
+  const data  = bt.data  || {};
+  const audit = bt.audit || {};
+
+  const stocks = BT_LEADER_STOCKS.filter(s => data[s] && data[s].length > 0);
+
+  if (!stocks.length) {
+    zone.innerHTML = '<div style="color:#777;padding:10px 4px;">No big trade qty data yet.</div>';
+    if (statusEl) { statusEl.textContent = 'No qty data yet'; statusEl.className = 'badge yellow'; }
+    updateBigTradeAudit(auditEl, audit);
+    return;
+  }
+
+  const stockRows = {};
+  stocks.forEach(s => { stockRows[s] = (data[s] || []).slice(0, 10); });
+
+  let html = `<table style="width:100%;border-collapse:collapse;min-width:500px;">
+    <thead><tr style="background:#0d1117;">`;
+  stocks.forEach(s => {
+    html += `<th style="text-align:center;padding:5px 4px;color:#4caf50;font-size:11px;white-space:nowrap;">${s}</th>`;
+  });
+  html += `</tr></thead><tbody>`;
+
+  for (let i = 0; i < 10; i++) {
+    html += `<tr>`;
+    stocks.forEach(s => {
+      const row  = stockRows[s][i];
+      const prev = stockRows[s][i + 1];
+      if (!row) { html += `<td style="text-align:center;color:#555;padding:4px;">—</td>`; return; }
+
+      let bg = 'transparent';
+      if (prev && row.qty > prev.qty && row.qty >= (BT_THRESHOLDS[s] || 1000)) {
+        if (row.ltp > prev.ltp)      bg = '#1a3d1a';
+        else if (row.ltp < prev.ltp) bg = '#3d1a1a';
+      }
+
+      html += `<td style="text-align:center;background:${bg};padding:4px 2px;font-size:11px;border-bottom:1px solid #21262d;">
+        <span style="color:#c9d1d9;">${row.time}</span><br>
+        <span style="color:#fff;font-weight:bold;">(${row.qty})</span>
+      </td>`;
+    });
+    html += `</tr>`;
+  }
+
+  html += `</tbody></table>`;
+  zone.innerHTML = html;
+
+  if (statusEl) { statusEl.textContent = `Live (${stocks.length} stocks)`; statusEl.className = 'badge green'; }
+  updateBigTradeAudit(auditEl, audit);
+}
+
+function updateBigTradeAudit(el, audit) {
+  if (!el || audit.scanned == null) return;
+  el.innerHTML =
+    `Recent scan: ${audit.scanned} rows | Qty rows: ${audit.qtyRows} | Tracked qty: ${audit.trackedQty} | Tracked today qty: ${audit.trackedTodayQty}<br>` +
+    `<span style="color:#f85149;">${audit.sampleText || ''}</span>`;
+}
+
+function dbCheck() {
+  fetch('/api/big-trades/check', { method: 'POST' })
+    .then(r => r.json())
+    .then(audit => updateBigTradeAudit(document.getElementById('bigTradeAudit'), audit));
+}
+
+let bigTradeVisible = true;
+function toggleBigTrades() {
+  const zone    = document.getElementById('bigTradeZone');
+  const auditEl = document.getElementById('bigTradeAudit');
+  const btn     = document.getElementById('btnBigTrade');
+  bigTradeVisible = !bigTradeVisible;
+  zone.style.display    = bigTradeVisible ? '' : 'none';
+  auditEl.style.display = bigTradeVisible ? '' : 'none';
+  btn.textContent = bigTradeVisible ? '▼' : '▶';
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────

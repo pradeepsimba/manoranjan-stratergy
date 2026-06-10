@@ -93,6 +93,21 @@ public class SchedulerService {
         new Thread(this::loadHistorical, "hist-refresh").start();
     }
 
+    // Refresh big trades cache every 5 seconds
+    @Scheduled(fixedRate = 5000)
+    public void refreshBigTrades() {
+        try {
+            Map<String, List<Map<String, Object>>> btData = dbService.getBigTradesData(state.selectedInterval);
+            Map<String, Object> btAudit = dbService.auditStockQtyStorage(200);
+            Map<String, Object> snap = new LinkedHashMap<>();
+            snap.put("data",  btData);
+            snap.put("audit", btAudit);
+            state.bigTradesSnapshot = snap;
+        } catch (Exception e) {
+            System.err.println("BigTrades refresh error: " + e.getMessage());
+        }
+    }
+
     private String buildDashboardJson() throws Exception {
         Map<String, Object> payload = new LinkedHashMap<>();
 
@@ -259,6 +274,10 @@ public class SchedulerService {
         // Today's trades
         List<Trade> trades = dbService.getTodayTrades();
         payload.put("trades", trades);
+
+        // Big trades (from 5s cache)
+        if (state.bigTradesSnapshot != null)
+            payload.put("bigTrades", state.bigTradesSnapshot);
 
         return MAPPER.writeValueAsString(payload);
     }
