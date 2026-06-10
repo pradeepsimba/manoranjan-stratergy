@@ -116,13 +116,22 @@ public class IndicatorEngine {
         if (range == 0) return null;
         double upper = c.isBullish() ? c.high - c.close : c.high - c.open;
         double lower = c.isBullish() ? c.open - c.low  : c.close - c.low;
-        if (c.isBullish() && lower >= 2 * body && upper < body * 0.3 && prev.isBearish()) return "Hammer (Bull)";
-        if (c.isBearish() && upper >= 2 * body && lower < body * 0.3 && prev.isBullish()) return "Shooting Star (Bear)";
-        if (c.isBullish() && prev.isBearish() && c.open < prev.close && c.close > prev.open) return "Bull Engulfing";
-        if (c.isBearish() && prev.isBullish() && c.open > prev.close && c.close < prev.open) return "Bear Engulfing";
-        if (c2 != null && c2.isBearish() && prev.body() < c2.body() * 0.3 && c.isBullish()
+        double prevBody = prev.body();
+        // Hammer: long lower wick (≥2×body), small upper wick (≤50% body), small real body vs range
+        if (c.isBullish() && lower >= 2 * body && upper <= body * 0.5 && body / range < 0.4 && prev.isBearish())
+            return "Hammer (Bull)";
+        // Shooting Star: long upper wick (≥2×body), small lower wick (≤50% body), small real body vs range
+        if (c.isBearish() && upper >= 2 * body && lower <= body * 0.5 && body / range < 0.4 && prev.isBullish())
+            return "Shooting Star (Bear)";
+        // Engulfing: current body must be ≥90% of previous body size
+        if (c.isBullish() && prev.isBearish() && c.open <= prev.close && c.close >= prev.open
+                && body > prevBody * 0.9) return "Bull Engulfing";
+        if (c.isBearish() && prev.isBullish() && c.open >= prev.close && c.close <= prev.open
+                && body > prevBody * 0.9) return "Bear Engulfing";
+        // Morning/Evening Star: middle candle must be small (≤40% of first candle body)
+        if (c2 != null && c2.isBearish() && prev.body() <= c2.body() * 0.4 && c.isBullish()
                 && c.close > (c2.open + c2.close) / 2) return "Morning Star (Bull)";
-        if (c2 != null && c2.isBullish() && prev.body() < c2.body() * 0.3 && c.isBearish()
+        if (c2 != null && c2.isBullish() && prev.body() <= c2.body() * 0.4 && c.isBearish()
                 && c.close < (c2.open + c2.close) / 2) return "Evening Star (Bear)";
         return null;
     }
@@ -179,16 +188,17 @@ public class IndicatorEngine {
             if (ind.emaStack.bearish) bear += 2;
         }
 
-        // Candlestick pattern scoring from leader stocks (max +1 per side)
+        // Candlestick pattern scoring from leader stocks (+2 when ≥2 patterns align)
         if (ind.leaderPat != null) {
-            bull += Math.min(1.0, ind.leaderPat.bullCount * 0.5);
-            bear += Math.min(1.0, ind.leaderPat.bearCount * 0.5);
+            if (ind.leaderPat.bullCount >= 2) bull += 2;
+            if (ind.leaderPat.bearCount >= 2) bear += 2;
         }
+        // Over-extended EMA penalty: adds pressure to the opposite side
         if (ind.emaStack != null && !bnCandles.isEmpty()) {
             double price = bnCandles.get(bnCandles.size() - 1).close;
             if (ind.emaStack.ema20 > 0) {
                 double ext = Math.abs(price - ind.emaStack.ema20) / ind.emaStack.ema20 * 100;
-                if (ext > 1.2) { if (price > ind.emaStack.ema20) bull -= 0.5; else bear -= 0.5; }
+                if (ext > 1.2) { if (price > ind.emaStack.ema20) bear += 0.5; else bull += 0.5; }
             }
         }
         ind.bull    = Math.max(0, bull);
@@ -200,25 +210,32 @@ public class IndicatorEngine {
 
     // ── Sideways filter ───────────────────────────────────────────────────────────
 
+    // Uses close-to-close range of last 5 candles (not high-low), matching original logic
     public static Double sidewaysRange(List<Candle> candles) {
         if (candles == null || candles.size() < 5) return null;
         int start = candles.size() - 5;
-        double hi = candles.get(start).high, lo = candles.get(start).low;
+        double hi = candles.get(start).close, lo = candles.get(start).close;
         for (int i = start + 1; i < candles.size(); i++) {
-            if (candles.get(i).high > hi) hi = candles.get(i).high;
-            if (candles.get(i).low  < lo) lo = candles.get(i).low;
+            if (candles.get(i).close > hi) hi = candles.get(i).close;
+            if (candles.get(i).close < lo) lo = candles.get(i).close;
         }
         return hi - lo;
     }
 
     // ── Momentum ─────────────────────────────────────────────────────────────────
 
-    static double atrThreshold(List<Candle> candles) {
-        if (candles.size() < 5) return 999;
-        double atr = 0;
-        int n = Math.min(5, candles.size() - 1);
-        for (int i = candles.size() - n; i < candles.size(); i++) atr += candles.get(i).range();
-        return 0.5 * (atr / n);
+    // 10-period True Range ATR (max of H-L, |H-prevC|, |L-prevC|)
+    static double calcATR(List<Candle> candles, int period) {
+        if (candles.size() < period + 1) return -1;
+        double sum = 0;
+        for (int i = candles.size() - period; i < candles.size(); i++) {
+            Candle c = candles.get(i), prev = candles.get(i - 1);
+            double tr = Math.max(c.high - c.low,
+                       Math.max(Math.abs(c.high - prev.close),
+                                Math.abs(c.low  - prev.close)));
+            sum += tr;
+        }
+        return sum / period;
     }
 
     public record MomentumResult(boolean ok, String reason) {}
@@ -227,14 +244,25 @@ public class IndicatorEngine {
         if (candles == null || candles.size() < 2) return new MomentumResult(false, "No candles");
         Candle c1 = candles.get(candles.size() - 1);
         Candle c2 = candles.get(candles.size() - 2);
-        double momPts  = switch (interval) { case "3m" -> 20; case "5m" -> 25; case "15m" -> 40; default -> 15; };
-        double atrThr  = atrThreshold(candles);
-        double c1Move  = c1.close - c1.open, c2Move = c2.close - c2.open;
-        double c1Abs   = Math.abs(c1Move), c2Abs = Math.abs(c2Move);
-        if (c1Abs >= momPts * 0.8) return new MomentumResult(true, String.format("C1=%.1f pts", c1Abs));
-        if (Math.signum(c1Move) == Math.signum(c2Move) && c1Abs + c2Abs >= momPts)
+        double fixed = switch (interval) { case "3m" -> 20; case "5m" -> 28; case "15m" -> 50; default -> 15; };
+        double atr = calcATR(candles, 10);
+        // Dynamically lower threshold using ATR (makes it easier in choppy markets)
+        double threshold = fixed;
+        if (atr > 0) {
+            double atrThr = atr * 0.7;
+            threshold = Math.min(fixed, Math.max(atrThr, fixed * 0.6));
+        }
+        double c1Move = c1.close - c1.open, c2Move = c2.close - c2.open;
+        double c1Abs  = Math.abs(c1Move), c2Abs = Math.abs(c2Move);
+        // Case A: single candle ≥ 80% of (dynamic) threshold
+        if (c1Abs >= threshold * 0.8)
+            return new MomentumResult(true, String.format("C1=%.1f pts", c1Abs));
+        // Case B: two same-direction candles combined ≥ threshold
+        if (Math.signum(c1Move) == Math.signum(c2Move) && c1Abs + c2Abs >= threshold)
             return new MomentumResult(true, String.format("2C=%.1f+%.1f pts", c1Abs, c2Abs));
-        if (c1Abs >= atrThr) return new MomentumResult(true, String.format("ATR=%.1f C1=%.1f", atrThr, c1Abs));
-        return new MomentumResult(false, String.format("Weak: C1=%.1f need>=%.0f", c1Abs, momPts * 0.8));
+        // Case C: ATR-based gate — c1 ≥ 50% of raw ATR AND ≥ 60% of fixed threshold
+        if (atr > 0 && c1Abs >= atr * 0.5 && c1Abs >= fixed * 0.6)
+            return new MomentumResult(true, String.format("ATR=%.1f C1=%.1f", atr, c1Abs));
+        return new MomentumResult(false, String.format("Weak: C1=%.1f need>=%.0f", c1Abs, threshold * 0.8));
     }
 }

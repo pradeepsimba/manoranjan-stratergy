@@ -74,13 +74,16 @@ public class TickFeedService {
         public void onOpen(WebSocket webSocket) {
             state.wsStatus = "WS Connected";
             try {
+                // Subscribe to 1m, 5m, 15m simultaneously for multi-frame candle view
                 List<Map<String, String>> filters = new ArrayList<>();
                 for (AppConfig.Stock s : AppConfig.STOCKS) {
-                    Map<String, String> f = new LinkedHashMap<>();
-                    f.put("stock_symbol", s.symbol());
-                    f.put("stockname",    s.name());
-                    f.put("interval",     state.selectedInterval);
-                    filters.add(f);
+                    for (String iv : List.of("1m", "5m", "15m")) {
+                        Map<String, String> f = new LinkedHashMap<>();
+                        f.put("stock_symbol", s.symbol());
+                        f.put("stockname",    s.name());
+                        f.put("interval",     iv);
+                        filters.add(f);
+                    }
                 }
                 Map<String, Object> init = new LinkedHashMap<>();
                 init.put("type",       "LIVE_FEED_INIT");
@@ -153,14 +156,18 @@ public class TickFeedService {
             if (sm.find()) sellQty = Long.parseLong(sm.group(1));
         }
 
-        // Only process the selected interval
+        Candle candle = new Candle(startTime, open, close, high, low, volume);
+
+        // Update multi-frame candles for ALL intervals (1m, 5m, 15m)
+        if (!interval.isEmpty() && !symbol.isEmpty()) {
+            updateAllIntervalCandles(symbol, interval, candle);
+        }
+
+        // Everything below is selected-interval-only (trading engine)
         if (!interval.equals(state.selectedInterval)) return;
 
-        // Update candle in AppState
-        Candle candle = new Candle(startTime, open, close, high, low, volume);
         updateLastNCandles(symbol, candle);
 
-        // Update minute qty for leader stocks
         double qty = buyQty + sellQty;
         if (!stockname.isEmpty()) {
             state.latestMinuteQty.put(stockname, qty);
@@ -168,21 +175,33 @@ public class TickFeedService {
             state.latestSellQty.put(stockname, sellQty);
         }
 
-        // Track live BN LTP for accurate entry pricing
         if (AppConfig.INDEX_SYMBOL.equals(symbol) && ltp > 0) {
             state.bnLTP = ltp;
         }
 
-        // Persist tick
         if (ltp > 0 && !stockname.isEmpty()) {
             dbService.addStockRecord(stockname, startTime, ltp, qty);
         }
 
-        // Trigger exit check on every BN tick
         if (AppConfig.INDEX_SYMBOL.equals(symbol)) {
             tradeEngine.checkExit();
             tradeEngine.checkTradeEntryAsync();
         }
+    }
+
+    private void updateAllIntervalCandles(String symbol, String interval, Candle candle) {
+        state.allIntervalCandles
+            .computeIfAbsent(interval, k -> new java.util.concurrent.ConcurrentHashMap<>())
+            .compute(symbol, (k, list) -> {
+                if (list == null) list = new ArrayList<>();
+                if (!list.isEmpty() && list.get(list.size() - 1).startTime.equals(candle.startTime)) {
+                    list.set(list.size() - 1, candle); // update in-progress candle
+                } else {
+                    list.add(candle);
+                    if (list.size() > 5) list.remove(0); // keep 5 candles per interval
+                }
+                return list;
+            });
     }
 
     private void updateLastNCandles(String symbol, Candle candle) {

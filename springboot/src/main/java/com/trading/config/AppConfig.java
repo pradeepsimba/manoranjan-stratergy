@@ -66,12 +66,12 @@ public final class AppConfig {
     public static final Map<String, Integer> STOCK_QTY_THRESHOLD;
     static {
         STOCK_QTY_THRESHOLD = new LinkedHashMap<>();
-        STOCK_QTY_THRESHOLD.put("HDFC BANK",           1000);
-        STOCK_QTY_THRESHOLD.put("ICICI BANK",          1000);
-        STOCK_QTY_THRESHOLD.put("AXIS BANK",           1000);
-        STOCK_QTY_THRESHOLD.put("STATE BANK OF INDIA", 1000);
-        STOCK_QTY_THRESHOLD.put("KOTAK MAHINDRA BANK", 1000);
-        STOCK_QTY_THRESHOLD.put("INDUSIND BANK",       1000);
+        STOCK_QTY_THRESHOLD.put("HDFC BANK",           2000);
+        STOCK_QTY_THRESHOLD.put("ICICI BANK",          2000);
+        STOCK_QTY_THRESHOLD.put("AXIS BANK",            900);
+        STOCK_QTY_THRESHOLD.put("STATE BANK OF INDIA", 1200);
+        STOCK_QTY_THRESHOLD.put("KOTAK MAHINDRA BANK", 1500);
+        STOCK_QTY_THRESHOLD.put("INDUSIND BANK",        600);
     }
 
     public static final int MARKET_OPEN_HOUR   = 9;

@@ -47,15 +47,22 @@ public class SchedulerService {
                 }
                 System.out.println("Loaded " + bnCandles.size() + " BN indicator candles");
             }
-            // Display candles for all stocks
+            // Display candles for all stocks (selected interval)
             Map<String, List<Candle>> data = historicalService.fetchHistorical(interval, state.numCandles, state.candleOffset);
             data.forEach((sym, candles) -> state.lastNCandles.put(sym, new ArrayList<>(candles)));
             System.out.println("Loaded historical candles for " + data.size() + " stocks");
             state.apiStatus = "API OK";
 
-            // Load 5m and 15m candles (30 bars each) for S/R detection
+            // Load 5m and 15m candles (30 bars) for S/R — also seeds allIntervalCandles
             loadSRCandles("5m",  state.sr5m);
             loadSRCandles("15m", state.sr15m);
+
+            // Load 1m display candles (5 bars) for multi-frame view
+            loadIntervalCandles("1m");
+            // Also seed the selected interval into allIntervalCandles if not 5m/15m
+            if (!interval.equals("5m") && !interval.equals("15m")) {
+                loadIntervalCandles(interval);
+            }
         } catch (Exception e) {
             System.err.println("Initial load error: " + e.getMessage());
             state.apiStatus = "API Error";
@@ -65,14 +72,35 @@ public class SchedulerService {
     private void loadSRCandles(String interval, Map<String, AppState.SRLevels> dest) {
         try {
             Map<String, List<Candle>> srData = historicalService.fetchHistorical(interval, 30, 0);
+
+            // Seed allIntervalCandles with the last 5 candles per stock from this fetch
+            Map<String, List<Candle>> ivMap = state.allIntervalCandles
+                .computeIfAbsent(interval, k -> new java.util.concurrent.ConcurrentHashMap<>());
+
             srData.forEach((sym, candles) -> {
+                // S/R detection
                 AppConfig.STOCKS.stream()
                     .filter(s -> s.symbol().equals(sym)).findFirst()
                     .ifPresent(s -> dest.put(s.name(), SupportResistanceEngine.detect(candles)));
+                // Multi-frame display (last 5 candles)
+                int from = Math.max(0, candles.size() - 5);
+                ivMap.put(sym, new ArrayList<>(candles.subList(from, candles.size())));
             });
-            System.out.println("Loaded SR levels for " + interval + " (" + dest.size() + " stocks)");
+            System.out.println("Loaded SR+display for " + interval + " (" + dest.size() + " stocks)");
         } catch (Exception e) {
             System.err.println("SR load error (" + interval + "): " + e.getMessage());
+        }
+    }
+
+    private void loadIntervalCandles(String interval) {
+        try {
+            Map<String, List<Candle>> data = historicalService.fetchHistorical(interval, 5, 0);
+            Map<String, List<Candle>> ivMap = state.allIntervalCandles
+                .computeIfAbsent(interval, k -> new java.util.concurrent.ConcurrentHashMap<>());
+            data.forEach((sym, candles) -> ivMap.put(sym, new ArrayList<>(candles)));
+            System.out.println("Loaded " + interval + " display candles (" + data.size() + " stocks)");
+        } catch (Exception e) {
+            System.err.println("Interval candles load error (" + interval + "): " + e.getMessage());
         }
     }
 
@@ -208,6 +236,10 @@ public class SchedulerService {
             payload.put("entryDiag", diagMap);
         }
 
+        // ── Multi-frame stock candle table (1m / 5m / 15m side-by-side) ──────────────
+        payload.put("stocksMultiFrame",  buildMultiFrameStocks());
+        payload.put("multiFrameCounts",  buildMultiFrameCounts());
+
         // Stock candles table — last 3 candles with diff per candle (matching screenshot)
         List<Map<String, Object>> stocks = new ArrayList<>();
         for (AppConfig.Stock s : AppConfig.STOCKS) {
@@ -280,6 +312,96 @@ public class SchedulerService {
             payload.put("bigTrades", state.bigTradesSnapshot);
 
         return MAPPER.writeValueAsString(payload);
+    }
+
+    private static final List<String> DISPLAY_INTERVALS = List.of("1m", "5m", "15m");
+
+    /** Per-stock rows: name, symbol, frames{1m:[{time,diff},{time,diff}], 5m:…, 15m:…}, buyQty, sellQty */
+    private List<Map<String, Object>> buildMultiFrameStocks() {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (AppConfig.Stock s : AppConfig.STOCKS) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("name",   s.name());
+            row.put("symbol", s.symbol());
+
+            Map<String, List<Map<String, Object>>> frames = new LinkedHashMap<>();
+            for (String iv : DISPLAY_INTERVALS) {
+                Map<String, List<Candle>> ivMap = state.allIntervalCandles.get(iv);
+                List<Candle> candles = ivMap != null ? ivMap.get(s.symbol()) : null;
+                List<Map<String, Object>> cells = new ArrayList<>();
+                for (int pos = 0; pos < 2; pos++) { // Latest (pos=0) and Previous (pos=1)
+                    int idx = candles != null ? candles.size() - 1 - pos : -1;
+                    if (idx >= 0) {
+                        Candle c = candles.get(idx);
+                        double diff = Math.round((c.close - c.open) * 100.0) / 100.0;
+                        String t = c.startTime != null && c.startTime.length() >= 16
+                            ? c.startTime.substring(11, 16) : "";
+                        Map<String, Object> cell = new LinkedHashMap<>();
+                        cell.put("time", t);
+                        cell.put("diff", diff);
+                        cells.add(cell);
+                    } else {
+                        Map<String, Object> cell = new LinkedHashMap<>();
+                        cell.put("time", "");
+                        cell.put("diff", 0.0);
+                        cell.put("missing", true);
+                        cells.add(cell);
+                    }
+                }
+                frames.put(iv, cells);
+            }
+
+            row.put("frames",  frames);
+            row.put("buyQty",  state.latestBuyQty.getOrDefault(s.name(), 0L));
+            row.put("sellQty", state.latestSellQty.getOrDefault(s.name(), 0L));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /** Per-interval column summaries: {1m:[{label,time,green,red,neutral},{…}], 5m:…, 15m:…} */
+    private Map<String, List<Map<String, Object>>> buildMultiFrameCounts() {
+        Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+        for (String iv : DISPLAY_INTERVALS) {
+            Map<String, List<Candle>> ivMap = state.allIntervalCandles.get(iv);
+            int[] g = {0, 0}, r = {0, 0}, ne = {0, 0};
+            String[] times = {"", ""};
+
+            if (ivMap != null) {
+                for (AppConfig.Stock s : AppConfig.STOCKS) {
+                    List<Candle> candles = ivMap.get(s.symbol());
+                    for (int pos = 0; pos < 2; pos++) {
+                        int idx = candles != null ? candles.size() - 1 - pos : -1;
+                        if (idx >= 0) {
+                            Candle c = candles.get(idx);
+                            if (c.close > c.open) g[pos]++;
+                            else if (c.close < c.open) r[pos]++;
+                            else ne[pos]++;
+                            // Use BANKNIFTY candle time for the column header
+                            if (times[pos].isEmpty() && AppConfig.INDEX_SYMBOL.equals(s.symbol())
+                                    && c.startTime != null && c.startTime.length() >= 16)
+                                times[pos] = c.startTime.substring(11, 16);
+                        } else {
+                            ne[pos]++;
+                        }
+                    }
+                }
+            }
+
+            List<Map<String, Object>> cols = new ArrayList<>();
+            String[] labels = {"Latest", "Previous"};
+            for (int pos = 0; pos < 2; pos++) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("label",   labels[pos]);
+                m.put("time",    times[pos]);
+                m.put("green",   g[pos]);
+                m.put("red",     r[pos]);
+                m.put("neutral", ne[pos]);
+                cols.add(m);
+            }
+            result.put(iv, cols);
+        }
+        return result;
     }
 
     private Map<String, Object> buildIndicatorMap(BNIndicators ind) {

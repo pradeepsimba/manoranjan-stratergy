@@ -49,7 +49,7 @@ function render(d) {
 
   renderIndicators(d.bnIndicators);
   renderEntryChecks(d.entryDiag);
-  renderStocks(d.stocks || [], d.candleCounts || []);
+  renderStocks(d.stocksMultiFrame || [], d.multiFrameCounts || {});
   renderTrades(d.trades || []);
   renderSR(d.srLevels || []);
   if (d.bigTrades) renderBigTrades(d.bigTrades);
@@ -349,50 +349,81 @@ function renderEntryChecks(diag) {
   panel.innerHTML = html;
 }
 
-// ── Stock candles — 3-candle diff table matching screenshot ──────────────────
+// ── Stock candles — multi-frame (1m / 5m / 15m) side-by-side ────────────────
 
-function renderStocks(stocks, candleCounts) {
+const MF_INTERVALS = ['1m', '5m', '15m'];
+
+function renderStocks(stocks, counts) {
   const thead = document.getElementById('stocks-thead');
   const tbody = document.getElementById('stocks-tbody');
   if (!thead || !tbody) return;
 
-  const colLabels = ['Latest', 'Previous', 'PrevPrev'];
+  // ── Header row 1: interval group labels ──────────────────────────────────
+  let h1 = `<tr>
+    <th rowspan="3" style="vertical-align:middle;text-align:left;color:#4caf50;font-size:12px;padding:5px 8px;white-space:nowrap;">Stock (o-c)</th>`;
+  MF_INTERVALS.forEach(iv => {
+    h1 += `<th colspan="2" style="text-align:center;color:#58a6ff;padding:4px 6px;font-size:12px;border-left:2px solid #30363d;">${iv}</th>`;
+  });
+  h1 += `<th rowspan="3" style="vertical-align:middle;text-align:center;color:#3fb950;font-size:11px;white-space:nowrap;padding:5px 4px;">BuyQty</th>
+          <th rowspan="3" style="vertical-align:middle;text-align:center;color:#f85149;font-size:11px;white-space:nowrap;padding:5px 4px;">SellQty</th>
+         </tr>`;
 
-  // Build dynamic header (2 rows: label+time, then g/r/n counts)
-  const cc = candleCounts.length ? candleCounts : colLabels.map(l => ({ label: l, time: '', green: 0, red: 0, neutral: 0 }));
-  thead.innerHTML = `
-    <tr>
-      <th rowspan="2" style="vertical-align:middle;text-align:left;color:#4caf50;font-size:12px;padding:5px 8px;">Stock Name</th>
-      ${cc.map(c => `<th style="text-align:center;color:#c9d1d9;padding:4px 6px;font-size:11px;">
-        ${c.label} (o-c)<br><span style="color:#8b949e;font-size:10px;">(${c.time || '—'})</span>
-      </th>`).join('')}
-      <th rowspan="2" style="vertical-align:middle;text-align:center;color:#c9d1d9;font-size:11px;padding:5px 6px;">BuyQtyPending</th>
-      <th rowspan="2" style="vertical-align:middle;text-align:center;color:#c9d1d9;font-size:11px;padding:5px 6px;">SellQtyPending</th>
-    </tr>
-    <tr>
-      ${cc.map(c => `<th style="text-align:center;color:#8b949e;font-weight:normal;font-size:10px;padding:2px 6px;">
-        <span style="color:#3fb950;">g:${c.green}</span> <span style="color:#f85149;">r:${c.red}</span> <span style="color:#8b949e;">n:${c.neutral}</span>
-      </th>`).join('')}
-    </tr>`;
+  // ── Header row 2: Latest / Previous labels + candle time ─────────────────
+  let h2 = `<tr>`;
+  MF_INTERVALS.forEach(iv => {
+    const ivC = (counts[iv] || []);
+    for (let pos = 0; pos < 2; pos++) {
+      const col = ivC[pos] || {};
+      const bl  = pos === 0 ? 'border-left:2px solid #30363d;' : '';
+      h2 += `<th style="${bl}text-align:center;color:#c9d1d9;padding:3px 4px;font-size:10px;">
+        ${col.label || (pos === 0 ? 'Latest' : 'Prev')}<br>
+        <span style="color:#8b949e;">${col.time ? '(' + col.time + ')' : '–'}</span>
+      </th>`;
+    }
+  });
+  h2 += `</tr>`;
 
-  // Build rows
-  tbody.innerHTML = stocks.map(s => {
-    const c3 = s.c3 || [];
-    const cells = c3.map(c => {
-      const bg  = c.diff > 0 ? '#1a5c2a' : c.diff < 0 ? '#5c1a1a' : '#21262d';
-      const clr = c.diff > 0 ? '#3fb950' : c.diff < 0 ? '#f85149' : '#8b949e';
-      const txt = c.diff > 0 ? '+' + c.diff.toFixed(2) : c.diff.toFixed(2);
-      return `<td style="text-align:center;background:${bg};color:${clr};font-weight:bold;padding:5px 6px;">${txt}</td>`;
-    }).join('');
-    // Pad missing candle cells
-    const pad = Array(Math.max(0, 3 - c3.length)).fill('<td style="text-align:center;color:#555;">—</td>').join('');
+  // ── Header row 3: g/r/n counts per column ────────────────────────────────
+  let h3 = `<tr>`;
+  MF_INTERVALS.forEach(iv => {
+    const ivC = (counts[iv] || []);
+    for (let pos = 0; pos < 2; pos++) {
+      const col = ivC[pos] || {};
+      const bl  = pos === 0 ? 'border-left:2px solid #30363d;' : '';
+      h3 += `<th style="${bl}text-align:center;font-weight:normal;padding:2px 4px;font-size:10px;">
+        <span style="color:#3fb950;">g:${col.green||0}</span>&nbsp;<span style="color:#f85149;">r:${col.red||0}</span>&nbsp;<span style="color:#8b949e;">n:${col.neutral||0}</span>
+      </th>`;
+    }
+  });
+  h3 += `</tr>`;
+
+  thead.innerHTML = h1 + h2 + h3;
+
+  // ── Body rows ─────────────────────────────────────────────────────────────
+  tbody.innerHTML = (stocks || []).map(s => {
+    let cells = '';
+    MF_INTERVALS.forEach(iv => {
+      const frame = (s.frames && s.frames[iv]) || [];
+      for (let pos = 0; pos < 2; pos++) {
+        const cell = frame[pos];
+        const bl = pos === 0 ? 'border-left:2px solid #30363d;' : '';
+        if (!cell || cell.missing) {
+          cells += `<td style="${bl}text-align:center;color:#555;padding:4px 3px;">–</td>`;
+        } else {
+          const bg  = cell.diff > 0 ? '#1a5c2a' : cell.diff < 0 ? '#5c1a1a' : '#21262d';
+          const clr = cell.diff > 0 ? '#3fb950' : cell.diff < 0 ? '#f85149' : '#8b949e';
+          const txt = cell.diff > 0 ? '+' + cell.diff.toFixed(2) : cell.diff.toFixed(2);
+          cells += `<td style="${bl}text-align:center;background:${bg};color:${clr};font-weight:bold;padding:4px 3px;">${txt}</td>`;
+        }
+      }
+    });
     const buyColor  = s.buyQty  > 0 ? '#3fb950' : '#8b949e';
     const sellColor = s.sellQty > 0 ? '#f85149' : '#8b949e';
     return `<tr>
-      <td style="color:#c9d1d9;white-space:nowrap;padding:5px 8px;">${s.name} <span style="color:#444;font-size:10px;">(${s.symbol})</span></td>
-      ${cells}${pad}
-      <td style="text-align:center;color:${buyColor};padding:5px 6px;">${fmtLargeQty(s.buyQty)}</td>
-      <td style="text-align:center;color:${sellColor};padding:5px 6px;">${fmtLargeQty(s.sellQty)}</td>
+      <td style="color:#c9d1d9;white-space:nowrap;padding:5px 8px;">${s.name}<br><span style="color:#444;font-size:10px;">(${s.symbol})</span></td>
+      ${cells}
+      <td style="text-align:center;color:${buyColor};padding:4px 3px;">${fmtLargeQty(s.buyQty)}</td>
+      <td style="text-align:center;color:${sellColor};padding:4px 3px;">${fmtLargeQty(s.sellQty)}</td>
     </tr>`;
   }).join('');
 }
@@ -495,82 +526,102 @@ function fmtQty(n) {
 
 // ── Big Trades ────────────────────────────────────────────────────────────────
 
-const BT_LEADER_STOCKS = [
-  'HDFC BANK','ICICI BANK','AXIS BANK',
-  'STATE BANK OF INDIA','KOTAK MAHINDRA BANK','INDUSIND BANK'
+// All non-BANKNIFTY stocks in AppConfig order — show whichever have data
+const BT_ALL_STOCKS = [
+  'HDFC BANK','ICICI BANK','AXIS BANK','STATE BANK OF INDIA',
+  'KOTAK MAHINDRA BANK','INDUSIND BANK','AU SMALL FINANCE BANK',
+  'FEDERAL BANK','IDFC FIRST BANK','PUNJAB NATIONAL BANK','CANARA BANK'
 ];
+
+// Per-stock qty threshold for BUY/SELL signal coloring (same as c.html renderLast10Table)
 const BT_THRESHOLDS = {
   'HDFC BANK': 1000, 'ICICI BANK': 1000, 'AXIS BANK': 1000,
   'STATE BANK OF INDIA': 1000, 'KOTAK MAHINDRA BANK': 1000, 'INDUSIND BANK': 1000
 };
 
+function setBigTradeStatus(message, isFallback) {
+  const el = document.getElementById('bigTradeStatus');
+  if (!el) return;
+  el.textContent   = message;
+  el.style.color   = isFallback ? '#f6c453' : '#8fd3ff';
+  el.className     = ''; // remove badge class — match original inline style
+}
+
+function setBigTradeAudit(message) {
+  const el = document.getElementById('bigTradeAudit');
+  if (el) el.innerHTML = message;
+}
+
 function renderBigTrades(bt) {
-  const zone     = document.getElementById('bigTradeZone');
-  const statusEl = document.getElementById('bigTradeStatus');
-  const auditEl  = document.getElementById('bigTradeAudit');
+  const zone = document.getElementById('bigTradeZone');
   if (!zone || !bt) return;
 
   const data  = bt.data  || {};
   const audit = bt.audit || {};
 
-  const stocks = BT_LEADER_STOCKS.filter(s => data[s] && data[s].length > 0);
+  // Show all stocks (in AppConfig order) that have data — matches original BANK_NIFTY_STOCKS filter
+  const stocks = BT_ALL_STOCKS.filter(s => data[s] && data[s].length > 0);
 
   if (!stocks.length) {
     zone.innerHTML = '<div style="color:#777;padding:10px 4px;">No big trade qty data yet.</div>';
-    if (statusEl) { statusEl.textContent = 'No qty data yet'; statusEl.className = 'badge yellow'; }
-    updateBigTradeAudit(auditEl, audit);
+    setBigTradeStatus('No qty data yet', true);
+    updateBigTradeAudit(audit);
     return;
   }
 
+  // Each stock: top-10 buckets sorted newest-first (already sorted by server)
   const stockRows = {};
   stocks.forEach(s => { stockRows[s] = (data[s] || []).slice(0, 10); });
 
-  let html = `<table style="width:100%;border-collapse:collapse;min-width:500px;">
-    <thead><tr style="background:#0d1117;">`;
-  stocks.forEach(s => {
-    html += `<th style="text-align:center;padding:5px 4px;color:#4caf50;font-size:11px;white-space:nowrap;">${s}</th>`;
-  });
-  html += `</tr></thead><tbody>`;
+  // Table matching original: background:#1e1e1e, header row background:#222;color:#4caf50
+  let html = `<table style="width:100%;border-collapse:collapse;background:#1e1e1e;color:white;min-width:${stocks.length * 100}px;">
+    <tr style="background:#222;color:#4caf50;">`;
+  stocks.forEach(s => { html += `<th style="padding:4px 2px;text-align:center;font-size:11px;">${s}</th>`; });
+  html += `</tr>`;
 
   for (let i = 0; i < 10; i++) {
     html += `<tr>`;
     stocks.forEach(s => {
       const row  = stockRows[s][i];
       const prev = stockRows[s][i + 1];
-      if (!row) { html += `<td style="text-align:center;color:#555;padding:4px;">—</td>`; return; }
 
-      let bg = 'transparent';
-      if (prev && row.qty > prev.qty && row.qty >= (BT_THRESHOLDS[s] || 1000)) {
-        if (row.ltp > prev.ltp)      bg = '#1a3d1a';
-        else if (row.ltp < prev.ltp) bg = '#3d1a1a';
+      if (!row) { html += `<td style="text-align:center;color:#555;">–</td>`; return; }
+
+      // BUY/SELL signal: currQty > prevQty AND currQty >= threshold AND price direction
+      let signalColor = '';
+      if (prev) {
+        const threshold = BT_THRESHOLDS[s] || 999999;
+        if (row.qty > prev.qty && row.qty >= threshold) {
+          if (row.ltp > prev.ltp)      signalColor = '#39aa39'; // BUY
+          else if (row.ltp < prev.ltp) signalColor = '#c93535'; // SELL
+        }
       }
 
-      html += `<td style="text-align:center;background:${bg};padding:4px 2px;font-size:11px;border-bottom:1px solid #21262d;">
-        <span style="color:#c9d1d9;">${row.time}</span><br>
-        <span style="color:#fff;font-weight:bold;">(${row.qty})</span>
+      html += `<td style="text-align:center;background-color:${signalColor || 'transparent'};font-weight:bold;padding:4px 2px;">
+        ${row.time}<br><span style="color:white;">(${row.qty})</span>
       </td>`;
     });
     html += `</tr>`;
   }
 
-  html += `</tbody></table>`;
+  html += `</table>`;
   zone.innerHTML = html;
-
-  if (statusEl) { statusEl.textContent = `Live (${stocks.length} stocks)`; statusEl.className = 'badge green'; }
-  updateBigTradeAudit(auditEl, audit);
+  setBigTradeStatus(`Live (${stocks.length} stocks)`);
+  updateBigTradeAudit(audit);
 }
 
-function updateBigTradeAudit(el, audit) {
-  if (!el || audit.scanned == null) return;
-  el.innerHTML =
+function updateBigTradeAudit(audit) {
+  if (!audit || audit.scanned == null) return;
+  setBigTradeAudit(
     `Recent scan: ${audit.scanned} rows | Qty rows: ${audit.qtyRows} | Tracked qty: ${audit.trackedQty} | Tracked today qty: ${audit.trackedTodayQty}<br>` +
-    `<span style="color:#f85149;">${audit.sampleText || ''}</span>`;
+    `<span style="color:#f85149;">${audit.sampleText || 'No recent stock rows found in the last scan.'}</span>`
+  );
 }
 
 function dbCheck() {
   fetch('/api/big-trades/check', { method: 'POST' })
     .then(r => r.json())
-    .then(audit => updateBigTradeAudit(document.getElementById('bigTradeAudit'), audit));
+    .then(audit => updateBigTradeAudit(audit));
 }
 
 let bigTradeVisible = true;
@@ -581,7 +632,10 @@ function toggleBigTrades() {
   bigTradeVisible = !bigTradeVisible;
   zone.style.display    = bigTradeVisible ? '' : 'none';
   auditEl.style.display = bigTradeVisible ? '' : 'none';
-  btn.textContent = bigTradeVisible ? '▼' : '▶';
+  // Match original: ▼ when visible (open), ▲ when hidden (collapsed)
+  btn.textContent       = bigTradeVisible ? '▼' : '▲';
+  btn.style.color       = bigTradeVisible ? '#4caf50' : '#aaa';
+  btn.style.borderColor = bigTradeVisible ? '#4caf50' : '#aaa';
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────

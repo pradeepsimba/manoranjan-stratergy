@@ -106,7 +106,7 @@ public class DatabaseService {
             buckets.computeIfAbsent(stockname, k -> new LinkedHashMap<>())
                    .compute(bucket, (k, v) -> v == null
                        ? new double[]{qty, ltp}
-                       : new double[]{v[0] + qty, v[1]}); // sum qty, keep newest ltp
+                       : new double[]{v[0] + qty, ltp}); // sum qty, always overwrite ltp = oldest (open) price
         }
 
         Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();

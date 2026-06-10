@@ -11,8 +11,11 @@ public final class AppState {
     public static AppState get() { return INSTANCE; }
     private AppState() {}
 
-    // symbol → ordered list of candles (oldest first, newest last)
+    // symbol → ordered list of candles (oldest first, newest last) — selected interval only
     public final Map<String, List<Candle>> lastNCandles = new ConcurrentHashMap<>();
+
+    // Multi-frame candle store: interval → symbol → candles (oldest first, newest last, max 5)
+    public final Map<String, Map<String, List<Candle>>> allIntervalCandles = new ConcurrentHashMap<>();
 
     // BankNifty candles for indicator calculations (longer series)
     public final List<Candle> bnIndicatorCandles = Collections.synchronizedList(new ArrayList<>());
