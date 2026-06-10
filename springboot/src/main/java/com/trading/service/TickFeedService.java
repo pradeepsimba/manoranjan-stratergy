@@ -15,37 +15,69 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.util.*;
-import java.util.concurrent.CompletionStage;
+import java.util.concurrent.*;
+import java.util.regex.Pattern;
 
-/**
- * Connects to the upstream WebSocket tick feed and updates AppState.
- * Uses Java's built-in HttpClient WebSocket (no extra library needed).
- */
 @Service
 public class TickFeedService {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER   = new ObjectMapper();
+    private static final Pattern      LTP_PAT  = Pattern.compile("LTP\\s*([\\d.]+)");
+    private static final Pattern      BUY_PAT  = Pattern.compile("BuyQty (\\d+)");
+    private static final Pattern      SELL_PAT = Pattern.compile("SellQty (\\d+)");
+
     private final AppState state = AppState.get();
 
-    @Autowired private TradeEngine tradeEngine;
+    // WS I/O thread offers here; consumer thread processes — decouples IO from computation
+    private final LinkedBlockingQueue<JsonNode> tickQueue = new LinkedBlockingQueue<>(200_000);
+
+    @Autowired private TradeEngine     tradeEngine;
     @Autowired private DatabaseService dbService;
 
     private WebSocket ws;
     private volatile boolean running = false;
+    private Thread consumerThread;
 
     @PostConstruct
     public void start() {
         running = true;
+        consumerThread = new Thread(this::consumeTicks, "tick-consumer");
+        consumerThread.setDaemon(true);
+        consumerThread.start();
         new Thread(this::connect, "ws-feed").start();
     }
 
     @PreDestroy
     public void stop() {
         running = false;
+        if (consumerThread != null) consumerThread.interrupt();
         if (ws != null) {
             try { ws.sendClose(WebSocket.NORMAL_CLOSURE, "shutdown"); } catch (Exception ignored) {}
         }
     }
+
+    // ── Tick consumer ─────────────────────────────────────────────────────────────
+
+    private void consumeTicks() {
+        while (running) {
+            try {
+                JsonNode node = tickQueue.poll(500, TimeUnit.MILLISECONDS);
+                if (node != null) {
+                    processTick(node);
+                    // Drain any burst backlog without blocking
+                    JsonNode next;
+                    while ((next = tickQueue.poll()) != null) processTick(next);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                System.err.println("Tick consumer error: " + e.getMessage());
+            }
+        }
+    }
+
+    // ── WebSocket connection ──────────────────────────────────────────────────────
 
     private void connect() {
         try {
@@ -74,7 +106,6 @@ public class TickFeedService {
         public void onOpen(WebSocket webSocket) {
             state.wsStatus = "WS Connected";
             try {
-                // Subscribe to 1m, 5m, 15m simultaneously for multi-frame candle view
                 List<Map<String, String>> filters = new ArrayList<>();
                 for (AppConfig.Stock s : AppConfig.STOCKS) {
                     for (String iv : List.of("1m", "5m", "15m")) {
@@ -104,8 +135,9 @@ public class TickFeedService {
                 buf.setLength(0);
                 try {
                     JsonNode root = MAPPER.readTree(msg);
-                    if (root.isArray()) { for (JsonNode n : root) processTick(n); }
-                    else processTick(root);
+                    // Enqueue immediately — WS I/O thread is never blocked by processing
+                    if (root.isArray()) { for (JsonNode n : root) tickQueue.offer(n); }
+                    else tickQueue.offer(root);
                 } catch (Exception e) {
                     System.err.println("WS parse error: " + e.getMessage());
                 }
@@ -128,21 +160,23 @@ public class TickFeedService {
         }
     }
 
+    // ── Tick processing (runs on tick-consumer thread) ────────────────────────────
+
     private void processTick(JsonNode n) {
         String symbol    = n.has("stock_symbol") ? n.get("stock_symbol").asText() : "";
         String stockname = n.has("stockname")    ? n.get("stockname").asText()    : "";
         String interval  = n.has("interval")     ? n.get("interval").asText()     : "";
         String startTime = n.has("start_time")   ? n.get("start_time").asText()   : "";
-        double open      = n.has("open")         ? n.get("open").asDouble()        : 0;
-        double close     = n.has("close")        ? n.get("close").asDouble()       : 0;
-        double high      = n.has("high")         ? n.get("high").asDouble()        : 0;
-        double low       = n.has("low")          ? n.get("low").asDouble()         : 0;
-        double volume    = n.has("volume")       ? n.get("volume").asDouble()      : 0;
+        double open      = n.has("open")   ? n.get("open").asDouble()   : 0;
+        double close     = n.has("close")  ? n.get("close").asDouble()  : 0;
+        double high      = n.has("high")   ? n.get("high").asDouble()   : 0;
+        double low       = n.has("low")    ? n.get("low").asDouble()    : 0;
+        double volume    = n.has("volume") ? n.get("volume").asDouble() : 0;
 
         double ltp = 0;
         if (n.has("ltp")) {
             String ltpStr = n.get("ltp").asText();
-            var m = java.util.regex.Pattern.compile("LTP\\s*([\\d.]+)").matcher(ltpStr);
+            var m = LTP_PAT.matcher(ltpStr);
             try { ltp = m.find() ? Double.parseDouble(m.group(1)) : Double.parseDouble(ltpStr); }
             catch (NumberFormatException ignored) {}
         }
@@ -150,20 +184,18 @@ public class TickFeedService {
         long buyQty = 0, sellQty = 0;
         if (n.has("snap")) {
             String snap = n.get("snap").asText();
-            var bm = java.util.regex.Pattern.compile("BuyQty (\\d+)").matcher(snap);
-            var sm = java.util.regex.Pattern.compile("SellQty (\\d+)").matcher(snap);
+            var bm = BUY_PAT.matcher(snap);
+            var sm = SELL_PAT.matcher(snap);
             if (bm.find()) buyQty  = Long.parseLong(bm.group(1));
             if (sm.find()) sellQty = Long.parseLong(sm.group(1));
         }
 
         Candle candle = new Candle(startTime, open, close, high, low, volume);
 
-        // Update multi-frame candles for ALL intervals (1m, 5m, 15m)
         if (!interval.isEmpty() && !symbol.isEmpty()) {
             updateAllIntervalCandles(symbol, interval, candle);
         }
 
-        // Everything below is selected-interval-only (trading engine)
         if (!interval.equals(state.selectedInterval)) return;
 
         updateLastNCandles(symbol, candle);
@@ -171,16 +203,14 @@ public class TickFeedService {
         double qty = buyQty + sellQty;
         if (!stockname.isEmpty()) {
             state.latestMinuteQty.put(stockname, qty);
-            state.latestBuyQty.put(stockname, buyQty);
+            state.latestBuyQty.put(stockname,  buyQty);
             state.latestSellQty.put(stockname, sellQty);
         }
 
-        if (AppConfig.INDEX_SYMBOL.equals(symbol) && ltp > 0) {
-            state.bnLTP = ltp;
-        }
+        if (AppConfig.INDEX_SYMBOL.equals(symbol) && ltp > 0) state.bnLTP = ltp;
 
         if (ltp > 0 && !stockname.isEmpty()) {
-            dbService.addStockRecord(stockname, startTime, ltp, qty);
+            dbService.addStockRecord(stockname, startTime, ltp, qty); // non-blocking queue offer
         }
 
         if (AppConfig.INDEX_SYMBOL.equals(symbol)) {
@@ -191,14 +221,14 @@ public class TickFeedService {
 
     private void updateAllIntervalCandles(String symbol, String interval, Candle candle) {
         state.allIntervalCandles
-            .computeIfAbsent(interval, k -> new java.util.concurrent.ConcurrentHashMap<>())
+            .computeIfAbsent(interval, k -> new ConcurrentHashMap<>())
             .compute(symbol, (k, list) -> {
                 if (list == null) list = new ArrayList<>();
                 if (!list.isEmpty() && list.get(list.size() - 1).startTime.equals(candle.startTime)) {
-                    list.set(list.size() - 1, candle); // update in-progress candle
+                    list.set(list.size() - 1, candle);
                 } else {
                     list.add(candle);
-                    if (list.size() > 5) list.remove(0); // keep 5 candles per interval
+                    if (list.size() > 5) list.remove(0);
                 }
                 return list;
             });
@@ -208,7 +238,7 @@ public class TickFeedService {
         state.lastNCandles.compute(symbol, (k, list) -> {
             if (list == null) list = new ArrayList<>();
             if (!list.isEmpty() && list.get(list.size() - 1).startTime.equals(candle.startTime)) {
-                list.set(list.size() - 1, candle); // update in-progress candle
+                list.set(list.size() - 1, candle);
             } else {
                 list.add(candle);
                 if (list.size() > 200) list.remove(0);
@@ -216,7 +246,6 @@ public class TickFeedService {
             return list;
         });
 
-        // Also update bnIndicatorCandles for BANKNIFTY
         if (AppConfig.INDEX_SYMBOL.equals(symbol)) {
             synchronized (state.bnIndicatorCandles) {
                 var bn = state.bnIndicatorCandles;
