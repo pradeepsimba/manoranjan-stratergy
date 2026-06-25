@@ -8,7 +8,7 @@ public final class AppConfig {
 
     private AppConfig() {}
 
-    public static final String API_HOST          = "34.100.254.34";
+    public static final String API_HOST          = "35.234.219.141";
     public static final String API_URL_TEMPLATE  = "https://%s:8000/api/historical-data/?from_date=%s&to_date=%s";
     public static final String WS_URL            = "ws://" + API_HOST + ":8083/historical-data";
 

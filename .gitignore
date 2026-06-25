@@ -47,3 +47,5 @@ jpackage/
 # OS files
 .DS_Store
 Thumbs.db
+trading.db-shm
+trading.db-wal
