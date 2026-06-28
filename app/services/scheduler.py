@@ -297,9 +297,11 @@ class SchedulerService:
                     print(f"EOD square-off DB error ({symbol}): {e}")
 
         await self._mkt.stop()
-        positions = list(st.positions.values())
-        total     = len(positions)
-        winners   = sum(1 for p in positions if p.pnl > 0)
+
+        # All trades are now closed (square-off moved them to closed_positions).
+        trades  = st.closed_positions
+        total   = len(trades)
+        winners = sum(1 for p in trades if p.pnl > 0)
 
         try:
             await self._db.upsert_daily_stats(
@@ -317,6 +319,7 @@ class SchedulerService:
         )
 
         st.positions.clear()
+        st.closed_positions.clear()
         st.traded_today.clear()
         st.daily_pnl = 0.0
         st.ltp.clear()
@@ -374,10 +377,15 @@ class SchedulerService:
         st    = get_state()
         clock = _now().strftime("%H:%M:%S")
 
+        # Open positions (live P&L) followed by the day's closed trades (final P&L).
         positions_out = []
-        for sym, pos in st.positions.items():
-            ltp      = st.ltp.get(sym, pos.entry_price)
-            live_pnl = round((ltp - pos.entry_price) * pos.quantity, 2)
+        for pos in list(st.positions.values()) + st.closed_positions:
+            if pos.status == PositionStatus.OPEN:
+                ltp      = st.ltp.get(pos.symbol, pos.entry_price)
+                live_pnl = round((ltp - pos.entry_price) * pos.quantity, 2)
+            else:
+                ltp      = pos.exit_price if pos.exit_price is not None else pos.entry_price
+                live_pnl = pos.pnl
             positions_out.append({
                 "symbol":    pos.symbol,
                 "entry":     pos.entry_price,
@@ -386,7 +394,7 @@ class SchedulerService:
                 "sl":        pos.stop_loss,
                 "target":    pos.target,
                 "ltp":       ltp,
-                "livePnl":   live_pnl if pos.status == PositionStatus.OPEN else pos.pnl,
+                "livePnl":   live_pnl,
                 "status":    pos.status.value,
                 "orderId":   pos.order_id,
             })

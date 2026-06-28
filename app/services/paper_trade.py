@@ -58,7 +58,7 @@ def place_paper_order(
 
 
 def _finalize(pos: Position, exit_price: float, label: str) -> Position:
-    """Close a position at exit_price, record P&L, update daily P&L."""
+    """Close a position at exit_price, record P&L, and move it out of the open book."""
     st  = get_state()
     pnl = round((exit_price - pos.entry_price) * pos.quantity, 2)
 
@@ -68,6 +68,11 @@ def _finalize(pos: Position, exit_price: float, label: str) -> Position:
     pos.pnl        = pnl
 
     st.daily_pnl += pnl
+
+    # Move out of the open book so `positions` stays a true concurrent set.
+    # `traded_today` still blocks same-day re-entry.
+    st.positions.pop(pos.symbol, None)
+    st.closed_positions.append(pos)
 
     print(
         f"[PAPER] {label} {pos.symbol} @ {exit_price:.2f} | "

@@ -48,9 +48,13 @@ class AppState:
         self.nifty_ltp: float            = 0.0
 
         # ── Positions ─────────────────────────────────────────────────────────
-        self.positions:    Dict[str, Position] = {}   # symbol → Position
-        self.traded_today: Set[str]            = set()
-        self.daily_pnl:    float               = 0.0
+        # `positions` holds ONLY currently-open trades, so len() is a true
+        # concurrent count. Closed trades move to `closed_positions` for the
+        # day's log / dashboard.
+        self.positions:        Dict[str, Position] = {}   # symbol → OPEN Position
+        self.closed_positions: List[Position]      = []   # today's CLOSED trades
+        self.traded_today:     Set[str]            = set()
+        self.daily_pnl:        float               = 0.0
 
         # ── Scan diagnostics ──────────────────────────────────────────────────
         self.last_scan_results: Dict[str, dict]   = {}
