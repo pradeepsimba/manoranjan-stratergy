@@ -10,7 +10,7 @@ CLIENT_STATUS_URL = f"https://{API_HOST}:8000/api/clientstatus/"
 
 # ── Gemini AI pre-market filter ───────────────────────────────────────────────
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL      = "gemini-1.5-flash"
+GEMINI_MODEL      = "gemini-3.5-flash"
 GEMINI_MIN_STOCKS = 15
 GEMINI_MAX_STOCKS = 40
 

@@ -145,21 +145,22 @@ class SchedulerService:
             print("Client status returned empty list — check server")
             return
 
-        # Step 2: send list to Gemini for per-stock news/condition analysis
-        print(f"=== PRE-MARKET: Gemini analysing {len(full_watchlist)} stocks ===")
-        conditions = await analyse_stocks(list(full_watchlist.keys()))
+        # Step 2: grounded Gemini screen — names (not raw tokens) go to the AI,
+        # which returns a clean JSON array of BULLISH symbols.
+        print(f"=== PRE-MARKET: Gemini grounded screen of {len(full_watchlist)} stocks ===")
+        bullish = await analyse_stocks(list(full_watchlist.keys()))
 
-        if conditions:
-            # Keep only stocks Gemini rates as BULLISH
+        if bullish:
+            bullish_set = {s.upper() for s in bullish}
             filtered = {
                 name: tok
                 for name, tok in full_watchlist.items()
-                if conditions.get(name) == "BULLISH"
+                if name.upper() in bullish_set
             }
-            # Safety fallback: if Gemini finds nothing bullish, use full list
+            # If nothing matched after mapping back, fall back to the full list
             st.active_watchlist = filtered if filtered else full_watchlist
         else:
-            # Gemini unavailable — trade the full client-status list
+            # Empty list → Gemini unavailable/failed → trade the full list
             st.active_watchlist = full_watchlist
 
         st.gemini_shortlist = list(st.active_watchlist.keys())
