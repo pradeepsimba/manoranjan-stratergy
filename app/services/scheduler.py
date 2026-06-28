@@ -20,9 +20,9 @@ from zoneinfo import ZoneInfo
 
 import app.config as cfg
 from app.engine.entry_engine import scan_stock
-from app.engine.watchlist import build_watchlist, load_nse_universe
+from app.engine.watchlist import fetch_active_watchlist
 from app.models import PositionStatus, TradingPhase
-from app.services.gemini_filter import fetch_gemini_shortlist
+from app.services.gemini_filter import analyse_stocks
 from app.services.historical_data import (
     fetch_indicator_history,
     fetch_nifty_candles,
@@ -137,17 +137,33 @@ class SchedulerService:
     async def _run_premarket(self) -> None:
         st = get_state()
         st.phase = TradingPhase.PRE_MARKET
-        print("=== PRE-MARKET: Gemini AI filter ===")
-        symbols = await fetch_gemini_shortlist()
-        st.gemini_shortlist = symbols
 
-        universe = await load_nse_universe()
-        if symbols:
-            st.active_watchlist = build_watchlist(universe, symbols)
+        # Step 1: fetch ranked high-volume stocks from the custom server
+        print("=== PRE-MARKET: Fetching stock list from client status ===")
+        full_watchlist = await fetch_active_watchlist()
+        if not full_watchlist:
+            print("Client status returned empty list — check server")
+            return
+
+        # Step 2: send list to Gemini for per-stock news/condition analysis
+        print(f"=== PRE-MARKET: Gemini analysing {len(full_watchlist)} stocks ===")
+        conditions = await analyse_stocks(list(full_watchlist.keys()))
+
+        if conditions:
+            # Keep only stocks Gemini rates as BULLISH
+            filtered = {
+                name: tok
+                for name, tok in full_watchlist.items()
+                if conditions.get(name) == "BULLISH"
+            }
+            # Safety fallback: if Gemini finds nothing bullish, use full list
+            st.active_watchlist = filtered if filtered else full_watchlist
         else:
-            fallback = universe[:40]
-            st.active_watchlist = {s.symbol: s.token for s in fallback}
-            print(f"Gemini unavailable — fallback watchlist: {len(fallback)} stocks")
+            # Gemini unavailable — trade the full client-status list
+            st.active_watchlist = full_watchlist
+
+        st.gemini_shortlist = list(st.active_watchlist.keys())
+        print(f"=== PRE-MARKET done: {len(st.active_watchlist)} stocks will be scanned ===")
 
     async def _run_wait_zone(self) -> None:
         st = get_state()

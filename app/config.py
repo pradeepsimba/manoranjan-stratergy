@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 
 # ── Custom Market Data Server ─────────────────────────────────────────────────
-API_HOST         = "35.234.219.141"
-API_URL_TEMPLATE = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
-WS_URL           = f"ws://{API_HOST}:8083/historical-data"
+API_HOST          = "35.234.219.141"
+API_URL_TEMPLATE  = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
+WS_URL            = f"ws://{API_HOST}:8083/historical-data"
+CLIENT_STATUS_URL = f"https://{API_HOST}:8000/api/clientstatus/"
 
 # ── Gemini AI pre-market filter ───────────────────────────────────────────────
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")

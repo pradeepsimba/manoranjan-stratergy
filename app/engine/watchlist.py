@@ -1,70 +1,52 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict
 
 import httpx
 
 import app.config as cfg
-from app.models import StockInfo
 from app.state import get_state
 
+# Instruments that are indices — skip them from the trading watchlist.
+_INDEX_NAMES = frozenset({
+    "NIFTY 50", "NIFTY50", "NIFTY BANK", "BANKNIFTY",
+    "FINNIFTY", "MIDCPNIFTY", "NIFTY MIDCAP", "SENSEX",
+})
 
-async def load_nse_universe() -> List[StockInfo]:
+
+async def fetch_active_watchlist() -> Dict[str, str]:
     """
-    Fetch Angel One's public instrument master and filter for NSE equity stocks
-    with price >= ₹MIN_PRICE. Returns a list of StockInfo objects.
+    GET https://35.234.219.141:8000/api/clientstatus/
 
-    The instrument master is a public JSON file — no API key required.
-    ADV filtering is skipped here (no intraday volume data pre-market);
-    Gemini's AI shortlist acts as the practical liquidity gate.
+    Response format:
+        [[rank, stockname, token], ...]
+    e.g. [[1, "WIPRO", "3787"], [2, "BAJAJ AUTO", "16669"], ...]
+
+    Returns {stockname: token} for every entry, excluding known index names.
+    Index instruments (NIFTY 50 etc.) are handled separately by the trend gate.
     """
     st = get_state()
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(cfg.INSTRUMENT_MASTER_URL)
-        instruments = resp.json()
+        async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
+            resp = await client.get(cfg.CLIENT_STATUS_URL)
+        data = resp.json()
+        st.api_status = "API OK"
     except Exception as e:
-        print(f"Instrument master fetch failed: {e}")
-        st.api_status = f"Instrument fetch error: {e}"
-        return []
+        st.api_status = f"Client status error: {e}"
+        print(f"Client status fetch failed: {e}")
+        return {}
 
-    universe: List[StockInfo] = []
-    for row in instruments:
-        # Filter: NSE exchange, EQ instrument type, price >= MIN_PRICE
-        if row.get("exch_seg") != "NSE":
-            continue
-        if row.get("instrumenttype", "").upper() not in ("", "EQ"):
-            continue
-        symbol = row.get("symbol", "").replace("-EQ", "")
-        token  = row.get("token", "")
-        name   = row.get("name", symbol)
-        try:
-            price = float(row.get("last_price", 0) or 0)
-        except (ValueError, TypeError):
-            price = 0.0
-        if price < cfg.MIN_PRICE:
-            continue
-        if symbol and token:
-            universe.append(StockInfo(symbol=symbol, token=token, name=name))
-
-    st.full_universe = [{"symbol": s.symbol, "token": s.token, "name": s.name}
-                        for s in universe]
-    print(f"NSE universe loaded: {len(universe)} stocks (price ≥ ₹{cfg.MIN_PRICE})")
-    return universe
-
-
-def build_watchlist(universe: List[StockInfo], gemini_symbols: List[str]) -> Dict[str, str]:
-    """
-    Intersect the Gemini shortlist with the NSE universe token map.
-    Returns {symbol: token} for all matched symbols.
-    """
-    token_map = {s.symbol: s.token for s in universe}
     watchlist: Dict[str, str] = {}
-    for sym in gemini_symbols:
-        sym_clean = sym.strip().upper().replace("-EQ", "").replace(".NS", "")
-        if sym_clean in token_map:
-            watchlist[sym_clean] = token_map[sym_clean]
-        else:
-            print(f"Watchlist: {sym_clean} not found in universe — skipped")
-    print(f"Active watchlist: {len(watchlist)} stocks matched from Gemini shortlist")
+    for entry in data:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 3:
+            continue
+        stockname = str(entry[1]).strip()
+        token     = str(entry[2]).strip()
+        if not stockname or not token:
+            continue
+        if stockname.upper() in _INDEX_NAMES or stockname in _INDEX_NAMES:
+            continue
+        watchlist[stockname] = token
+
+    print(f"Active watchlist from client status: {len(watchlist)} stocks")
     return watchlist

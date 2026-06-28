@@ -1,51 +1,69 @@
-# Gradle
-.gradle/
-build/
-!gradle/wrapper/gradle-wrapper.jar
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
 
-# IntelliJ IDEA
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env/
+ENV/
+
+# ── Environment / secrets ──────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+secrets.json
+
+# ── Distribution / packaging ───────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+
+# ── pytest / coverage ─────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# ── mypy / type checkers ──────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pyright/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Database / local state ────────────────────────────────────────────────────
+*.db
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
 .idea/
 *.iml
-*.ipr
-*.iws
-out/
 
-# Eclipse
-.classpath
-.project
-.settings/
-
-# VS Code
-.vscode/
-
-# NetBeans
-nbproject/private/
-nbbuild/
-dist/
-nbdist/
-.nb-gradle/
-
-# Compiled class files
-*.class
-
-# Log files
-*.log
-
-# Package files
-*.jar
-*.db
-*.war
-*.nar
-*.ear
-*.zip
-*.tar.gz
-*.rar
-
-# JPackage output
-jpackage/
-
-# OS files
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-trading.db-shm
-trading.db-wal
+
+# ── Static build artefacts ────────────────────────────────────────────────────
+static/dist/
+static/*.min.js
+static/*.min.css
