@@ -257,12 +257,17 @@ class SchedulerService:
         # Step 1: exit checks — iterate only OPEN positions (max 3), not the
         # whole 500-stock watchlist. Each position knows its own token.
         for symbol, pos in list(st.positions.items()):
-            candles = st.candles_5m.get(pos.token, [])
-            if len(candles) < 2:
-                continue
-            last = candles[-2]          # the bar that just closed
+            # Read the just-closed bar under the per-token lock — the WS thread
+            # mutates this list (append + pop) concurrently, so an unlocked
+            # candles[-2] could read the wrong bar's high/low.
+            with st.candle_lock(pos.token):
+                candles = st.candles_5m.get(pos.token, [])
+                if len(candles) < 2:
+                    continue
+                last_high = candles[-2].high   # the bar that just closed
+                last_low  = candles[-2].low
             try:
-                closed_pos = check_paper_exits(pos.token, last.high, last.low)
+                closed_pos = check_paper_exits(pos.token, last_high, last_low)
                 if closed_pos:
                     await self._db.update_position_exit(
                         symbol     = closed_pos.symbol,
