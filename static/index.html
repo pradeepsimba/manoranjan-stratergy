@@ -3,21 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BankNifty Trading Dashboard</title>
+<title>NSE Equity Paper Trader</title>
 <link rel="stylesheet" href="/css/dashboard.css">
 </head>
 <body>
 
 <header>
-  <h1>BankNifty Trading Dashboard</h1>
+  <h1>NSE EQUITY PAPER TRADER</h1>
   <div class="header-right">
-    <div class="interval-tabs">
-      <span class="interval-tab" data-iv="1m" onclick="setInterval('1m')">1m</span>
-      <span class="interval-tab active" data-iv="5m" onclick="setInterval('5m')">5m</span>
-      <span class="interval-tab" data-iv="15m" onclick="setInterval('15m')">15m</span>
-    </div>
-    <span id="ws-status" class="badge gray">Connecting…</span>
-    <span id="api-status" class="badge gray">API —</span>
+    <span id="phase-badge" class="badge gray">—</span>
+    <span id="ws-status"   class="badge gray">Connecting…</span>
+    <span id="api-status"  class="badge gray">API —</span>
     <span id="clock">—:—:—</span>
   </div>
 </header>
@@ -27,78 +23,61 @@
   <!-- LEFT COL -->
   <div style="display:flex;flex-direction:column;gap:12px">
 
-    <!-- Trade Dashboard -->
+    <!-- Summary -->
     <div class="panel">
-      <div class="panel-header">
-        <span>Trade Dashboard</span>
-        <span id="global-signal" class="badge gray">NEUTRAL</span>
-      </div>
+      <div class="panel-header">Session</div>
       <div class="panel-body">
-        <div id="signal-banner" class="signal-banner signal-neutral">NEUTRAL — Waiting for signal</div>
-
-        <div class="trade-info">
+        <div class="trade-info" style="grid-template-columns:repeat(4,1fr)">
           <div class="stat-box">
-            <div class="label">Funds</div>
-            <div class="value" id="stat-funds">₹1,00,000</div>
+            <div class="label">NIFTY 50</div>
+            <div class="value" id="stat-nifty">—</div>
           </div>
           <div class="stat-box">
-            <div class="label">Active Trade</div>
-            <div class="value" id="stat-trade">—</div>
-          </div>
-          <div class="stat-box">
-            <div class="label">P&amp;L (pts)</div>
+            <div class="label">Daily P&amp;L</div>
             <div class="value" id="stat-pnl">—</div>
           </div>
-        </div>
-
-        <!-- Active trade details -->
-        <div id="active-trade-panel" style="display:none;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:8px;">
-          <table style="width:100%">
-            <tr><td style="color:#8b949e;width:100px">Type</td><td id="at-type" style="font-weight:bold"></td></tr>
-            <tr><td style="color:#8b949e">Entry</td><td id="at-entry"></td></tr>
-            <tr><td style="color:#8b949e">LTP</td><td id="at-ltp"></td></tr>
-            <tr><td style="color:#8b949e">Stop Loss</td><td id="at-sl"></td></tr>
-            <tr><td style="color:#8b949e">P&amp;L (pts)</td><td id="at-pnl"></td></tr>
-            <tr><td style="color:#8b949e">P&amp;L (₹)</td><td id="at-pnlrs"></td></tr>
-            <tr><td style="color:#8b949e">Lots</td><td id="at-lots"></td></tr>
-            <tr><td style="color:#8b949e">Confidence</td><td id="at-conf"></td></tr>
-          </table>
-        </div>
-
-        <!-- Manual controls -->
-        <div class="trade-controls">
-          <input class="price-input" id="manual-price" type="number" placeholder="Price" step="0.5">
-          <button class="btn btn-buy"  onclick="manualEntry('BUY')">BUY</button>
-          <button class="btn btn-sell" onclick="manualEntry('SELL')">SELL</button>
-          <button class="btn btn-exit" onclick="manualExit()">EXIT</button>
-          <button class="btn btn-clear" onclick="clearTrades()">Clear Trades</button>
+          <div class="stat-box">
+            <div class="label">Open</div>
+            <div class="value" id="stat-open">—</div>
+          </div>
+          <div class="stat-box">
+            <div class="label">Watchlist</div>
+            <div class="value" id="stat-watch">—</div>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- Trade History -->
+    <!-- Positions -->
     <div class="panel">
-      <div class="panel-header">Today's Trades</div>
+      <div class="panel-header">
+        <span>Positions</span>
+        <span id="pos-count" class="badge gray">0</span>
+      </div>
       <div class="tbl-scroll">
         <table>
           <thead><tr>
-            <th>#</th><th>Type</th><th>Price</th><th>Time</th><th>P&amp;L</th><th>Conf</th>
+            <th>Symbol</th><th>Status</th><th>Entry</th><th>Time</th>
+            <th>Qty</th><th>SL</th><th>Target</th><th>LTP</th><th>P&amp;L ₹</th>
           </tr></thead>
-          <tbody id="trades-tbody"></tbody>
+          <tbody id="positions-tbody">
+            <tr><td colspan="9" style="color:#8b949e;text-align:center">No positions yet</td></tr>
+          </tbody>
         </table>
       </div>
     </div>
 
-    <!-- Big Trades -->
+    <!-- Scan results -->
     <div class="panel">
-      <div class="panel-header" style="gap:10px;flex-wrap:wrap;">
-        <span>🔥 Big Trades</span>
-        <span id="bigTradeStatus" style="font-size:11px;color:#8fd3ff;font-weight:normal;">Loading...</span>
-        <button onclick="dbCheck()" style="padding:2px 8px;background:#1a2a3a;color:#8fd3ff;border:1px solid #38bdf8;border-radius:5px;cursor:pointer;font-size:11px;">DB Check</button>
-        <button onclick="toggleBigTrades()" id="btnBigTrade" style="padding:2px 10px;background:#333;color:#4caf50;border:1px solid #4caf50;border-radius:5px;cursor:pointer;font-size:13px;">▼</button>
+      <div class="panel-header">Latest Scan Results</div>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Symbol</th><th>Result</th><th>Detail</th></tr></thead>
+          <tbody id="scans-tbody">
+            <tr><td colspan="3" style="color:#8b949e;text-align:center">Waiting for scans…</td></tr>
+          </tbody>
+        </table>
       </div>
-      <div id="bigTradeZone" style="overflow-x:auto;overflow-y:auto;max-height:260px;"></div>
-      <div id="bigTradeAudit" style="font-size:11px;color:#888;padding:6px 8px;border-top:1px solid #30363d;line-height:1.6;"></div>
     </div>
 
   </div><!-- /LEFT -->
@@ -106,77 +85,36 @@
   <!-- RIGHT COL -->
   <div style="display:flex;flex-direction:column;gap:12px">
 
-    <!-- Entry Loop Monitor -->
+    <!-- Gemini shortlist -->
     <div class="panel">
-      <div class="panel-header">Entry Loop Monitor</div>
-      <div class="panel-body" style="padding:6px 8px;">
-        <div id="entryLoopPanel" style="background:#1a1a1a;border-radius:8px;padding:6px;">
-          <div style="color:#8b949e;padding:8px;">Waiting for data…</div>
-        </div>
-        <div id="pending-signal" style="display:none;margin-top:8px;padding:6px 10px;border-radius:6px;background:#3a3000;color:#d29922;border:1px solid #d29922;font-size:12px">
-          ⚡ Pending: <span id="pending-text"></span>
-        </div>
+      <div class="panel-header">
+        <span>Watchlist (Gemini-screened)</span>
+        <span id="gemini-count" class="badge gray">0</span>
+      </div>
+      <div class="panel-body" id="gemini-list" style="display:flex;flex-wrap:wrap;gap:5px;max-height:160px;overflow-y:auto">
+        <span style="color:#8b949e">Built at 09:00…</span>
       </div>
     </div>
 
-    <!-- BN Indicators -->
+    <!-- Backtest -->
     <div class="panel">
-      <div class="panel-header">
-        <span>BankNifty Indicators</span>
-        <span id="gate-badge" class="badge gray">GATE —</span>
-      </div>
+      <div class="panel-header">Backtest</div>
       <div class="panel-body">
-        <div class="indicator-row">
-          <span class="indicator-label">RSI (14)</span>
-          <span class="indicator-value" id="ind-rsi">—</span>
+        <div class="trade-controls" style="align-items:center">
+          <label style="color:#8b949e">From <input class="price-input" id="bt-from" type="date" style="width:140px"></label>
+          <label style="color:#8b949e">To <input class="price-input" id="bt-to" type="date" style="width:140px"></label>
+          <button class="btn btn-buy" onclick="runBacktest()">Run</button>
+          <span id="bt-status" class="badge gray">idle</span>
         </div>
-        <div class="indicator-row">
-          <span class="indicator-label">MACD Direction</span>
-          <span class="indicator-value" id="ind-macd">—</span>
+        <div id="bt-summary" style="margin-top:10px"></div>
+        <div class="tbl-scroll" style="margin-top:8px;max-height:220px">
+          <table>
+            <thead><tr>
+              <th>Symbol</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Outcome</th><th>Net ₹</th><th>R</th>
+            </tr></thead>
+            <tbody id="bt-trades"></tbody>
+          </table>
         </div>
-        <div class="indicator-row">
-          <span class="indicator-label">EMA Stack</span>
-          <span class="indicator-value" id="ind-ema">—</span>
-        </div>
-        <div class="indicator-row">
-          <span class="indicator-label">Bull Score</span>
-          <span class="indicator-value bull-color" id="ind-bull">—</span>
-        </div>
-        <div class="indicator-row">
-          <span class="indicator-label">Bear Score</span>
-          <span class="indicator-value bear-color" id="ind-bear">—</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Stock Candles (multi-frame) -->
-    <div class="panel">
-      <div class="panel-header">
-        <span>📈 Stock Candles</span>
-        <span style="font-size:10px;color:#8b949e;font-weight:normal;">1m &nbsp;|&nbsp; 5m &nbsp;|&nbsp; 15m</span>
-      </div>
-      <div style="overflow-x:auto;overflow-y:auto;max-height:360px;">
-        <table id="stocks-table" style="min-width:700px;">
-          <thead id="stocks-thead"></thead>
-          <tbody id="stocks-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Support & Resistance (5m / 15m) -->
-    <div class="panel">
-      <div class="panel-header">Support &amp; Resistance (5m / 15m)</div>
-      <div class="tbl-scroll">
-        <table>
-          <thead><tr>
-            <th>Stock</th>
-            <th style="color:#3fb950">5m Sup</th>
-            <th style="color:#f85149">5m Res</th>
-            <th style="color:#3fb950">15m Sup</th>
-            <th style="color:#f85149">15m Res</th>
-          </tr></thead>
-          <tbody id="sr-tbody"></tbody>
-        </table>
       </div>
     </div>
 
