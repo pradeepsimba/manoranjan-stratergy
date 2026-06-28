@@ -71,7 +71,7 @@ class DatabaseService:
         self._pool: Optional[asyncpg.Pool] = None
 
     async def init(self) -> None:
-        self._pool = await asyncpg.create_pool(cfg.POSTGRES_DSN, min_size=2, max_size=10)
+        self._pool = await asyncpg.create_pool(cfg.POSTGRES_DSN, min_size=2, max_size=15)
         async with self._pool.acquire() as conn:
             await conn.execute(_SCHEMA)
         print("PostgreSQL connected and schema applied")
@@ -143,6 +143,23 @@ class DatabaseService:
                 "VALUES ($1,$2,$3,$4,$5)",
                 symbol, bar_time, action, reason,
                 json.dumps(indicators) if indicators else None,
+            )
+
+    # ── Batch scan log ────────────────────────────────────────────────────────
+
+    async def batch_log_scans(self, entries: list) -> None:
+        """
+        Insert all per-stock scan results for one bar in a single executemany.
+        Replaces 500 individual log_scan calls with one DB round-trip.
+        entries: list of (symbol, bar_time, action, reason, indicators_json_or_None)
+        """
+        if not entries:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO scan_log (symbol, bar_time, action, reason, indicators) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb)",
+                entries,
             )
 
     # ── Daily stats ───────────────────────────────────────────────────────────

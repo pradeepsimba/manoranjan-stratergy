@@ -64,3 +64,7 @@ INTERVAL_1D  = "1d"
 NIFTY50_TOKEN  = "26000"
 NIFTY50_NAME   = "NIFTY 50"
 NSE_EXCHANGE   = "NSE"
+
+# ── Performance ────────────────────────────────────────────────────────────────
+HIST_BATCH_SIZE = 100   # max stocks per single historical API request
+SCAN_WORKERS    = 16    # ThreadPoolExecutor size for parallel bar-close scan

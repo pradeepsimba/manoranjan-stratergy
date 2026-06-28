@@ -142,15 +142,22 @@ class MarketDataService:
             except (ValueError, AttributeError):
                 pass
 
-        with self.state._candle_lock:
-            if interval == "5m":
-                self._upsert(self.state.candles_5m, symbol, candle)
-                if symbol == cfg.NIFTY50_TOKEN:
+        # Per-token lock for regular stocks; separate nifty lock for the shared
+        # NIFTY candle lists so scan workers never contend across unrelated tokens.
+        if symbol == cfg.NIFTY50_TOKEN:
+            with self.state._nifty_lock:
+                if interval == "5m":
                     self._upsert_list(self.state.nifty_candles_5m, candle)
-            elif interval == "1h":
-                self._upsert(self.state.candles_1h, symbol, candle)
-            elif interval == "1d":
-                self._upsert(self.state.candles_1d, symbol, candle)
+                elif interval == "1d":
+                    self._upsert_list(self.state.nifty_candles_1d, candle)
+        else:
+            with self.state.candle_lock(symbol):
+                if interval == "5m":
+                    self._upsert(self.state.candles_5m, symbol, candle)
+                elif interval == "1h":
+                    self._upsert(self.state.candles_1h, symbol, candle)
+                elif interval == "1d":
+                    self._upsert(self.state.candles_1d, symbol, candle)
 
         if ltp > 0:
             if symbol == cfg.NIFTY50_TOKEN:

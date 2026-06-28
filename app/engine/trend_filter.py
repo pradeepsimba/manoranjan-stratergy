@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List
 
 import pandas as pd
 import pandas_ta as ta
 
 from app.models import Candle, TrendGate
-from app.state import get_state
-
-
-def _today_open(candles_1d: List[Candle]) -> Optional[float]:
-    if not candles_1d:
-        return None
-    return candles_1d[-1].open
 
 
 def _nifty_vwap(candles_5m: List[Candle]) -> float:
@@ -30,41 +23,38 @@ def _nifty_vwap(candles_5m: List[Candle]) -> float:
         return 0.0
 
 
-def check_trend(symbol: str, token: str) -> TrendGate:
+def check_trend(
+    ltp:              float,
+    candles_1d:       List[Candle],
+    candles_1h:       List[Candle],
+    nifty_ltp:        float,
+    nifty_candles_1d: List[Candle],
+    nifty_candles_5m: List[Candle],
+) -> TrendGate:
     """
     4-gate multi-timeframe trend filter.
+
+    Pure function — all data is passed in as snapshots; safe to call from any
+    thread including ThreadPoolExecutor workers.
 
     Gates:
       1. Daily Green       — stock LTP > today's daily open
       2. Hourly Green      — current 1H candle close > open
       3. NIFTY Daily Green — NIFTY LTP > NIFTY daily open
       4. NIFTY Above VWAP  — NIFTY LTP > NIFTY session VWAP
-
-    Candle stores are keyed by token; LTP store is keyed by symbol name.
     """
-    st   = get_state()
     gate = TrendGate()
 
-    ltp = st.ltp.get(symbol, 0.0)
+    if candles_1d and ltp > 0:
+        gate.daily_green = ltp > candles_1d[-1].open
 
-    # Gate 1: Daily candle green
-    day_open = _today_open(st.candles_1d.get(token, []))
-    if day_open and ltp > 0:
-        gate.daily_green = ltp > day_open
+    if candles_1h:
+        gate.hourly_green = candles_1h[-1].close > candles_1h[-1].open
 
-    # Gate 2: Hourly candle green
-    hourly = st.candles_1h.get(token, [])
-    if hourly:
-        gate.hourly_green = hourly[-1].close > hourly[-1].open
+    if nifty_candles_1d and nifty_ltp > 0:
+        gate.nifty_daily_green = nifty_ltp > nifty_candles_1d[-1].open
 
-    # Gate 3: NIFTY daily green
-    nifty_ltp      = st.nifty_ltp
-    nifty_day_open = _today_open(st.nifty_candles_1d)
-    if nifty_day_open and nifty_ltp > 0:
-        gate.nifty_daily_green = nifty_ltp > nifty_day_open
-
-    # Gate 4: NIFTY above session VWAP
-    nifty_vwap = _nifty_vwap(st.nifty_candles_5m)
+    nifty_vwap = _nifty_vwap(nifty_candles_5m)
     if nifty_vwap > 0 and nifty_ltp > 0:
         gate.nifty_above_vwap = nifty_ltp > nifty_vwap
 

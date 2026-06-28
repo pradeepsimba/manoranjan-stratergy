@@ -57,8 +57,24 @@ class AppState:
         self.pending_signals:   List[EntrySignal] = []
         self.last_5m_bar_time:  Optional[str]     = None   # "HH:MM" of last scanned bar
 
-        # Thread-safe lock for candle writes from the WebSocket callback thread
-        self._candle_lock = threading.Lock()
+        # Per-token locks: each symbol's candle list gets its own lock so WS
+        # tick writes and ThreadPoolExecutor scan reads don't contend across
+        # unrelated stocks.
+        self._token_locks:      Dict[str, threading.Lock] = {}
+        self._token_locks_meta: threading.Lock            = threading.Lock()
+
+        # Separate lock for the shared NIFTY candle lists.
+        self._nifty_lock: threading.Lock = threading.Lock()
+
+    def candle_lock(self, token: str) -> threading.Lock:
+        """Return (and lazily create) the per-token candle lock."""
+        try:
+            return self._token_locks[token]
+        except KeyError:
+            with self._token_locks_meta:
+                if token not in self._token_locks:
+                    self._token_locks[token] = threading.Lock()
+                return self._token_locks[token]
 
 
 def get_state() -> AppState:
