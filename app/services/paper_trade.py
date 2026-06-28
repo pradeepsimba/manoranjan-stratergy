@@ -57,48 +57,46 @@ def place_paper_order(
     return pos
 
 
-def check_paper_exits(bar_token: str, candle_high: float, candle_low: float) -> Optional[Position]:
-    """
-    Called after each completed 5-minute bar.
-    Checks whether the bar's high/low touched the target or stop-loss of the
-    position for this token. Returns the closed Position or None.
-
-    Precedence: if both SL and target are hit within the same bar, SL wins
-    (conservative assumption — price moved against us first).
-    """
-    st = get_state()
-
-    # Find position by token (positions are keyed by symbol; look up via watchlist)
-    symbol = next(
-        (sym for sym, tok in st.active_watchlist.items() if tok == bar_token),
-        None,
-    )
-    if symbol is None:
-        return None
-
-    pos = st.positions.get(symbol)
-    if pos is None or pos.status != PositionStatus.OPEN:
-        return None
-
-    hit_sl  = candle_low  <= pos.stop_loss
-    hit_tgt = candle_high >= pos.target
-
-    if not hit_sl and not hit_tgt:
-        return None
-
-    exit_price = pos.stop_loss if hit_sl else pos.target
-    exit_label = "SL HIT" if hit_sl else "TARGET HIT"
-    pnl        = round((exit_price - pos.entry_price) * pos.quantity, 2)
+def _finalize(pos: Position, exit_price: float, label: str) -> Position:
+    """Close a position at exit_price, record P&L, update daily P&L."""
+    st  = get_state()
+    pnl = round((exit_price - pos.entry_price) * pos.quantity, 2)
 
     pos.status     = PositionStatus.CLOSED
-    pos.exit_price = exit_price
+    pos.exit_price = round(exit_price, 2)
     pos.exit_time  = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
     pos.pnl        = pnl
 
     st.daily_pnl += pnl
 
     print(
-        f"[PAPER] {exit_label} {symbol} @ {exit_price:.2f} | "
+        f"[PAPER] {label} {pos.symbol} @ {exit_price:.2f} | "
         f"PnL ₹{pnl:+.2f}  (daily ₹{st.daily_pnl:+.2f})"
     )
     return pos
+
+
+def check_tick_exit(symbol: str, ltp: float) -> Optional[Position]:
+    """
+    Tick-wise exit: close the position the instant the live price touches the
+    stop-loss or target. Filled at the level (the price has crossed it).
+    Returns the closed Position or None. SL takes precedence if both are within
+    reach on the same tick.
+    """
+    pos = get_state().positions.get(symbol)
+    if pos is None or pos.status != PositionStatus.OPEN:
+        return None
+
+    if ltp <= pos.stop_loss:
+        return _finalize(pos, pos.stop_loss, "SL HIT")
+    if ltp >= pos.target:
+        return _finalize(pos, pos.target, "TARGET HIT")
+    return None
+
+
+def force_close(symbol: str, exit_price: float) -> Optional[Position]:
+    """Square off an open position at a given price (used for the 15:30 EOD flat)."""
+    pos = get_state().positions.get(symbol)
+    if pos is None or pos.status != PositionStatus.OPEN:
+        return None
+    return _finalize(pos, exit_price, "EOD SQUARE-OFF")

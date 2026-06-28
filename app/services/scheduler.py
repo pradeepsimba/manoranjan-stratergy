@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 import app.config as cfg
 from app.engine.entry_engine import scan_stock
+from app.engine.position_manager import can_enter
 from app.engine.trend_filter import compute_nifty_gates
 from app.engine.watchlist import fetch_active_watchlist
 from app.models import PositionStatus, TradingPhase
@@ -28,7 +29,7 @@ from app.services.historical_data import (
     fetch_nifty_candles,
     fetch_today_candles,
 )
-from app.services.paper_trade import check_paper_exits, place_paper_order
+from app.services.paper_trade import check_tick_exit, force_close, place_paper_order
 from app.state import get_state
 
 if TYPE_CHECKING:
@@ -57,18 +58,10 @@ def _seconds_until(hour: int, minute: int) -> float:
     return max(0.0, (target - now).total_seconds())
 
 
-def _is_5m_bar_complete() -> str | None:
-    """
-    Return "HH:MM" label of the most recently closed 5-minute bar if it hasn't
-    been scanned yet, else None. Waits 5 s after bar close for data to arrive.
-    """
-    now     = _now()
-    bar_min = (now.minute // 5) * 5
-    closed  = now.replace(minute=bar_min, second=0, microsecond=0)
-    if (now - closed).total_seconds() < 5:
-        return None
-    label = closed.strftime("%H:%M")
-    return None if get_state().last_5m_bar_time == label else label
+def _past(hour: int, minute: int) -> bool:
+    """True once the wall clock has reached hour:minute (IST)."""
+    now = _now()
+    return now.hour > hour or (now.hour == hour and now.minute >= minute)
 
 
 class SchedulerService:
@@ -174,22 +167,116 @@ class SchedulerService:
         self._mkt.start()
 
     async def _run_active_phase(self) -> None:
-        print("=== ACTIVE: Scanning engine open ===")
-        while True:
-            now = _now()
-            if now.hour > cfg.CUTOFF_HOUR or (
-                now.hour == cfg.CUTOFF_HOUR and now.minute >= cfg.CUTOFF_MIN
-            ):
-                break
-            bar_label = _is_5m_bar_complete()
-            if bar_label:
-                get_state().last_5m_bar_time = bar_label
-                await self._on_bar_close(bar_label)
-            await asyncio.sleep(5)
+        """
+        Tick-wise engine. Runs from 09:45 until 15:30, every TICK_EVAL_INTERVAL_MS:
+          • Exits  — check every open position's live price vs SL/target (always).
+          • Entries — re-evaluate every stock that ticked since the last cycle on
+            its forming bar; fill the ones whose 7 signals align (until cutoff).
+        Heavy indicator math runs in the thread pool (TA-Lib releases the GIL);
+        fills/exits/DB stay on the event-loop thread.
+        """
+        print("=== ACTIVE: tick-wise engine open ===")
+        st       = get_state()
+        loop     = asyncio.get_running_loop()
+        interval = max(0.0, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)
+
+        while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
+            in_cutoff = _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN)
+            st.phase  = TradingPhase.CUTOFF if in_cutoff else TradingPhase.ACTIVE
+
+            await self._tick_exits()
+            if not in_cutoff:
+                await self._tick_entries(loop)
+
+            await asyncio.sleep(interval)
+
+    async def _tick_exits(self) -> None:
+        """Tick-wise SL/target check against the live price for open positions."""
+        st = get_state()
+        for symbol in list(st.positions.keys()):
+            ltp = st.ltp.get(symbol)
+            if not ltp:
+                continue
+            try:
+                closed = check_tick_exit(symbol, ltp)
+                if closed:
+                    await self._db.update_position_exit(
+                        symbol     = closed.symbol,
+                        exit_price = closed.exit_price,
+                        exit_time  = closed.exit_time,
+                        pnl        = closed.pnl,
+                    )
+            except Exception as e:
+                print(f"Tick exit error ({symbol}): {e}")
+
+    async def _tick_entries(self, loop) -> None:
+        """Re-evaluate every stock that ticked since the last cycle; fill aligned signals."""
+        st = get_state()
+
+        # Snapshot-and-clear the dirty set (atomic rebind; a tick landing mid-swap
+        # is simply picked up next cycle).
+        dirty, st.dirty_ticks = st.dirty_ticks, set()
+        if not dirty:
+            return
+        if (len(st.positions) >= cfg.MAX_CONCURRENT_POSITIONS
+                or st.daily_pnl <= -cfg.DAILY_LOSS_LIMIT):
+            return
+
+        with st._nifty_lock:
+            nifty_gates = compute_nifty_gates(
+                st.nifty_ltp, st.nifty_candles_1d, st.nifty_candles_5m,
+            )
+
+        items = [(sym, tok) for sym, tok in st.active_watchlist.items() if tok in dirty]
+        if not items:
+            return
+
+        tasks = [
+            loop.run_in_executor(_SCAN_POOL, scan_stock, sym, tok, nifty_gates)
+            for sym, tok in items
+        ]
+        results = await asyncio.gather(*tasks)
+
+        for sig in (r for r in results if r is not None):
+            ok, _ = can_enter(sig.symbol, st.positions, st.traded_today, st.daily_pnl)
+            if not ok:
+                continue
+            pos = place_paper_order(
+                symbol        = sig.symbol,
+                token         = sig.token,
+                quantity      = sig.quantity,
+                entry_price   = sig.ltp,
+                sl_offset     = sig.sl_offset,
+                target_offset = sig.target_offset,
+            )
+            pos.indicators = sig.indicators
+            pos.trend      = sig.trend
+            try:
+                await self._db.save_position(pos)
+            except Exception as e:
+                print(f"DB save_position error ({sig.symbol}): {e}")
 
     async def _run_eod(self) -> None:
+        st = get_state()
+
+        # Square off anything still open at the last known price before the feed
+        # stops, so every trade has a recorded exit and P&L.
+        for symbol in list(st.positions.keys()):
+            pos        = st.positions[symbol]
+            exit_price = st.ltp.get(symbol, pos.entry_price)
+            closed     = force_close(symbol, exit_price)
+            if closed:
+                try:
+                    await self._db.update_position_exit(
+                        symbol     = closed.symbol,
+                        exit_price = closed.exit_price,
+                        exit_time  = closed.exit_time,
+                        pnl        = closed.pnl,
+                    )
+                except Exception as e:
+                    print(f"EOD square-off DB error ({symbol}): {e}")
+
         await self._mkt.stop()
-        st        = get_state()
         positions = list(st.positions.values())
         total     = len(positions)
         winners   = sum(1 for p in positions if p.pnl > 0)
@@ -218,6 +305,7 @@ class SchedulerService:
         st.candles_1d.clear()
         st.nifty_candles_5m.clear()
         st.nifty_candles_1d.clear()
+        st.dirty_ticks.clear()
         st.last_5m_bar_time = None
 
     # ── Historical data loader ────────────────────────────────────────────────
@@ -247,105 +335,6 @@ class SchedulerService:
         except Exception as e:
             st.api_status = f"Load error: {e}"
             print(f"Historical load error: {e}")
-
-    # ── Bar close handler ─────────────────────────────────────────────────────
-
-    async def _on_bar_close(self, bar_label: str) -> None:
-        st   = get_state()
-        loop = asyncio.get_running_loop()
-
-        # Step 1: exit checks — iterate only OPEN positions (max 3), not the
-        # whole 500-stock watchlist. Each position knows its own token.
-        for symbol, pos in list(st.positions.items()):
-            # Read the just-closed bar under the per-token lock — the WS thread
-            # mutates this list (append + pop) concurrently, so an unlocked
-            # candles[-2] could read the wrong bar's high/low.
-            with st.candle_lock(pos.token):
-                candles = st.candles_5m.get(pos.token, [])
-                if len(candles) < 2:
-                    continue
-                last_high = candles[-2].high   # the bar that just closed
-                last_low  = candles[-2].low
-            try:
-                closed_pos = check_paper_exits(pos.token, last_high, last_low)
-                if closed_pos:
-                    await self._db.update_position_exit(
-                        symbol     = closed_pos.symbol,
-                        exit_price = closed_pos.exit_price,
-                        exit_time  = closed_pos.exit_time,
-                        pnl        = closed_pos.pnl,
-                    )
-            except Exception as e:
-                print(f"Exit check error ({symbol}): {e}")
-
-        if st.phase != TradingPhase.ACTIVE:
-            return
-
-        # Step 2: compute the two index-level gates ONCE per bar under the nifty
-        # lock. Previously each of 500 workers rebuilt NIFTY VWAP independently;
-        # now they share one (nifty_daily_green, nifty_above_vwap) tuple.
-        with st._nifty_lock:
-            nifty_gates = compute_nifty_gates(
-                st.nifty_ltp,
-                st.nifty_candles_1d,
-                st.nifty_candles_5m,
-            )
-
-        # Step 3: fan out to thread pool — TA-Lib's C layer releases GIL, giving real
-        # CPU parallelism. 500 stocks with 16 workers ≈ 150 ms vs ~5 s sequential.
-        watchlist_items = list(st.active_watchlist.items())
-        tasks = [
-            loop.run_in_executor(_SCAN_POOL, scan_stock, sym, tok, nifty_gates)
-            for sym, tok in watchlist_items
-        ]
-        results = await asyncio.gather(*tasks)
-        signals = [r for r in results if r is not None]
-
-        st.pending_signals = signals
-
-        # Step 4: batch scan log — one executemany instead of 500 round-trips
-        log_entries = []
-        for sym, _ in watchlist_items:
-            res    = st.last_scan_results.get(sym, {})
-            action = "SIGNAL" if res.get("pass") else "SKIP"
-            reason = res.get("reason", "No signal")
-            ind_d  = None
-            if action == "SIGNAL":
-                s     = res.get("signal", {})
-                ind_d = json.dumps({
-                    "rsi":     s.get("rsi"),
-                    "adx":     s.get("adx"),
-                    "pattern": s.get("pattern"),
-                })
-            log_entries.append((sym, bar_label, action, reason, ind_d))
-
-        asyncio.create_task(self._safe_batch_log(log_entries))
-
-        # Step 5: paper fills
-        for sig in signals:
-            pos = place_paper_order(
-                symbol        = sig.symbol,
-                token         = sig.token,
-                quantity      = sig.quantity,
-                entry_price   = sig.ltp,
-                sl_offset     = sig.sl_offset,
-                target_offset = sig.target_offset,
-            )
-            pos.indicators = sig.indicators
-            pos.trend      = sig.trend
-            try:
-                await self._db.save_position(pos)
-            except Exception as e:
-                print(f"DB save_position error ({sig.symbol}): {e}")
-
-        if signals:
-            print(f"Bar {bar_label}: {len(signals)} paper fill(s)")
-
-    async def _safe_batch_log(self, entries: list) -> None:
-        try:
-            await self._db.batch_log_scans(entries)
-        except Exception as e:
-            print(f"Batch scan log error: {e}")
 
     # ── Dashboard broadcast ───────────────────────────────────────────────────
 

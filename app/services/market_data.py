@@ -15,7 +15,7 @@ import websockets
 import websockets.exceptions
 
 import app.config as cfg
-from app.models import Candle
+from app.models import Candle, TradingPhase
 from app.state import get_state
 
 if TYPE_CHECKING:
@@ -164,6 +164,11 @@ class MarketDataService:
                 self.state.nifty_ltp = ltp
             elif stockname:
                 self.state.ltp[stockname] = ltp
+
+        # Tick-wise engine: flag this stock for re-evaluation on the next loop
+        # cycle. Only while ACTIVE so the set stays small and bounded.
+        if symbol != cfg.NIFTY50_TOKEN and self.state.phase == TradingPhase.ACTIVE:
+            self.state.dirty_ticks.add(symbol)
 
     # ── Candle upsert helpers ─────────────────────────────────────────────────
 

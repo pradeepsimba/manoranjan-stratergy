@@ -60,7 +60,13 @@ NIFTY50_NAME   = "NIFTY 50"
 
 # ── Performance ────────────────────────────────────────────────────────────────
 HIST_BATCH_SIZE = 100   # max stocks per single historical API request
-SCAN_WORKERS    = 16    # ThreadPoolExecutor size for parallel bar-close scan
+SCAN_WORKERS    = 16    # ThreadPoolExecutor size for the parallel scan
+
+# ── Tick-wise engine ─────────────────────────────────────────────────────────
+# Cadence of the tick-driven evaluation loop in ACTIVE. Signals are recomputed
+# for every stock that ticked since the previous cycle, on the forming bar; SL/
+# target are checked against the live price. 0 = run as fast as the loop allows.
+TICK_EVAL_INTERVAL_MS = 100
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
 BACKTEST_WARMUP_DAYS = 7      # extra calendar days fetched before the range for indicator warmup

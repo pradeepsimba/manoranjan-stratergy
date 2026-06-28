@@ -57,6 +57,11 @@ class AppState:
         self.pending_signals:   List[EntrySignal] = []
         self.last_5m_bar_time:  Optional[str]     = None   # "HH:MM" of last scanned bar
 
+        # ── Tick-wise engine ──────────────────────────────────────────────────
+        # Tokens that received a tick since the last evaluation cycle. The WS
+        # thread adds; the tick loop swaps it out and evaluates those stocks.
+        self.dirty_ticks: Set[str] = set()
+
         # Per-token locks: each symbol's candle list gets its own lock so WS
         # tick writes and ThreadPoolExecutor scan reads don't contend across
         # unrelated stocks.
