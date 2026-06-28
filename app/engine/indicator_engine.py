@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
@@ -12,14 +13,17 @@ from app.models import Candle, IndicatorResult
 # ── DataFrame helper ──────────────────────────────────────────────────────────
 
 def _to_df(candles: List[Candle]) -> pd.DataFrame:
-    """Convert a list of Candle objects to a pandas DataFrame."""
-    return pd.DataFrame([{
-        "open":   c.open,
-        "high":   c.high,
-        "low":    c.low,
-        "close":  c.close,
-        "volume": c.volume,
-    } for c in candles], dtype=float)
+    """
+    Convert candles to a DataFrame using column arrays (one list per column).
+    Faster than building 300 row-dicts and letting pandas infer per row.
+    """
+    return pd.DataFrame({
+        "open":   [c.open   for c in candles],
+        "high":   [c.high   for c in candles],
+        "low":    [c.low    for c in candles],
+        "close":  [c.close  for c in candles],
+        "volume": [c.volume for c in candles],
+    }, dtype=float)
 
 
 def _val(series: pd.Series, offset: int = -1) -> Optional[float]:
@@ -29,6 +33,27 @@ def _val(series: pd.Series, offset: int = -1) -> Optional[float]:
         return None if pd.isna(v) else float(v)
     except (IndexError, TypeError):
         return None
+
+
+def session_vwap_last(highs, lows, closes, volumes) -> float:
+    """
+    Last cumulative session VWAP via numpy — much cheaper than pandas-ta's
+    ta.vwap (no datetime-index handling, single vectorised pass).
+
+    Accepts numpy arrays or pandas Series. Returns 0.0 on empty / zero volume.
+    """
+    h = np.asarray(highs,   dtype=float)
+    l = np.asarray(lows,    dtype=float)
+    c = np.asarray(closes,  dtype=float)
+    v = np.asarray(volumes, dtype=float)
+    if h.size == 0:
+        return 0.0
+    cum_vol = v.cumsum()
+    total   = cum_vol[-1]
+    if total <= 0:
+        return 0.0
+    tp = (h + l + c) / 3.0
+    return float((tp * v).cumsum()[-1] / total)
 
 
 # ── Swing Low (custom — pandas-ta has no swing-low primitive) ─────────────────
@@ -91,6 +116,10 @@ def compute_indicators(
     """
     Compute all entry-check indicators using pandas-ta.
 
+    Hot path — runs for every watchlist stock on every 5-minute bar close.
+    The DataFrame is built once and reused for every indicator; VWAP uses a
+    fast numpy pass instead of a second DataFrame.
+
     candles_5m          — 5-min bars used for RSI, MACD, ADX, volume, patterns
     session_candles_5m  — today's 5-min bars from 09:15 (for VWAP); falls back
                           to candles_5m if not provided
@@ -99,14 +128,17 @@ def compute_indicators(
     if not candles_5m or len(candles_5m) < 3:
         return ind
 
-    df = _to_df(candles_5m)
+    df     = _to_df(candles_5m)
+    close  = df["close"]
+    high   = df["high"]
+    low    = df["low"]
+    volume = df["volume"]
 
     # ── RSI (14) ───────────────────────────────────────────────────────────────
-    rsi_s        = ta.rsi(df["close"], length=cfg.RSI_PERIOD)
-    ind.rsi      = _val(rsi_s)
+    rsi_s   = ta.rsi(close, length=cfg.RSI_PERIOD)
+    ind.rsi = _val(rsi_s)
     if ind.rsi is not None:
         ind.rsi_above_30 = ind.rsi > cfg.RSI_OVERSOLD
-        # Rising: last 3 valid values each greater than the previous
         recent_rsi = rsi_s.dropna().tail(cfg.RSI_RISING_BARS + 1).values
         ind.rsi_rising = (
             len(recent_rsi) >= cfg.RSI_RISING_BARS
@@ -115,53 +147,50 @@ def compute_indicators(
         )
 
     # ── MACD (12, 26, 9) ──────────────────────────────────────────────────────
-    macd_df = ta.macd(df["close"])   # columns: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
+    macd_df = ta.macd(close)   # cols: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
     if macd_df is not None and not macd_df.empty:
-        ml_col  = "MACD_12_26_9"
-        sig_col = "MACDs_12_26_9"
-        hst_col = "MACDh_12_26_9"
+        ml_col, sig_col, hst_col = "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9"
         ind.macd_line        = _val(macd_df[ml_col])  or 0.0
         ind.macd_signal_line = _val(macd_df[sig_col]) or 0.0
         ind.macd_histogram   = _val(macd_df[hst_col]) or 0.0
 
-        # Bullish crossover: previous bar below/equal signal, current bar above
         prev_ml  = _val(macd_df[ml_col],  -2)
         prev_sig = _val(macd_df[sig_col], -2)
-        if (prev_ml is not None and prev_sig is not None
-                and ind.macd_line is not None and ind.macd_signal_line is not None):
+        if prev_ml is not None and prev_sig is not None:
             ind.macd_bullish_cross = (prev_ml <= prev_sig
                                       and ind.macd_line > ind.macd_signal_line)
 
     # ── ADX (14) ──────────────────────────────────────────────────────────────
-    adx_df = ta.adx(df["high"], df["low"], df["close"], length=cfg.ADX_PERIOD)
-    # columns: ADX_14, DMP_14 (+DI), DMN_14 (-DI)
+    adx_df = ta.adx(high, low, close, length=cfg.ADX_PERIOD)
     if adx_df is not None and not adx_df.empty:
-        adx_col = f"ADX_{cfg.ADX_PERIOD}"
-        dmp_col = f"DMP_{cfg.ADX_PERIOD}"
-        dmn_col = f"DMN_{cfg.ADX_PERIOD}"
-        ind.adx      = _val(adx_df[adx_col]) or 0.0
-        ind.plus_di  = _val(adx_df[dmp_col]) or 0.0
-        ind.minus_di = _val(adx_df[dmn_col]) or 0.0
+        p = cfg.ADX_PERIOD
+        ind.adx      = _val(adx_df[f"ADX_{p}"]) or 0.0
+        ind.plus_di  = _val(adx_df[f"DMP_{p}"]) or 0.0
+        ind.minus_di = _val(adx_df[f"DMN_{p}"]) or 0.0
         ind.adx_ok   = ind.adx > cfg.ADX_THRESHOLD and ind.plus_di > ind.minus_di
 
-    # ── VWAP (session) ────────────────────────────────────────────────────────
-    # Pass session candles (today from 09:15); cumulative VWAP is correct
-    # because the array starts at session open.
-    vwap_candles = session_candles_5m if session_candles_5m else candles_5m
-    if vwap_candles:
-        vdf    = _to_df(vwap_candles)
-        vwap_s = ta.vwap(vdf["high"], vdf["low"], vdf["close"], vdf["volume"])
-        ind.vwap = _val(vwap_s) or 0.0
+    # ── VWAP (session, numpy) ──────────────────────────────────────────────────
+    # Reuse the main df arrays when session candles are the same list (the
+    # real call path); only build separate arrays if a distinct session set.
+    if session_candles_5m is None or session_candles_5m is candles_5m:
+        ind.vwap = session_vwap_last(high.values, low.values,
+                                     close.values, volume.values)
+    else:
+        sdf = _to_df(session_candles_5m)
+        ind.vwap = session_vwap_last(sdf["high"].values, sdf["low"].values,
+                                     sdf["close"].values, sdf["volume"].values)
+
     ltp = candles_5m[-1].close
     ind.price_above_vwap = ind.vwap > 0 and ltp > ind.vwap
 
     # ── Volume ────────────────────────────────────────────────────────────────
-    # Average of the previous N bars (exclude the current bar)
-    vol_series         = df["volume"].iloc[:-1]
-    ind.avg_volume_20  = float(vol_series.tail(cfg.VOLUME_MA_PERIOD).mean()
-                               if len(vol_series) >= cfg.VOLUME_MA_PERIOD else vol_series.mean())
-    ind.volume_surge   = (ind.avg_volume_20 > 0
-                          and df["volume"].iloc[-1] > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
+    vol_prev = volume.iloc[:-1]
+    ind.avg_volume_20 = float(
+        vol_prev.tail(cfg.VOLUME_MA_PERIOD).mean()
+        if len(vol_prev) >= cfg.VOLUME_MA_PERIOD else vol_prev.mean()
+    )
+    ind.volume_surge = (ind.avg_volume_20 > 0
+                        and volume.iloc[-1] > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
 
     # ── Structural support (swing low, custom) ────────────────────────────────
     ind.support_level = swing_low(candles_5m[:-1], cfg.SWING_LOW_BARS)
@@ -176,11 +205,5 @@ def compute_indicators(
     pat   = _detect_bullish_pattern(c, prev, prev2)
     ind.candle_pattern  = pat
     ind.bullish_pattern = pat is not None
-
-    # ── EMA (20 / 50) — informational ─────────────────────────────────────────
-    if len(df) >= 20:
-        ind.ema20 = round(float(ta.ema(df["close"], length=20).iloc[-1]), 2)
-    if len(df) >= 50:
-        ind.ema50 = round(float(ta.ema(df["close"], length=50).iloc[-1]), 2)
 
     return ind

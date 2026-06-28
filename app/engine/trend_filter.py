@@ -1,61 +1,67 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Tuple
 
-import pandas as pd
-import pandas_ta as ta
-
+from app.engine.indicator_engine import session_vwap_last
 from app.models import Candle, TrendGate
 
 
-def _nifty_vwap(candles_5m: List[Candle]) -> float:
-    """Session VWAP for NIFTY 50 computed via pandas-ta."""
-    if not candles_5m:
-        return 0.0
-    df = pd.DataFrame([{
-        "high": c.high, "low": c.low, "close": c.close, "volume": c.volume,
-    } for c in candles_5m], dtype=float)
-    try:
-        vwap_s = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
-        v = vwap_s.iloc[-1]
-        return float(v) if not pd.isna(v) else 0.0
-    except Exception:
-        return 0.0
-
-
-def check_trend(
-    ltp:              float,
-    candles_1d:       List[Candle],
-    candles_1h:       List[Candle],
+def compute_nifty_gates(
     nifty_ltp:        float,
     nifty_candles_1d: List[Candle],
     nifty_candles_5m: List[Candle],
+) -> Tuple[bool, bool]:
+    """
+    The two index-level gates are identical for every stock in a given bar,
+    so compute them ONCE per bar instead of 500× inside check_trend.
+
+    Returns (nifty_daily_green, nifty_above_vwap).
+    """
+    daily_green = bool(
+        nifty_candles_1d and nifty_ltp > 0
+        and nifty_ltp > nifty_candles_1d[-1].open
+    )
+
+    above_vwap = False
+    if nifty_ltp > 0 and nifty_candles_5m:
+        vwap = session_vwap_last(
+            [c.high for c in nifty_candles_5m],
+            [c.low  for c in nifty_candles_5m],
+            [c.close for c in nifty_candles_5m],
+            [c.volume for c in nifty_candles_5m],
+        )
+        above_vwap = vwap > 0 and nifty_ltp > vwap
+
+    return daily_green, above_vwap
+
+
+def check_trend(
+    ltp:               float,
+    candles_1d:        List[Candle],
+    candles_1h:        List[Candle],
+    nifty_daily_green: bool,
+    nifty_above_vwap:  bool,
 ) -> TrendGate:
     """
     4-gate multi-timeframe trend filter.
 
-    Pure function — all data is passed in as snapshots; safe to call from any
-    thread including ThreadPoolExecutor workers.
+    Pure function. The two NIFTY gates are passed in precomputed (one shared
+    computation per bar); only the two per-stock gates are evaluated here.
 
     Gates:
       1. Daily Green       — stock LTP > today's daily open
       2. Hourly Green      — current 1H candle close > open
-      3. NIFTY Daily Green — NIFTY LTP > NIFTY daily open
-      4. NIFTY Above VWAP  — NIFTY LTP > NIFTY session VWAP
+      3. NIFTY Daily Green — precomputed
+      4. NIFTY Above VWAP  — precomputed
     """
     gate = TrendGate()
+    gate.nifty_daily_green = nifty_daily_green
+    gate.nifty_above_vwap  = nifty_above_vwap
 
     if candles_1d and ltp > 0:
         gate.daily_green = ltp > candles_1d[-1].open
 
     if candles_1h:
         gate.hourly_green = candles_1h[-1].close > candles_1h[-1].open
-
-    if nifty_candles_1d and nifty_ltp > 0:
-        gate.nifty_daily_green = nifty_ltp > nifty_candles_1d[-1].open
-
-    nifty_vwap = _nifty_vwap(nifty_candles_5m)
-    if nifty_vwap > 0 and nifty_ltp > 0:
-        gate.nifty_above_vwap = nifty_ltp > nifty_vwap
 
     return gate

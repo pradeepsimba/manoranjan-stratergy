@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """
 Live WebSocket feed from the custom market data server.
-Adapted from the original tick_feed.py — subscribes to all watchlist symbols
-at 1m, 5m, and 1h intervals and updates AppState in real time.
+Subscribes to every watchlist symbol at 5m and 1h, plus NIFTY 50 at 5m,
+and updates AppState candle stores in real time via per-token locks.
 """
 
 import asyncio

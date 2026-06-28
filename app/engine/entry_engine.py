@@ -18,9 +18,9 @@ def _bar_time(candles_5m: List[Candle]) -> str:
 
 
 def scan_stock(
-    symbol:     str,
-    token:      str,
-    nifty_snap: Tuple,   # (nifty_5m: List[Candle], nifty_1d: List[Candle], nifty_ltp: float)
+    symbol:      str,
+    token:       str,
+    nifty_gates: Tuple[bool, bool],   # (nifty_daily_green, nifty_above_vwap) — precomputed once per bar
 ) -> Optional[EntrySignal]:
     """
     Full 5-minute entry scan for one stock on the most recent completed bar.
@@ -61,14 +61,12 @@ def scan_stock(
     # LTP dict writes are GIL-protected in CPython — safe to read without a lock
     ltp = st.ltp.get(symbol, candles_5m[-1].close)
 
-    nifty_5m, nifty_1d, nifty_ltp = nifty_snap
+    nifty_daily_green, nifty_above_vwap = nifty_gates
 
-    # Compute indicators on snapshot — pandas-ta/numpy releases GIL, giving
-    # real parallelism across the 500-stock thread pool
-    ind  = compute_indicators(candles_5m, candles_1h, session_candles_5m=candles_5m)
-    gate = check_trend(ltp, candles_1d, candles_1h, nifty_ltp, nifty_1d, nifty_5m)
-
-    # ── Trend gate (hard pre-filter) ──────────────────────────────────────────
+    # ── Trend gate FIRST (cheap, hard pre-filter) ──────────────────────────────
+    # Evaluated before the expensive indicator pass so a failing gate — including
+    # a red NIFTY that fails every stock — skips compute_indicators entirely.
+    gate = check_trend(ltp, candles_1d, candles_1h, nifty_daily_green, nifty_above_vwap)
     if not gate.all_clear:
         reason = (
             "Daily not green"       if not gate.daily_green      else
@@ -78,6 +76,10 @@ def scan_stock(
         )
         st.last_scan_results[symbol] = {"pass": False, "reason": reason}
         return None
+
+    # Compute indicators on snapshot — pandas-ta/numpy releases GIL, giving
+    # real parallelism across the 500-stock thread pool
+    ind = compute_indicators(candles_5m, candles_1h, session_candles_5m=candles_5m)
 
     # ── 7 entry conditions ────────────────────────────────────────────────────
     checks = {

@@ -12,7 +12,6 @@ Timing orchestrator — drives the trading session through its 5 phases:
 
 import asyncio
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, List
@@ -20,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 import app.config as cfg
 from app.engine.entry_engine import scan_stock
+from app.engine.trend_filter import compute_nifty_gates
 from app.engine.watchlist import fetch_active_watchlist
 from app.models import PositionStatus, TradingPhase
 from app.services.gemini_filter import analyse_stocks
@@ -253,15 +253,15 @@ class SchedulerService:
         st   = get_state()
         loop = asyncio.get_running_loop()
 
-        # Step 1: exit checks — sequential (max 3 open positions, negligible cost)
-        # Runs before scan tasks are spawned so no thread contention on candles.
-        for token in list(st.active_watchlist.values()):
-            candles = st.candles_5m.get(token, [])
+        # Step 1: exit checks — iterate only OPEN positions (max 3), not the
+        # whole 500-stock watchlist. Each position knows its own token.
+        for symbol, pos in list(st.positions.items()):
+            candles = st.candles_5m.get(pos.token, [])
             if len(candles) < 2:
                 continue
             last = candles[-2]          # the bar that just closed
             try:
-                closed_pos = check_paper_exits(token, last.high, last.low)
+                closed_pos = check_paper_exits(pos.token, last.high, last.low)
                 if closed_pos:
                     await self._db.update_position_exit(
                         symbol     = closed_pos.symbol,
@@ -270,25 +270,26 @@ class SchedulerService:
                         pnl        = closed_pos.pnl,
                     )
             except Exception as e:
-                print(f"Exit check error ({token}): {e}")
+                print(f"Exit check error ({symbol}): {e}")
 
         if st.phase != TradingPhase.ACTIVE:
             return
 
-        # Step 2: one NIFTY snapshot for the whole bar — all 500 workers share it
-        # so nobody needs to acquire _nifty_lock from inside a thread.
+        # Step 2: compute the two index-level gates ONCE per bar under the nifty
+        # lock. Previously each of 500 workers rebuilt NIFTY VWAP independently;
+        # now they share one (nifty_daily_green, nifty_above_vwap) tuple.
         with st._nifty_lock:
-            nifty_snap = (
-                list(st.nifty_candles_5m),
-                list(st.nifty_candles_1d),
+            nifty_gates = compute_nifty_gates(
                 st.nifty_ltp,
+                st.nifty_candles_1d,
+                st.nifty_candles_5m,
             )
 
         # Step 3: fan out to thread pool — pandas-ta releases GIL, giving real
         # CPU parallelism. 500 stocks with 16 workers ≈ 150 ms vs ~5 s sequential.
         watchlist_items = list(st.active_watchlist.items())
         tasks = [
-            loop.run_in_executor(_SCAN_POOL, scan_stock, sym, tok, nifty_snap)
+            loop.run_in_executor(_SCAN_POOL, scan_stock, sym, tok, nifty_gates)
             for sym, tok in watchlist_items
         ]
         results = await asyncio.gather(*tasks)
@@ -345,7 +346,11 @@ class SchedulerService:
     async def _push_dashboard_loop(self) -> None:
         while True:
             try:
-                await self._ws.broadcast(json.dumps(self._build_payload(), default=str))
+                # Skip building the payload entirely when no browser is watching.
+                if self._ws.count() > 0:
+                    await self._ws.broadcast(
+                        json.dumps(self._build_payload(), default=str)
+                    )
             except Exception as e:
                 print(f"Dashboard push error: {e}")
             await asyncio.sleep(1)
