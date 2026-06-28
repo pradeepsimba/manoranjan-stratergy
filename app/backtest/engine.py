@@ -55,12 +55,7 @@ def _scan_symbol(
     if not ok:
         return None
 
-    lo       = max(0, gidx - _LOOKBACK + 1)
-    lookback = ss.series[lo : gidx + 1]
-    if len(lookback) < 30:
-        return None
-
-    day_idxs  = ss.by_day.get(day, [])
+    day_idxs = ss.by_day.get(day)
     if not day_idxs:
         return None
     day_start = day_idxs[0]
@@ -69,8 +64,9 @@ def _scan_symbol(
     cur = ss.series[gidx]
     ltp = cur.close
 
-    # Synthesize the daily + forming-hour candles the trend gate expects, all
-    # derivable from 5m data with no look-ahead.
+    # Trend gate FIRST (cheap) — derive daily/forming-hour candles from 5m data
+    # with no look-ahead. The expensive lookback slice + indicators are built
+    # only once the gate clears, so gate-failing symbols cost almost nothing.
     day_open  = ss.series[day_start].open
     cur_hour  = cur.start_time[11:13]
     hour_open = next((b.open for b in session if b.start_time[11:13] == cur_hour), day_open)
@@ -79,6 +75,11 @@ def _scan_symbol(
 
     gate = check_trend(ltp, c1d, c1h, nifty_daily_green, nifty_above_vwap)
     if not gate.all_clear:
+        return None
+
+    lo       = max(0, gidx - _LOOKBACK + 1)
+    lookback = ss.series[lo : gidx + 1]
+    if len(lookback) < 30:
         return None
 
     ind = compute_indicators(lookback, session_candles_5m=session)
@@ -147,33 +148,41 @@ def simulate(
 
             # 1) Exits first — only for positions opened on an earlier bar.
             for sym in list(port.positions.keys()):
-                pos  = port.positions[sym]
-                ss   = symbols.get(pos.token)
-                gidx = ss.at.get(day, {}).get(tm) if ss else None
+                pos     = port.positions[sym]
+                ss      = symbols.get(pos.token)
+                day_map = ss.at.get(day) if ss else None
+                gidx    = day_map.get(tm) if day_map else None
                 if gidx is None or gidx <= pos.entry_gidx:
                     continue
                 _try_exit(port, pos, ss.series[gidx], slippage_bps)
 
-            # 2) Entries — only inside the scan window, before cutoff.
+            # 2) Entries — only inside the scan window, before cutoff, and only
+            #    when the portfolio can actually take a new position. Once 3 are
+            #    open (or the loss limit is hit) the whole 500-symbol scan is
+            #    skipped for the rest of the day's bars until a slot frees up.
             if _SCAN_START <= tm < _CUTOFF:
                 open_syms, traded, dpnl = port.snapshot()
-                signals: List[BTPosition] = []
-                for token, ss in symbols.items():
-                    gidx = ss.at.get(day, {}).get(tm)
-                    if gidx is None:
-                        continue
-                    sig = _scan_symbol(
-                        ss, gidx, day, nifty_daily_green, nifty_above_vwap,
-                        open_syms, traded, dpnl, slippage_bps,
-                    )
-                    if sig:
-                        signals.append(sig)
+                if (len(open_syms) < cfg.MAX_CONCURRENT_POSITIONS
+                        and dpnl > -cfg.DAILY_LOSS_LIMIT):
+                    signals: List[BTPosition] = []
+                    for token, ss in symbols.items():
+                        day_map = ss.at.get(day)
+                        gidx    = day_map.get(tm) if day_map else None
+                        if gidx is None:
+                            continue
+                        sig = _scan_symbol(
+                            ss, gidx, day, nifty_daily_green, nifty_above_vwap,
+                            open_syms, traded, dpnl, slippage_bps,
+                        )
+                        if sig:
+                            signals.append(sig)
 
-                # Apply fills sequentially, honoring the live circuit breakers.
-                for sig in signals:
-                    ok, _ = can_enter(sig.symbol, port.positions, port.traded_today, port.daily_pnl)
-                    if ok:
-                        port.open_position(sig)
+                    # Apply fills sequentially, honoring the live circuit breakers.
+                    for sig in signals:
+                        ok, _ = can_enter(sig.symbol, port.positions,
+                                          port.traded_today, port.daily_pnl)
+                        if ok:
+                            port.open_position(sig)
 
         # 3) EOD square-off any survivors at the day's last bar close.
         for sym in list(port.positions.keys()):

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Set
 
-from fastapi import WebSocket, WebSocketDisconnect
-
-from app.state import get_state
+from fastapi import WebSocket
 
 
 class DashboardWSManager:

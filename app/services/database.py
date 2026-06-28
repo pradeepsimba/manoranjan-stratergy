@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 import asyncpg
 
 import app.config as cfg
-from app.models import IndicatorResult, Position, PositionStatus, TrendGate
+from app.models import IndicatorResult, Position, TrendGate
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS positions (
