@@ -63,6 +63,38 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     max_drawdown     NUMERIC(10,2) DEFAULT 0,
     gemini_shortlist JSONB
 );
+
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    run_id      VARCHAR(32) PRIMARY KEY,
+    from_date   DATE,
+    to_date     DATE,
+    status      VARCHAR(16)  DEFAULT 'running',   -- running | done | error
+    params      JSONB,
+    summary     JSONB,
+    error       TEXT,
+    created_at  TIMESTAMPTZ  DEFAULT NOW(),
+    finished_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS backtest_trades (
+    id          SERIAL PRIMARY KEY,
+    run_id      VARCHAR(32) REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    symbol      VARCHAR(40),
+    token       VARCHAR(20),
+    entry_time  TEXT,
+    entry_price NUMERIC(12,2),
+    exit_time   TEXT,
+    exit_price  NUMERIC(12,2),
+    quantity    INTEGER,
+    stop_loss   NUMERIC(12,2),
+    target      NUMERIC(12,2),
+    outcome     VARCHAR(10),
+    gross_pnl   NUMERIC(12,2),
+    costs       NUMERIC(12,2),
+    net_pnl     NUMERIC(12,2),
+    r_multiple  NUMERIC(8,3)
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 """
 
 
@@ -185,3 +217,72 @@ class DatabaseService:
                 today, total_trades, winning_trades,
                 total_pnl, json.dumps(gemini_shortlist),
             )
+
+    # ── Backtest ──────────────────────────────────────────────────────────────
+
+    async def create_backtest_run(self, run_id: str, from_date, to_date,
+                                  params: Dict[str, Any]) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO backtest_runs (run_id, from_date, to_date, status, params) "
+                "VALUES ($1,$2,$3,'running',$4::jsonb)",
+                run_id, from_date, to_date, json.dumps(params),
+            )
+
+    async def finish_backtest_run(self, run_id: str, summary: Dict[str, Any]) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE backtest_runs SET status='done', summary=$2::jsonb, "
+                "finished_at=NOW() WHERE run_id=$1",
+                run_id, json.dumps(summary),
+            )
+
+    async def fail_backtest_run(self, run_id: str, error: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE backtest_runs SET status='error', error=$2, finished_at=NOW() "
+                "WHERE run_id=$1",
+                run_id, error,
+            )
+
+    async def save_backtest_trades(self, run_id: str, trades: list) -> None:
+        if not trades:
+            return
+        rows = [
+            (run_id, t.symbol, t.token, t.entry_time, t.entry_price,
+             t.exit_time, t.exit_price, t.qty, t.stop_loss, t.target,
+             t.outcome, t.gross_pnl, t.costs, t.net_pnl, t.r_multiple)
+            for t in trades
+        ]
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO backtest_trades
+                    (run_id, symbol, token, entry_time, entry_price, exit_time,
+                     exit_price, quantity, stop_loss, target, outcome,
+                     gross_pnl, costs, net_pnl, r_multiple)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                """,
+                rows,
+            )
+
+    async def get_backtest_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM backtest_runs WHERE run_id=$1", run_id)
+        return dict(row) if row else None
+
+    async def get_backtest_trades(self, run_id: str) -> List[Dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM backtest_trades WHERE run_id=$1 ORDER BY id", run_id
+            )
+        return [dict(r) for r in rows]
+
+    async def list_backtest_runs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT run_id, from_date, to_date, status, summary, created_at "
+                "FROM backtest_runs ORDER BY created_at DESC LIMIT $1",
+                limit,
+            )
+        return [dict(r) for r in rows]

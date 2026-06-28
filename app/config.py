@@ -61,3 +61,16 @@ NIFTY50_NAME   = "NIFTY 50"
 # ── Performance ────────────────────────────────────────────────────────────────
 HIST_BATCH_SIZE = 100   # max stocks per single historical API request
 SCAN_WORKERS    = 16    # ThreadPoolExecutor size for parallel bar-close scan
+
+# ── Backtest ──────────────────────────────────────────────────────────────────
+BACKTEST_WARMUP_DAYS = 7      # extra calendar days fetched before the range for indicator warmup
+SLIPPAGE_BPS         = 2.0    # 0.02% slippage applied to entry and exit fills
+
+# Realistic intraday-equity round-trip cost model (all rates as fractions of turnover)
+COST_BROKERAGE_PCT = 0.0003     # 0.03% per executed order
+COST_BROKERAGE_CAP = 20.0       # ₹20 cap per order
+COST_STT_SELL      = 0.00025    # 0.025% securities txn tax, sell side only
+COST_TXN_CHARGE    = 0.0000297  # NSE exchange transaction charge
+COST_GST           = 0.18       # 18% GST on (brokerage + txn charge)
+COST_STAMP_BUY     = 0.00003    # 0.003% stamp duty, buy side only
+COST_SEBI          = 0.000001   # SEBI turnover fee

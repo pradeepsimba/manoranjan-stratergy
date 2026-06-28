@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from typing import Container, Set
+
 import app.config as cfg
-from app.state import get_state
 
 
 def calc_quantity(entry_price: float, support: float) -> tuple[int, float, float]:
@@ -28,23 +29,32 @@ def calc_quantity(entry_price: float, support: float) -> tuple[int, float, float
     return qty, sl_offset, target_offset
 
 
-def can_enter(symbol: str) -> tuple[bool, str]:
+def can_enter(
+    symbol:       str,
+    open_symbols: Container[str],
+    traded_today: Set[str],
+    daily_pnl:    float,
+) -> tuple[bool, str]:
     """
     Run all circuit-breaker checks before allowing a new entry.
+
+    State is injected (not read from any global) so the exact same rules drive
+    both the live engine (passing AppState) and the backtest engine (passing a
+    BacktestPortfolio).
+
+    open_symbols — current open positions, supporting `in` and `len`
     Returns (allowed, rejection_reason).
     """
-    st = get_state()
-
-    if len(st.positions) >= cfg.MAX_CONCURRENT_POSITIONS:
+    if len(open_symbols) >= cfg.MAX_CONCURRENT_POSITIONS:
         return False, f"Max {cfg.MAX_CONCURRENT_POSITIONS} concurrent positions reached"
 
-    if symbol in st.traded_today:
+    if symbol in traded_today:
         return False, f"{symbol} already traded today"
 
-    if symbol in st.positions:
+    if symbol in open_symbols:
         return False, f"{symbol} already has an open position"
 
-    if st.daily_pnl <= -cfg.DAILY_LOSS_LIMIT:
+    if daily_pnl <= -cfg.DAILY_LOSS_LIMIT:
         return False, f"Daily loss limit ₹{cfg.DAILY_LOSS_LIMIT} hit"
 
     return True, ""

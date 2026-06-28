@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List
+import asyncio
+import uuid
+from datetime import date
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
+import app.config as cfg
+from app.backtest.engine import run_backtest
 from app.state import get_state
 from app.ws.dashboard_ws import ws_manager
 
@@ -75,6 +80,51 @@ def get_scans() -> Dict[str, Any]:
 def get_prices() -> Dict[str, float]:
     st = get_state()
     return {**st.ltp, "NIFTY50": st.nifty_ltp}
+
+
+# ── Backtest ──────────────────────────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    from_date:    date
+    to_date:      date
+    slippage_bps: float = cfg.SLIPPAGE_BPS
+
+
+@router.post("/api/backtest")
+async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    if req.from_date > req.to_date:
+        raise HTTPException(400, "from_date must be on or before to_date")
+
+    run_id = uuid.uuid4().hex[:12]
+    await _db.create_backtest_run(
+        run_id, req.from_date, req.to_date, {"slippage_bps": req.slippage_bps}
+    )
+    # Run in the background so the request returns immediately and the live
+    # scheduler is never blocked.
+    asyncio.create_task(
+        run_backtest(_db, run_id, req.from_date, req.to_date, req.slippage_bps)
+    )
+    return {"run_id": run_id, "status": "running"}
+
+
+@router.get("/api/backtest/{run_id}")
+async def get_backtest(run_id: str) -> Dict[str, Any]:
+    run = await _db.get_backtest_run(run_id) if _db else None
+    if run is None:
+        raise HTTPException(404, "Unknown run_id")
+    return run
+
+
+@router.get("/api/backtest/{run_id}/trades")
+async def get_backtest_trades(run_id: str) -> List[Dict[str, Any]]:
+    return await _db.get_backtest_trades(run_id) if _db else []
+
+
+@router.get("/api/backtests")
+async def list_backtests() -> List[Dict[str, Any]]:
+    return await _db.list_backtest_runs() if _db else []
 
 
 # ── Dashboard WebSocket ───────────────────────────────────────────────────────

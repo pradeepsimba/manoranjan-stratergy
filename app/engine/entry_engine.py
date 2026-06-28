@@ -42,7 +42,7 @@ def scan_stock(
     st = get_state()
 
     # Circuit breakers first — cheap before any computation
-    allowed, reason = can_enter(symbol)
+    allowed, reason = can_enter(symbol, st.positions, st.traded_today, st.daily_pnl)
     if not allowed:
         st.last_scan_results[symbol] = {"pass": False, "reason": reason}
         return None
