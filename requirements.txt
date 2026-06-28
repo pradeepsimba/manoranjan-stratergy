@@ -7,5 +7,4 @@ python-multipart
 google-genai
 loguru
 numpy
-pandas
-pandas-ta
+TA-Lib

@@ -77,7 +77,7 @@ def scan_stock(
         st.last_scan_results[symbol] = {"pass": False, "reason": reason}
         return None
 
-    # Compute indicators on snapshot — pandas-ta/numpy releases GIL, giving
+    # Compute indicators on snapshot — TA-Lib's C layer releases GIL, giving
     # real parallelism across the 500-stock thread pool
     ind = compute_indicators(candles_5m, candles_1h, session_candles_5m=candles_5m)
 

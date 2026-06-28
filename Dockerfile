@@ -8,12 +8,24 @@ ENV TZ=Asia/Kolkata \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# tzdata so zoneinfo can resolve Asia/Kolkata; curl for the container healthcheck.
+# tzdata so zoneinfo can resolve Asia/Kolkata; curl for the healthcheck;
+# build-essential + wget to compile the TA-Lib C library the Python wheel binds to.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata curl \
+ && apt-get install -y --no-install-recommends tzdata curl wget build-essential \
  && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
  && echo $TZ > /etc/timezone \
  && rm -rf /var/lib/apt/lists/*
+
+# ── TA-Lib C library (required by the `TA-Lib` Python package) ──────────────────
+RUN wget -q https://github.com/TA-Lib/ta-lib/releases/download/v0.6.4/ta-lib-0.6.4-src.tar.gz \
+ && tar -xzf ta-lib-0.6.4-src.tar.gz \
+ && cd ta-lib-0.6.4 \
+ && ./configure --prefix=/usr \
+ && make -j"$(nproc)" \
+ && make install \
+ && cd .. \
+ && rm -rf ta-lib-0.6.4 ta-lib-0.6.4-src.tar.gz \
+ && ldconfig
 
 WORKDIR /app
 

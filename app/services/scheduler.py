@@ -286,7 +286,7 @@ class SchedulerService:
                 st.nifty_candles_5m,
             )
 
-        # Step 3: fan out to thread pool — pandas-ta releases GIL, giving real
+        # Step 3: fan out to thread pool — TA-Lib's C layer releases GIL, giving real
         # CPU parallelism. 500 stocks with 16 workers ≈ 150 ms vs ~5 s sequential.
         watchlist_items = list(st.active_watchlist.items())
         tasks = [

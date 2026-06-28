@@ -109,8 +109,8 @@ class EntrySignal:
     token:          str
     ltp:            float
     support:        float
-    sl_offset:      float          # entry − support (passed to BO stoploss param)
-    target_offset:  float          # sl_offset × RR_RATIO (passed to BO squareoff)
+    sl_offset:      float          # entry − support (stop distance)
+    target_offset:  float          # sl_offset × RR_RATIO (target distance)
     quantity:       int
     capital_needed: float          # quantity × entry / LEVERAGE
     indicators:     IndicatorResult = field(default_factory=IndicatorResult)
@@ -127,8 +127,8 @@ class Position:
     quantity:      int
     stop_loss:     float           # absolute price level
     target:        float           # absolute price level
-    sl_offset:     float           # passed to Angel One BO stoploss
-    target_offset: float           # passed to Angel One BO squareoff
+    sl_offset:     float           # stop distance from entry
+    target_offset: float           # target distance from entry
     order_id:      str
     status:        PositionStatus  = PositionStatus.OPEN
     exit_price:    Optional[float] = None
