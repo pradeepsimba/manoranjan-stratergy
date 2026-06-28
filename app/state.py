@@ -1,62 +1,11 @@
 from __future__ import annotations
+
 import threading
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from datetime import date
+from typing import Dict, List, Optional, Set
 
-import app.config as cfg
-from app.models import ActiveTrade, BNIndicators, Candle, Trade
+from app.models import Candle, EntrySignal, Position, TradingPhase
 
-
-# ── Value objects ──────────────────────────────────────────────────────────────
-
-@dataclass
-class PendingSignal:
-    type:   str
-    reason: str
-
-
-@dataclass
-class SRLevels:
-    supports:    List[float]
-    resistances: List[float]
-
-
-@dataclass
-class MomResult:
-    ok:     bool
-    reason: str
-
-
-@dataclass
-class StockStat:
-    stock:     str
-    candle:    Optional[Candle]
-    qty:       float
-    threshold: float
-
-
-@dataclass
-class EntryDiagnostics:
-    market_open:           bool
-    time_window_ok:        bool
-    no_active_trade:       bool
-    cooldown_ms:           float
-    sideways_range:        Optional[float]
-    candle_close_ok:       bool
-    leader_signal_type:    str
-    leader_signal_reason:  str
-    green:                 int
-    red:                   int
-    strong_qty:            int
-    already_traded_candle: bool
-    bn_ind:                Optional[BNIndicators]
-    bn_candle:             Optional[Candle]
-    stocks:                List[StockStat]
-    momentum:              Optional[MomResult]
-    candle_close_time:     Optional[str]
-
-
-# ── Singleton state ────────────────────────────────────────────────────────────
 
 class AppState:
     _instance: Optional["AppState"] = None
@@ -71,48 +20,45 @@ class AppState:
         return cls._instance
 
     def _init(self) -> None:
-        # symbol → list[Candle], selected interval only (up to 200)
-        self.last_n_candles: Dict[str, List[Candle]] = {}
+        # ── Session ───────────────────────────────────────────────────────────
+        self.phase:        TradingPhase   = TradingPhase.PRE_MARKET
+        self.trading_date: Optional[date] = None
+        self.ws_status:    str            = "—"
+        self.api_status:   str            = "—"
 
-        # interval → symbol → list[Candle] (up to 5, for multi-frame display)
-        self.all_interval_candles: Dict[str, Dict[str, List[Candle]]] = {}
+        # ── Universe & Watchlist ──────────────────────────────────────────────
+        # Full NSE universe loaded from instrument master: list of StockInfo dicts
+        self.full_universe:    List[dict]     = []
+        # Gemini AI shortlist: list of trading symbols e.g. ["RELIANCE", "TCS"]
+        self.gemini_shortlist: List[str]      = []
+        # Active watchlist subscribed via WebSocket: {symbol: token}
+        self.active_watchlist: Dict[str, str] = {}
 
-        # BankNifty candles kept for indicator calcs (up to 300)
-        self.bn_indicator_candles: List[Candle] = []
-        self._bn_ind_lock = threading.Lock()
+        # ── Candle stores (symbol → list[Candle], capped at 300 bars) ─────────
+        self.candles_5m: Dict[str, List[Candle]] = {}
+        self.candles_1h: Dict[str, List[Candle]] = {}
+        self.candles_1d: Dict[str, List[Candle]] = {}
 
-        self.selected_interval: str  = "5m"
-        self.num_candles:       int  = 3
-        self.candle_offset:     int  = 0
+        # NIFTY 50 candle series for index trend gate
+        self.nifty_candles_1d: List[Candle] = []
+        self.nifty_candles_5m: List[Candle] = []   # 5m bars for session VWAP
 
-        self.current_candle_time: Optional[str] = None
-        self.signal_locked:       bool           = False
+        # ── Live prices ───────────────────────────────────────────────────────
+        self.ltp:       Dict[str, float] = {}   # symbol → latest LTP
+        self.nifty_ltp: float            = 0.0
 
-        self.active_trade:     Optional[ActiveTrade]   = None
-        self.last_trade_candle: Optional[str]          = None
-        self.last_exit_time:   float                   = 0.0  # monotonic seconds
-        self.pending_signal:   Optional[PendingSignal] = None
+        # ── Positions ─────────────────────────────────────────────────────────
+        self.positions:    Dict[str, Position] = {}   # symbol → Position
+        self.traded_today: Set[str]            = set()
+        self.daily_pnl:    float               = 0.0
 
-        self.available_funds: float = cfg.DEFAULT_FUNDS
+        # ── Scan diagnostics ──────────────────────────────────────────────────
+        self.last_scan_results: Dict[str, dict]   = {}
+        self.pending_signals:   List[EntrySignal] = []
+        self.last_5m_bar_time:  Optional[str]     = None   # "HH:MM" of last scanned bar
 
-        # per-stock live quantities (updated every tick)
-        self.latest_minute_qty: Dict[str, float] = {}
-        self.latest_buy_qty:    Dict[str, int]   = {}
-        self.latest_sell_qty:   Dict[str, int]   = {}
-
-        # S/R levels per stock, per timeframe
-        self.sr5m:  Dict[str, SRLevels] = {}
-        self.sr15m: Dict[str, SRLevels] = {}
-
-        self.api_status: str = "—"
-        self.ws_status:  str = "—"
-
-        self.bn_ltp:        float                       = 0.0
-        self.bn_indicators: Optional[BNIndicators]      = None
-        self.global_signal: str                         = "NEUTRAL"
-
-        self.big_trades_snapshot: Optional[Any]          = None
-        self.entry_diagnostics:   Optional[EntryDiagnostics] = None
+        # Thread-safe lock for candle writes from the WebSocket callback thread
+        self._candle_lock = threading.Lock()
 
 
 def get_state() -> AppState:

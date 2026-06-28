@@ -1,11 +1,32 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Optional, List
 
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List, Optional
+
+
+# ── Enumerations ──────────────────────────────────────────────────────────────
+
+class TradingPhase(Enum):
+    PRE_MARKET = "pre_market"   # Before 09:00 — idle
+    WAIT_ZONE  = "wait_zone"    # 09:15–09:45 — init, no scans
+    ACTIVE     = "active"       # 09:45–14:30 — scanning and trading
+    CUTOFF     = "cutoff"       # 14:30–15:30 — no new entries; OCO exits manage positions
+    CLOSED     = "closed"       # After 15:30 — session terminated
+
+
+class PositionStatus(Enum):
+    OPEN   = "OPEN"
+    CLOSED = "CLOSED"
+
+
+# ── Market Data ───────────────────────────────────────────────────────────────
+# Candle format matches the custom server response exactly.
+# Field order kept for API compatibility; always use keyword access.
 
 @dataclass
 class Candle:
-    start_time: str  = ""
+    start_time: str   = ""
     open:       float = 0.0
     close:      float = 0.0
     high:       float = 0.0
@@ -15,67 +36,103 @@ class Candle:
     def is_bullish(self) -> bool: return self.close > self.open
     def is_bearish(self) -> bool: return self.close < self.open
     def body(self)       -> float: return abs(self.close - self.open)
-    def range(self)      -> float: return self.high - self.low
+    def candle_range(self) -> float: return self.high - self.low
 
 
 @dataclass
-class ActiveTrade:
-    type:       str    # "BUY" or "SELL"
-    entry:      float
-    entry_time: str
-    confidence: str
-    num_lots:   int
-    current_sl: float = 0.0
+class StockInfo:
+    symbol: str
+    token:  str
+    name:   str = ""
 
-    def __post_init__(self):
-        import app.config as cfg
-        if self.current_sl == 0.0:
-            self.current_sl = (
-                self.entry - cfg.STOPLOSS if self.type == "BUY"
-                else self.entry + cfg.STOPLOSS
-            )
+
+# ── Indicators ────────────────────────────────────────────────────────────────
+
+@dataclass
+class IndicatorResult:
+    # RSI
+    rsi:                Optional[float] = None
+    rsi_above_30:       bool            = False
+    rsi_rising:         bool            = False   # rose each of last 3 bars
+
+    # MACD
+    macd_line:          float = 0.0
+    macd_signal_line:   float = 0.0
+    macd_histogram:     float = 0.0
+    macd_bullish_cross: bool  = False             # line just crossed above signal
+
+    # ADX
+    adx:      float = 0.0
+    plus_di:  float = 0.0
+    minus_di: float = 0.0
+    adx_ok:   bool  = False   # ADX > 20 AND +DI > -DI
+
+    # VWAP
+    vwap:             float = 0.0
+    price_above_vwap: bool  = False
+
+    # Volume
+    avg_volume_20: float = 0.0
+    volume_surge:  bool  = False   # latest bar volume > 1.5× avg
+
+    # Structural support
+    support_level: float = 0.0
+    near_support:  bool  = False   # price within 0.5% of swing low
+
+    # Candlestick
+    candle_pattern:  Optional[str] = None
+    bullish_pattern: bool          = False
+
+    # EMA (informational)
+    ema20: float = 0.0
+    ema50: float = 0.0
 
 
 @dataclass
-class Trade:
-    id:             int            = 0
-    type:           str            = ""   # BUY / SELL / BUY_EXIT / SELL_EXIT
-    price:          float          = 0.0
-    time:           str            = ""
-    confidence:     str            = ""
-    pnl:            float          = 0.0
-    option_premium: Optional[float] = None
+class TrendGate:
+    daily_green:       bool = False   # stock LTP > today's daily open
+    hourly_green:      bool = False   # current 1H candle close > open
+    nifty_daily_green: bool = False   # NIFTY LTP > NIFTY daily open
+    nifty_above_vwap:  bool = False   # NIFTY LTP > NIFTY session VWAP
+
+    @property
+    def all_clear(self) -> bool:
+        return (self.daily_green and self.hourly_green
+                and self.nifty_daily_green and self.nifty_above_vwap)
+
+
+# ── Trading ───────────────────────────────────────────────────────────────────
+
+@dataclass
+class EntrySignal:
+    symbol:         str
+    token:          str
+    ltp:            float
+    support:        float
+    sl_offset:      float          # entry − support (passed to BO stoploss param)
+    target_offset:  float          # sl_offset × RR_RATIO (passed to BO squareoff)
+    quantity:       int
+    capital_needed: float          # quantity × entry / LEVERAGE
+    indicators:     IndicatorResult = field(default_factory=IndicatorResult)
+    trend:          TrendGate       = field(default_factory=TrendGate)
+    bar_time:       str             = ""   # "HH:MM" of the triggering 5m bar
 
 
 @dataclass
-class EmaStack:
-    ema20:   float = 0.0
-    ema50:   float = 0.0
-    bullish: bool  = False
-    bearish: bool  = False
-
-
-@dataclass
-class PatternMatch:
-    stock:   str
-    pattern: str
-
-
-@dataclass
-class LeaderPatterns:
-    bull_count: int                    = 0
-    bear_count: int                    = 0
-    matches:    List[PatternMatch]     = field(default_factory=list)
-
-
-@dataclass
-class BNIndicators:
-    rsi:        Optional[float]        = None
-    macd_dir:   Optional[str]          = None
-    macd_val:   Optional[float]        = None
-    ema_stack:  Optional[EmaStack]     = None
-    leader_pat: Optional[LeaderPatterns] = None
-    bull:       float                  = 0.0
-    bear:       float                  = 0.0
-    bullish:    bool                   = False
-    bearish:    bool                   = False
+class Position:
+    symbol:        str
+    token:         str
+    entry_price:   float
+    entry_time:    str             # ISO timestamp string
+    quantity:      int
+    stop_loss:     float           # absolute price level
+    target:        float           # absolute price level
+    sl_offset:     float           # passed to Angel One BO stoploss
+    target_offset: float           # passed to Angel One BO squareoff
+    order_id:      str
+    status:        PositionStatus  = PositionStatus.OPEN
+    exit_price:    Optional[float] = None
+    exit_time:     Optional[str]   = None
+    pnl:           float           = 0.0
+    indicators:    Optional[IndicatorResult] = None
+    trend:         Optional[TrendGate]       = None

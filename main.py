@@ -4,50 +4,48 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.dashboard import router, set_db
+from app.api.dashboard import router, set_services
+from app.services.angel_api import AngelAPIService
 from app.services.database import DatabaseService
+from app.services.market_data import MarketDataService
 from app.services.scheduler import SchedulerService
-from app.services.tick_feed import TickFeedService
 from app.ws.dashboard_ws import ws_manager
 
 # ── Global service instances ──────────────────────────────────────────────────
 
-db_service:   DatabaseService  = DatabaseService()
-tick_service: TickFeedService  | None = None
-scheduler:    SchedulerService | None = None
+db_service    = DatabaseService()
+angel_service = AngelAPIService()
+mkt_service   = MarketDataService()
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global tick_service, scheduler
-
     await db_service.init()
-    set_db(db_service)
 
-    tick_service = TickFeedService(db=db_service)
-    tick_service.start()
+    scheduler = SchedulerService(
+        db          = db_service,
+        angel       = angel_service,
+        market_data = mkt_service,
+        ws_manager  = ws_manager,
+    )
+    await scheduler.start()
 
-    scheduler = SchedulerService(ws_manager=ws_manager, db=db_service)
-    scheduler.start()
+    set_services(db_service, angel_service, scheduler)
 
     yield
 
-    if tick_service:
-        await tick_service.stop()
-    if scheduler:
-        await scheduler.stop()
+    await scheduler.stop()
     await db_service.close()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="BankNifty Trading Dashboard", lifespan=lifespan)
+app = FastAPI(title="NSE Equity Strategy — Manoranjan", lifespan=lifespan)
 
 app.include_router(router)
 
-# Serve CSS and JS at the paths the HTML references (/css/…, /js/…)
 app.mount("/css", StaticFiles(directory="static/css"), name="css")
 app.mount("/js",  StaticFiles(directory="static/js"),  name="js")
 

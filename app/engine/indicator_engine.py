@@ -1,242 +1,186 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+
+from typing import List, Optional
+
+import pandas as pd
+import pandas_ta as ta
 
 import app.config as cfg
-from app.models import BNIndicators, Candle, EmaStack, LeaderPatterns, PatternMatch
+from app.models import Candle, IndicatorResult
 
 
-# ── EMA ───────────────────────────────────────────────────────────────────────
+# ── DataFrame helper ──────────────────────────────────────────────────────────
 
-def ema(prices: List[float], period: int) -> float:
-    if len(prices) < period:
+def _to_df(candles: List[Candle]) -> pd.DataFrame:
+    """Convert a list of Candle objects to a pandas DataFrame."""
+    return pd.DataFrame([{
+        "open":   c.open,
+        "high":   c.high,
+        "low":    c.low,
+        "close":  c.close,
+        "volume": c.volume,
+    } for c in candles], dtype=float)
+
+
+def _val(series: pd.Series, offset: int = -1) -> Optional[float]:
+    """Return a scalar from a Series, or None if NaN / empty."""
+    try:
+        v = series.iloc[offset]
+        return None if pd.isna(v) else float(v)
+    except (IndexError, TypeError):
+        return None
+
+
+# ── Swing Low (custom — pandas-ta has no swing-low primitive) ─────────────────
+
+def swing_low(candles: List[Candle], bars: int = cfg.SWING_LOW_BARS) -> float:
+    """Lowest low of the last N completed bars (structural support floor)."""
+    if not candles:
         return 0.0
-    k   = 2.0 / (period + 1)
-    val = sum(prices[:period]) / period
-    for p in prices[period:]:
-        val = p * k + val * (1 - k)
-    return val
+    window = candles[-bars:] if len(candles) >= bars else candles
+    return min(c.low for c in window)
 
 
-# ── RSI(14) ───────────────────────────────────────────────────────────────────
+# ── Bullish candlestick patterns (custom — most reliable to hand-roll) ────────
 
-def calc_rsi(candles: List[Candle], period: int = 14) -> Optional[float]:
-    if len(candles) < period + 1:
-        return None
-    gains = losses = 0.0
-    for i in range(len(candles) - period, len(candles)):
-        diff = candles[i].close - candles[i - 1].close
-        if diff > 0: gains  += diff
-        else:        losses -= diff
-    if losses == 0:
-        return 100.0
-    rs = (gains / period) / (losses / period)
-    return round(100 - 100 / (1 + rs), 1)
-
-
-# ── MACD(12,26,9) ─────────────────────────────────────────────────────────────
-
-def calc_macd(closes: List[float]) -> Tuple[float, float, float]:
-    if len(closes) < 34:
-        return 0.0, 0.0, 0.0
-    start = max(26, len(closes) - 30)
-    macd_series: List[float] = []
-    for i in range(start, len(closes) + 1):
-        sub = closes[:i]
-        macd_series.append(ema(sub, 12) - ema(sub, 26))
-    if len(macd_series) < 9:
-        m = macd_series[-1]
-        return m, m, 0.0
-    macd_line   = macd_series[-1]
-    signal_line = ema(macd_series, 9)
-    return macd_line, signal_line, macd_line - signal_line
-
-
-def macd_direction(closes: List[float]) -> str:
-    if len(closes) < 35:
-        return "—"
-    cur  = calc_macd(closes)
-    prev = calc_macd(closes[:-1])
-    if prev[0] <= prev[1] and cur[0] > cur[1]: return "CROSS↑"
-    if prev[0] >= prev[1] and cur[0] < cur[1]: return "CROSS↓"
-    if cur[0] > cur[1]: return "BUY"
-    if cur[0] < cur[1]: return "SELL"
-    return "NEUTRAL"
-
-
-# ── EMA Stack (20/50) ─────────────────────────────────────────────────────────
-
-def calc_ema_stack(candles: List[Candle]) -> Optional[EmaStack]:
-    if len(candles) < 50:
-        return None
-    closes = [c.close for c in candles]
-    price  = closes[-1]
-    e20    = ema(closes, 20)
-    e50    = ema(closes, 50)
-    stack  = EmaStack()
-    stack.ema20   = round(e20, 2)
-    stack.ema50   = round(e50, 2)
-    stack.bullish = price > e20 and e20 > e50
-    stack.bearish = price < e20 and e20 < e50
-    return stack
-
-
-# ── Candlestick patterns ──────────────────────────────────────────────────────
-
-def _detect_pattern(c: Candle, prev: Candle, c2: Optional[Candle]) -> Optional[str]:
-    body = c.body(); rng = c.range()
+def _detect_bullish_pattern(
+    c: Candle,
+    prev: Candle,
+    prev2: Optional[Candle] = None,
+) -> Optional[str]:
+    body  = abs(c.close - c.open)
+    rng   = c.high - c.low
     if rng == 0:
         return None
-    upper     = (c.high - c.close) if c.is_bullish() else (c.high - c.open)
-    lower     = (c.open  - c.low)  if c.is_bullish() else (c.close - c.low)
-    prev_body = prev.body()
-    if c.is_bullish() and lower >= 2*body and upper <= body*0.5 and body/rng < 0.4 and prev.is_bearish():
-        return "Hammer (Bull)"
-    if c.is_bearish() and upper >= 2*body and lower <= body*0.5 and body/rng < 0.4 and prev.is_bullish():
-        return "Shooting Star (Bear)"
+    lower = (c.open - c.low)  if c.is_bullish() else (c.close - c.low)
+    upper = (c.high - c.close) if c.is_bullish() else (c.high - c.open)
+
+    # Hammer: small body, long lower shadow, previous bar bearish
     if (c.is_bullish() and prev.is_bearish()
-            and c.open <= prev.close and c.close >= prev.open and body > prev_body * 0.9):
-        return "Bull Engulfing"
-    if (c.is_bearish() and prev.is_bullish()
-            and c.open >= prev.close and c.close <= prev.open and body > prev_body * 0.9):
-        return "Bear Engulfing"
-    if (c2 and c2.is_bearish() and prev.body() <= c2.body() * 0.4
-            and c.is_bullish() and c.close > (c2.open + c2.close) / 2):
-        return "Morning Star (Bull)"
-    if (c2 and c2.is_bullish() and prev.body() <= c2.body() * 0.4
-            and c.is_bearish() and c.close < (c2.open + c2.close) / 2):
-        return "Evening Star (Bear)"
+            and lower >= 2 * body and upper <= body * 0.5
+            and body / rng < 0.4):
+        return "Hammer"
+
+    # Bullish Engulfing
+    if (c.is_bullish() and prev.is_bearish()
+            and c.open <= prev.close and c.close >= prev.open
+            and body > abs(prev.close - prev.open) * 0.9):
+        return "Bullish Engulfing"
+
+    # Morning Star (3-bar reversal)
+    if (prev2 and prev2.is_bearish()
+            and abs(prev.close - prev.open) <= abs(prev2.close - prev2.open) * 0.4
+            and c.is_bullish()
+            and c.close > (prev2.open + prev2.close) / 2):
+        return "Morning Star"
+
+    # Strong bullish close: body > 70% of range and moves > 5 points
+    if c.is_bullish() and body / rng > 0.7 and body > 5:
+        return "Strong Bull Close"
+
     return None
 
 
-def check_leader_patterns() -> LeaderPatterns:
-    from app.state import get_state
-    st = get_state()
-    lp = LeaderPatterns()
-    for stock_name in cfg.LEADER_STOCKS:
-        stock = next((s for s in cfg.STOCKS if s.name == stock_name), None)
-        if not stock:
-            continue
-        candles = st.last_n_candles.get(stock.symbol, [])
-        if len(candles) < 3:
-            continue
-        pat = _detect_pattern(candles[-1], candles[-2], candles[-3])
-        if not pat:
-            continue
-        is_bull = any(k in pat for k in ("Bull", "Morning", "Hammer"))
-        is_bear = any(k in pat for k in ("Bear", "Evening", "Shooting"))
-        if is_bull: lp.bull_count += 1
-        if is_bear: lp.bear_count += 1
-        lp.matches.append(PatternMatch(stock=stock_name, pattern=pat))
-    return lp
+# ── Master indicator function ─────────────────────────────────────────────────
 
+def compute_indicators(
+    candles_5m: List[Candle],
+    candles_1h: Optional[List[Candle]] = None,
+    session_candles_5m: Optional[List[Candle]] = None,
+) -> IndicatorResult:
+    """
+    Compute all entry-check indicators using pandas-ta.
 
-# ── BN gate ───────────────────────────────────────────────────────────────────
+    candles_5m          — 5-min bars used for RSI, MACD, ADX, volume, patterns
+    session_candles_5m  — today's 5-min bars from 09:15 (for VWAP); falls back
+                          to candles_5m if not provided
+    """
+    ind = IndicatorResult()
+    if not candles_5m or len(candles_5m) < 3:
+        return ind
 
-def check_bn_indicators() -> BNIndicators:
-    from app.state import get_state
-    st  = get_state()
-    ind = BNIndicators()
+    df = _to_df(candles_5m)
 
-    with st._bn_ind_lock:
-        bn_candles = list(st.bn_indicator_candles)
-    if not bn_candles:
-        dc         = st.last_n_candles.get(cfg.INDEX_SYMBOL, [])
-        bn_candles = list(dc)
-
-    closes = [c.close for c in bn_candles]
-
-    ind.rsi      = calc_rsi(bn_candles, 14)
-    ind.macd_dir = macd_direction(closes)
-    if len(closes) >= 34:
-        m            = calc_macd(closes)
-        ind.macd_val = round(m[0], 2)
-    ind.ema_stack  = calc_ema_stack(bn_candles)
-    ind.leader_pat = check_leader_patterns()
-
-    bull = bear = 0.0
-
+    # ── RSI (14) ───────────────────────────────────────────────────────────────
+    rsi_s        = ta.rsi(df["close"], length=cfg.RSI_PERIOD)
+    ind.rsi      = _val(rsi_s)
     if ind.rsi is not None:
-        if   ind.rsi > 58: bull += 1
-        elif ind.rsi < 42: bear += 1
-        if   ind.rsi > 72: bear += 0.5   # overbought → reversal pressure
-        elif ind.rsi < 28: bull += 0.5   # oversold   → reversal pressure
+        ind.rsi_above_30 = ind.rsi > cfg.RSI_OVERSOLD
+        # Rising: last 3 valid values each greater than the previous
+        recent_rsi = rsi_s.dropna().tail(cfg.RSI_RISING_BARS + 1).values
+        ind.rsi_rising = (
+            len(recent_rsi) >= cfg.RSI_RISING_BARS
+            and all(recent_rsi[i] > recent_rsi[i - 1]
+                    for i in range(1, len(recent_rsi)))
+        )
 
-    macd_score = {"CROSS↑": (2, 0), "CROSS↓": (0, 2), "BUY": (1, 0), "SELL": (0, 1)}
-    b, r = macd_score.get(ind.macd_dir or "", (0, 0))
-    bull += b; bear += r
+    # ── MACD (12, 26, 9) ──────────────────────────────────────────────────────
+    macd_df = ta.macd(df["close"])   # columns: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
+    if macd_df is not None and not macd_df.empty:
+        ml_col  = "MACD_12_26_9"
+        sig_col = "MACDs_12_26_9"
+        hst_col = "MACDh_12_26_9"
+        ind.macd_line        = _val(macd_df[ml_col])  or 0.0
+        ind.macd_signal_line = _val(macd_df[sig_col]) or 0.0
+        ind.macd_histogram   = _val(macd_df[hst_col]) or 0.0
 
-    if ind.ema_stack:
-        if ind.ema_stack.bullish: bull += 2
-        if ind.ema_stack.bearish: bear += 2
+        # Bullish crossover: previous bar below/equal signal, current bar above
+        prev_ml  = _val(macd_df[ml_col],  -2)
+        prev_sig = _val(macd_df[sig_col], -2)
+        if (prev_ml is not None and prev_sig is not None
+                and ind.macd_line is not None and ind.macd_signal_line is not None):
+            ind.macd_bullish_cross = (prev_ml <= prev_sig
+                                      and ind.macd_line > ind.macd_signal_line)
 
-    if ind.leader_pat:
-        if ind.leader_pat.bull_count >= 2: bull += 2
-        if ind.leader_pat.bear_count >= 2: bear += 2
+    # ── ADX (14) ──────────────────────────────────────────────────────────────
+    adx_df = ta.adx(df["high"], df["low"], df["close"], length=cfg.ADX_PERIOD)
+    # columns: ADX_14, DMP_14 (+DI), DMN_14 (-DI)
+    if adx_df is not None and not adx_df.empty:
+        adx_col = f"ADX_{cfg.ADX_PERIOD}"
+        dmp_col = f"DMP_{cfg.ADX_PERIOD}"
+        dmn_col = f"DMN_{cfg.ADX_PERIOD}"
+        ind.adx      = _val(adx_df[adx_col]) or 0.0
+        ind.plus_di  = _val(adx_df[dmp_col]) or 0.0
+        ind.minus_di = _val(adx_df[dmn_col]) or 0.0
+        ind.adx_ok   = ind.adx > cfg.ADX_THRESHOLD and ind.plus_di > ind.minus_di
 
-    # Over-extended EMA penalty
-    if ind.ema_stack and bn_candles:
-        price = bn_candles[-1].close
-        if ind.ema_stack.ema20 > 0:
-            ext = abs(price - ind.ema_stack.ema20) / ind.ema_stack.ema20 * 100
-            if ext > 1.2:
-                if price > ind.ema_stack.ema20: bear += 0.5
-                else:                           bull += 0.5
+    # ── VWAP (session) ────────────────────────────────────────────────────────
+    # Pass session candles (today from 09:15); cumulative VWAP is correct
+    # because the array starts at session open.
+    vwap_candles = session_candles_5m if session_candles_5m else candles_5m
+    if vwap_candles:
+        vdf    = _to_df(vwap_candles)
+        vwap_s = ta.vwap(vdf["high"], vdf["low"], vdf["close"], vdf["volume"])
+        ind.vwap = _val(vwap_s) or 0.0
+    ltp = candles_5m[-1].close
+    ind.price_above_vwap = ind.vwap > 0 and ltp > ind.vwap
 
-    ind.bull    = max(0.0, bull)
-    ind.bear    = max(0.0, bear)
-    ind.bullish = bull >= 2 and bull > bear + 0.9
-    ind.bearish = bear >= 2 and bear > bull + 0.9
+    # ── Volume ────────────────────────────────────────────────────────────────
+    # Average of the previous N bars (exclude the current bar)
+    vol_series         = df["volume"].iloc[:-1]
+    ind.avg_volume_20  = float(vol_series.tail(cfg.VOLUME_MA_PERIOD).mean()
+                               if len(vol_series) >= cfg.VOLUME_MA_PERIOD else vol_series.mean())
+    ind.volume_surge   = (ind.avg_volume_20 > 0
+                          and df["volume"].iloc[-1] > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
+
+    # ── Structural support (swing low, custom) ────────────────────────────────
+    ind.support_level = swing_low(candles_5m[:-1], cfg.SWING_LOW_BARS)
+    if ind.support_level > 0:
+        dist = (ltp - ind.support_level) / ind.support_level
+        ind.near_support = 0 <= dist <= cfg.SUPPORT_TOUCH_PCT
+
+    # ── Candlestick pattern (custom) ──────────────────────────────────────────
+    c     = candles_5m[-1]
+    prev  = candles_5m[-2]
+    prev2 = candles_5m[-3] if len(candles_5m) >= 3 else None
+    pat   = _detect_bullish_pattern(c, prev, prev2)
+    ind.candle_pattern  = pat
+    ind.bullish_pattern = pat is not None
+
+    # ── EMA (20 / 50) — informational ─────────────────────────────────────────
+    if len(df) >= 20:
+        ind.ema20 = round(float(ta.ema(df["close"], length=20).iloc[-1]), 2)
+    if len(df) >= 50:
+        ind.ema50 = round(float(ta.ema(df["close"], length=50).iloc[-1]), 2)
+
     return ind
-
-
-# ── Sideways filter ───────────────────────────────────────────────────────────
-
-def sideways_range(candles: List[Candle]) -> Optional[float]:
-    if not candles or len(candles) < 5:
-        return None
-    closes = [c.close for c in candles[-5:]]
-    return max(closes) - min(closes)
-
-
-# ── Momentum ──────────────────────────────────────────────────────────────────
-
-def calc_atr(candles: List[Candle], period: int) -> float:
-    if len(candles) < period + 1:
-        return -1.0
-    total = 0.0
-    for i in range(len(candles) - period, len(candles)):
-        c = candles[i]; prev = candles[i - 1]
-        tr = max(c.high - c.low, abs(c.high - prev.close), abs(c.low - prev.close))
-        total += tr
-    return total / period
-
-
-@dataclass
-class MomentumResult:
-    ok:     bool
-    reason: str
-
-
-def strong_momentum(candles: List[Candle], interval: str) -> MomentumResult:
-    if not candles or len(candles) < 2:
-        return MomentumResult(False, "No candles")
-    c1 = candles[-1]; c2 = candles[-2]
-    fixed = {"3m": 20.0, "5m": 28.0, "15m": 50.0}.get(interval, 15.0)
-    atr   = calc_atr(candles, 10)
-    threshold = fixed
-    if atr > 0:
-        atr_thr   = atr * 0.7
-        threshold = min(fixed, max(atr_thr, fixed * 0.6))
-    c1_move = c1.close - c1.open; c2_move = c2.close - c2.open
-    c1_abs  = abs(c1_move);       c2_abs  = abs(c2_move)
-    # Case A: single candle ≥ 80 % of threshold
-    if c1_abs >= threshold * 0.8:
-        return MomentumResult(True, f"C1={c1_abs:.1f} pts")
-    # Case B: two same-direction candles combined ≥ threshold
-    if c1_move * c2_move > 0 and c1_abs + c2_abs >= threshold:
-        return MomentumResult(True, f"2C={c1_abs:.1f}+{c2_abs:.1f} pts")
-    # Case C: ATR-based gate
-    if atr > 0 and c1_abs >= atr * 0.5 and c1_abs >= fixed * 0.6:
-        return MomentumResult(True, f"ATR={atr:.1f} C1={c1_abs:.1f}")
-    return MomentumResult(False, f"Weak: C1={c1_abs:.1f} need>={threshold*0.8:.0f}")
