@@ -77,9 +77,15 @@ def scan_stock(
         st.last_scan_results[symbol] = {"pass": False, "reason": reason}
         return None
 
+    # Session bars = TODAY only, for a correct session-anchored VWAP. The full
+    # candles_5m buffer holds ~5 days of warmup history (needed for TA-Lib), so
+    # passing it as the VWAP session would compute a multi-day VWAP — wrong.
+    today      = candles_5m[-1].start_time[:10]
+    session_5m = [c for c in candles_5m if c.start_time[:10] == today]
+
     # Compute indicators on snapshot — TA-Lib's C layer releases GIL, giving
     # real parallelism across the 500-stock thread pool
-    ind = compute_indicators(candles_5m, candles_1h, session_candles_5m=candles_5m)
+    ind = compute_indicators(candles_5m, candles_1h, session_candles_5m=session_5m)
 
     # ── 7 entry conditions ────────────────────────────────────────────────────
     checks = {

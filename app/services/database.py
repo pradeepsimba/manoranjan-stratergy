@@ -266,10 +266,20 @@ class DatabaseService:
                 rows,
             )
 
+    @staticmethod
+    def _decode_jsonb(d: Dict[str, Any], *keys: str) -> Dict[str, Any]:
+        # asyncpg returns jsonb columns as raw strings unless a codec is set;
+        # decode them so the API returns real objects, not JSON-in-a-string.
+        for k in keys:
+            v = d.get(k)
+            if isinstance(v, str):
+                d[k] = json.loads(v)
+        return d
+
     async def get_backtest_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM backtest_runs WHERE run_id=$1", run_id)
-        return dict(row) if row else None
+        return self._decode_jsonb(dict(row), "params", "summary") if row else None
 
     async def get_backtest_trades(self, run_id: str) -> List[Dict[str, Any]]:
         async with self._pool.acquire() as conn:
@@ -285,4 +295,4 @@ class DatabaseService:
                 "FROM backtest_runs ORDER BY created_at DESC LIMIT $1",
                 limit,
             )
-        return [dict(r) for r in rows]
+        return [self._decode_jsonb(dict(r), "summary") for r in rows]

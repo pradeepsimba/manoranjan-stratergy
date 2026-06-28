@@ -88,8 +88,15 @@ async def _fetch(
         print(f"Historical fetch error: {e}")
         return {}
 
+    if not isinstance(data, list):
+        get_state().api_status = "API Error: unexpected response shape"
+        print(f"Historical fetch: expected a list, got {type(data).__name__}: {data!r:.200}")
+        return {}
+
     result: Dict[str, Dict[str, List[Candle]]] = {}
     for node in data:
+        if not isinstance(node, dict):
+            continue
         symbol = node.get("stock_symbol", "")
         if not symbol:
             continue
