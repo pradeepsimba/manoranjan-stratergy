@@ -16,6 +16,7 @@ Anti-look-ahead guarantees:
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
@@ -115,6 +116,87 @@ def _try_exit(port: Portfolio, pos: BTPosition, bar: Candle, slippage_bps: float
     port.close_position(pos.symbol, bar.start_time, price, outcome)
 
 
+def _simulate_day(
+    day:          str,
+    symbols:      Dict[str, SymbolSeries],
+    nifty:        SymbolSeries,
+    slippage_bps: float,
+) -> List:
+    """
+    Simulate ONE trading day with its own fresh portfolio. Days are fully
+    independent (intraday strategy, EOD square-off, daily reset), which is what
+    lets the caller run them in parallel. Returns that day's trades in close
+    order.
+    """
+    grid = sorted(nifty.at.get(day, {}).items())   # [(time, nifty_gidx), ...]
+    if not grid:
+        return []
+
+    port = Portfolio()
+    nifty_day_open = nifty.series[nifty.by_day[day][0]].open
+    cum_tpv = 0.0
+    cum_vol = 0.0
+
+    for tm, ngidx in grid:
+        nbar = nifty.series[ngidx]
+        cum_tpv += ((nbar.high + nbar.low + nbar.close) / 3.0) * nbar.volume
+        cum_vol += nbar.volume
+        nifty_ltp  = nbar.close
+        nifty_vwap = (cum_tpv / cum_vol) if cum_vol > 0 else 0.0
+        nifty_daily_green = nifty_ltp > nifty_day_open
+        nifty_above_vwap  = nifty_vwap > 0 and nifty_ltp > nifty_vwap
+
+        # 1) Exits first — only for positions opened on an earlier bar.
+        for sym in list(port.positions.keys()):
+            pos     = port.positions[sym]
+            ss      = symbols.get(pos.token)
+            day_map = ss.at.get(day) if ss else None
+            gidx    = day_map.get(tm) if day_map else None
+            if gidx is None or gidx <= pos.entry_gidx:
+                continue
+            _try_exit(port, pos, ss.series[gidx], slippage_bps)
+
+        # 2) Entries — only inside the scan window, before cutoff, and only when
+        #    the portfolio can take a new position. Once 3 are open (or the loss
+        #    limit is hit) the whole 500-symbol scan is skipped until a slot frees.
+        if _SCAN_START <= tm < _CUTOFF:
+            open_syms, traded, dpnl = port.snapshot()
+            if (len(open_syms) < cfg.MAX_CONCURRENT_POSITIONS
+                    and dpnl > -cfg.DAILY_LOSS_LIMIT):
+                signals: List[BTPosition] = []
+                for token, ss in symbols.items():
+                    day_map = ss.at.get(day)
+                    gidx    = day_map.get(tm) if day_map else None
+                    if gidx is None:
+                        continue
+                    sig = _scan_symbol(
+                        ss, gidx, day, nifty_daily_green, nifty_above_vwap,
+                        open_syms, traded, dpnl, slippage_bps,
+                    )
+                    if sig:
+                        signals.append(sig)
+
+                # Apply fills sequentially, honoring the live circuit breakers.
+                for sig in signals:
+                    ok, _ = can_enter(sig.symbol, port.positions,
+                                      port.traded_today, port.daily_pnl)
+                    if ok:
+                        port.open_position(sig)
+
+    # 3) EOD square-off any survivors at the day's last bar close.
+    for sym in list(port.positions.keys()):
+        pos  = port.positions[sym]
+        ss   = symbols.get(pos.token)
+        idxs = ss.by_day.get(day, []) if ss else []
+        if not idxs:
+            continue
+        last = ss.series[idxs[-1]]
+        port.close_position(sym, last.start_time,
+                            square_off_fill(last.close, slippage_bps), "EOD")
+
+    return port.trades
+
+
 def simulate(
     symbols: Dict[str, SymbolSeries],
     nifty:   SymbolSeries,
@@ -122,80 +204,36 @@ def simulate(
     to_d:    date,
     slippage_bps: float,
 ) -> Tuple[List, List, int]:
-    """Run the full replay. Returns (trades, equity_curve, days_traded)."""
-    port = Portfolio()
+    """
+    Run the full replay. Days are independent, so they execute in parallel across
+    a thread pool — TA-Lib releases the GIL during the indicator math, giving real
+    multi-core speedup. Per-day trades are merged in chronological order and the
+    equity curve is rebuilt from the merged stream.
+    """
     lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
     days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
+    if not days:
+        return [], [], 0
 
-    for day in days:
-        port.reset_day()
-        grid = sorted(nifty.at.get(day, {}).items())   # [(time, nifty_gidx), ...]
-        if not grid:
-            continue
+    workers = max(1, min(cfg.SCAN_WORKERS, len(days)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bt-day") as pool:
+        # map preserves input order → results already in chronological day order
+        per_day = list(pool.map(
+            lambda d: _simulate_day(d, symbols, nifty, slippage_bps), days
+        ))
 
-        nifty_day_open = nifty.series[nifty.by_day[day][0]].open
-        cum_tpv = 0.0
-        cum_vol = 0.0
+    trades: List = []
+    for day_trades in per_day:
+        trades.extend(day_trades)
 
-        for tm, ngidx in grid:
-            nbar = nifty.series[ngidx]
-            cum_tpv += ((nbar.high + nbar.low + nbar.close) / 3.0) * nbar.volume
-            cum_vol += nbar.volume
-            nifty_ltp  = nbar.close
-            nifty_vwap = (cum_tpv / cum_vol) if cum_vol > 0 else 0.0
-            nifty_daily_green = nifty_ltp > nifty_day_open
-            nifty_above_vwap  = nifty_vwap > 0 and nifty_ltp > nifty_vwap
+    # Rebuild the running-equity curve from the merged, time-ordered trade stream.
+    cum = 0.0
+    equity_curve: List = []
+    for t in trades:
+        cum += t.net_pnl
+        equity_curve.append((t.exit_time, round(cum, 2)))
 
-            # 1) Exits first — only for positions opened on an earlier bar.
-            for sym in list(port.positions.keys()):
-                pos     = port.positions[sym]
-                ss      = symbols.get(pos.token)
-                day_map = ss.at.get(day) if ss else None
-                gidx    = day_map.get(tm) if day_map else None
-                if gidx is None or gidx <= pos.entry_gidx:
-                    continue
-                _try_exit(port, pos, ss.series[gidx], slippage_bps)
-
-            # 2) Entries — only inside the scan window, before cutoff, and only
-            #    when the portfolio can actually take a new position. Once 3 are
-            #    open (or the loss limit is hit) the whole 500-symbol scan is
-            #    skipped for the rest of the day's bars until a slot frees up.
-            if _SCAN_START <= tm < _CUTOFF:
-                open_syms, traded, dpnl = port.snapshot()
-                if (len(open_syms) < cfg.MAX_CONCURRENT_POSITIONS
-                        and dpnl > -cfg.DAILY_LOSS_LIMIT):
-                    signals: List[BTPosition] = []
-                    for token, ss in symbols.items():
-                        day_map = ss.at.get(day)
-                        gidx    = day_map.get(tm) if day_map else None
-                        if gidx is None:
-                            continue
-                        sig = _scan_symbol(
-                            ss, gidx, day, nifty_daily_green, nifty_above_vwap,
-                            open_syms, traded, dpnl, slippage_bps,
-                        )
-                        if sig:
-                            signals.append(sig)
-
-                    # Apply fills sequentially, honoring the live circuit breakers.
-                    for sig in signals:
-                        ok, _ = can_enter(sig.symbol, port.positions,
-                                          port.traded_today, port.daily_pnl)
-                        if ok:
-                            port.open_position(sig)
-
-        # 3) EOD square-off any survivors at the day's last bar close.
-        for sym in list(port.positions.keys()):
-            pos  = port.positions[sym]
-            ss   = symbols.get(pos.token)
-            idxs = ss.by_day.get(day, []) if ss else []
-            if not idxs:
-                continue
-            last = ss.series[idxs[-1]]
-            port.close_position(sym, last.start_time,
-                                square_off_fill(last.close, slippage_bps), "EOD")
-
-    return port.trades, port.equity_curve, len(days)
+    return trades, equity_curve, len(days)
 
 
 async def run_backtest(db, run_id: str, from_d: date, to_d: date, slippage_bps: float) -> None:
