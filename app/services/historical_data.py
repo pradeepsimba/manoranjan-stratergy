@@ -81,6 +81,7 @@ async def _fetch(
     try:
         client = await _http()
         resp   = await client.post(url, json=payload)
+        resp.raise_for_status()          # treat 4xx/5xx as an error, not as candle data
         data   = resp.json()
         get_state().api_status = "API OK"
     except Exception as e:

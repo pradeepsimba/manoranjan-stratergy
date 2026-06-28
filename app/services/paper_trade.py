@@ -6,7 +6,7 @@ No broker connection — fills are simulated at the signal LTP and exits are
 tracked automatically against each 5-minute bar's high/low.
 """
 
-import time
+import itertools
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -15,6 +15,10 @@ from app.models import Position, PositionStatus
 from app.state import get_state
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# Monotonic counter for unique order ids (time-based ids collide when two fills
+# land in the same millisecond — possible within one tick cycle).
+_order_seq = itertools.count(1)
 
 
 def place_paper_order(
@@ -29,8 +33,9 @@ def place_paper_order(
     Simulate a BUY bracket order at entry_price.
     Returns the new Position object (already added to AppState).
     """
-    order_id = f"PAPER-{int(time.monotonic() * 1000)}"
-    now      = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    now      = datetime.now(IST)
+    order_id = f"PAPER-{now.strftime('%H%M%S')}-{next(_order_seq)}"
+    now      = now.strftime("%Y-%m-%d %H:%M:%S")
 
     pos = Position(
         symbol        = symbol,

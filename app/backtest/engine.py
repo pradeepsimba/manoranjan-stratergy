@@ -105,14 +105,22 @@ def _scan_symbol(
 
 
 def _try_exit(port: Portfolio, pos: BTPosition, bar: Candle, slippage_bps: float) -> None:
-    hit_sl  = bar.low  <= pos.stop_loss
-    hit_tgt = bar.high >= pos.target
-    if not hit_sl and not hit_tgt:
-        return
-    if hit_sl:   # SL wins ties (conservative — assume the adverse move came first)
+    # Resolve a gap at the open FIRST: if the bar opens already past a level, that
+    # level filled at the open before any intrabar move. Only when the open sits
+    # between the two levels is the touch order ambiguous — and there SL wins.
+    if bar.open <= pos.stop_loss:
         price, outcome = stop_fill(pos.stop_loss, bar.open, slippage_bps), "STOP"
-    else:
+    elif bar.open >= pos.target:
         price, outcome = target_fill(pos.target, bar.open, slippage_bps), "TARGET"
+    else:
+        hit_sl  = bar.low  <= pos.stop_loss
+        hit_tgt = bar.high >= pos.target
+        if hit_sl:        # SL wins ties — assume the adverse move came first
+            price, outcome = stop_fill(pos.stop_loss, bar.open, slippage_bps), "STOP"
+        elif hit_tgt:
+            price, outcome = target_fill(pos.target, bar.open, slippage_bps), "TARGET"
+        else:
+            return
     port.close_position(pos.symbol, bar.start_time, price, outcome)
 
 

@@ -145,13 +145,17 @@ class SchedulerService:
                 else:
                     st.phase = TradingPhase.CLOSED
                     await self._run_eod()
+                    # Sleep until next premarket so the loop doesn't spin (which
+                    # would re-run EOD and overwrite the day's stats with zeros).
+                    await asyncio.sleep(_seconds_until(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN))
             except asyncio.CancelledError:
                 raise   # let shutdown cancel cleanly
             except Exception as e:
-                # A handler crash must not kill the driver; back off briefly and retry.
+                # A handler crash must not kill the driver — short backoff and retry.
+                # (Must NOT sleep-until-premarket here, or one transient error
+                # would freeze the engine for the rest of the trading day.)
                 print(f"Phase driver error: {e}")
                 await asyncio.sleep(5)
-                await asyncio.sleep(_seconds_until(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN))
 
     # ── Phase handlers ────────────────────────────────────────────────────────
 
@@ -345,6 +349,7 @@ class SchedulerService:
         st.nifty_candles_5m.clear()
         st.nifty_candles_1d.clear()
         st.dirty_ticks.clear()
+        st.last_scan_results.clear()
         st.last_5m_bar_time = None
 
     # ── Historical data loader ────────────────────────────────────────────────
@@ -365,9 +370,11 @@ class SchedulerService:
                 st.candles_1h[token_key] = frames.get(cfg.INTERVAL_1H, [])
                 st.candles_1d[token_key] = frames.get(cfg.INTERVAL_1D, [])
 
+            # Replace (not extend) so a re-run of the loader can't accumulate
+            # duplicate NIFTY bars, which would skew the index VWAP / daily-open.
             nifty_1d, nifty_5m = await fetch_nifty_candles()
-            st.nifty_candles_1d.extend(nifty_1d)
-            st.nifty_candles_5m.extend(nifty_5m)
+            st.nifty_candles_1d.clear(); st.nifty_candles_1d.extend(nifty_1d)
+            st.nifty_candles_5m.clear(); st.nifty_candles_5m.extend(nifty_5m)
 
             st.api_status = "API OK"
             print(f"Historical load complete: {len(st.candles_5m)} stocks with 5m data")
