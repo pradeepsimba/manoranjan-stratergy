@@ -10,16 +10,13 @@ from app.ws.dashboard_ws import ws_manager
 
 router = APIRouter()
 
-# Injected at startup by main.py
-_db      = None
-_angel   = None
-_sched   = None
+_db    = None
+_sched = None
 
 
-def set_services(db, angel, sched) -> None:
-    global _db, _angel, _sched
+def set_services(db, sched) -> None:
+    global _db, _sched
     _db    = db
-    _angel = angel
     _sched = sched
 
 
@@ -33,7 +30,7 @@ def status() -> Dict[str, Any]:
         "wsStatus":  st.ws_status,
         "apiStatus": st.api_status,
         "watchlist": len(st.active_watchlist),
-        "dailyPnl":  st.daily_pnl,
+        "dailyPnl":  round(st.daily_pnl, 2),
     }
 
 
@@ -50,16 +47,12 @@ def watchlist() -> List[Dict[str, str]]:
 
 @router.get("/api/positions")
 async def get_positions() -> List[Dict[str, Any]]:
-    if _db:
-        return await _db.get_today_positions()
-    return []
+    return await _db.get_today_positions() if _db else []
 
 
 @router.get("/api/positions/all")
 async def get_all_positions() -> List[Dict[str, Any]]:
-    if _db:
-        return await _db.get_all_positions()
-    return []
+    return await _db.get_all_positions() if _db else []
 
 
 # ── Scan results ──────────────────────────────────────────────────────────────
@@ -80,7 +73,8 @@ def get_scans() -> Dict[str, Any]:
 
 @router.get("/api/prices")
 def get_prices() -> Dict[str, float]:
-    return {**get_state().ltp, "NIFTY50": get_state().nifty_ltp}
+    st = get_state()
+    return {**st.ltp, "NIFTY50": st.nifty_ltp}
 
 
 # ── Dashboard WebSocket ───────────────────────────────────────────────────────

@@ -5,7 +5,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.dashboard import router, set_services
-from app.services.angel_api import AngelAPIService
 from app.services.database import DatabaseService
 from app.services.market_data import MarketDataService
 from app.services.scheduler import SchedulerService
@@ -13,9 +12,8 @@ from app.ws.dashboard_ws import ws_manager
 
 # ── Global service instances ──────────────────────────────────────────────────
 
-db_service    = DatabaseService()
-angel_service = AngelAPIService()
-mkt_service   = MarketDataService()
+db_service  = DatabaseService()
+mkt_service = MarketDataService()
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -26,13 +24,12 @@ async def lifespan(app: FastAPI):
 
     scheduler = SchedulerService(
         db          = db_service,
-        angel       = angel_service,
         market_data = mkt_service,
         ws_manager  = ws_manager,
     )
     await scheduler.start()
 
-    set_services(db_service, angel_service, scheduler)
+    set_services(db_service, scheduler)
 
     yield
 
@@ -42,7 +39,7 @@ async def lifespan(app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="NSE Equity Strategy — Manoranjan", lifespan=lifespan)
+app = FastAPI(title="NSE Equity Paper Trader", lifespan=lifespan)
 
 app.include_router(router)
 
@@ -54,8 +51,6 @@ app.mount("/js",  StaticFiles(directory="static/js"),  name="js")
 def index() -> FileResponse:
     return FileResponse("static/index.html")
 
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn

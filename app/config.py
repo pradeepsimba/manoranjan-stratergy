@@ -7,12 +7,6 @@ API_HOST         = "35.234.219.141"
 API_URL_TEMPLATE = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
 WS_URL           = f"ws://{API_HOST}:8083/historical-data"
 
-# ── Angel One (order execution only) ─────────────────────────────────────────
-ANGEL_API_KEY     = os.getenv("ANGEL_API_KEY",     "")
-ANGEL_CLIENT_ID   = os.getenv("ANGEL_CLIENT_ID",   "")
-ANGEL_PASSWORD    = os.getenv("ANGEL_PASSWORD",     "")
-ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET", "")
-
 # ── Gemini AI pre-market filter ───────────────────────────────────────────────
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL      = "gemini-1.5-flash"
