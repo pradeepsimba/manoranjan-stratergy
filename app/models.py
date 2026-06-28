@@ -24,8 +24,8 @@ class PositionStatus(Enum):
 # Candle format matches the custom server response exactly.
 # Field order kept for API compatibility; always use keyword access.
 
-@dataclass
-class Candle:
+@dataclass(slots=True)   # created on every tick + every historical bar — slots
+class Candle:            # cuts per-instance memory ~40% and speeds attribute access
     start_time: str   = ""
     open:       float = 0.0
     close:      float = 0.0

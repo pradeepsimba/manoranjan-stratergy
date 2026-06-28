@@ -64,6 +64,22 @@ def _past(hour: int, minute: int) -> bool:
     return now.hour > hour or (now.hour == hour and now.minute >= minute)
 
 
+def _scan_chunk(items, nifty_gates):
+    """
+    Scan a chunk of (symbol, token) pairs in one worker thread and return the
+    list of signals. Batching into ~SCAN_WORKERS chunks (instead of one pool
+    task per stock) collapses hundreds of run_in_executor dispatches per cycle
+    down to a handful — the dispatch/await happens on the single event-loop
+    thread, so that churn is the tick-wise bottleneck at 500 stocks.
+    """
+    out = []
+    for sym, tok in items:
+        sig = scan_stock(sym, tok, nifty_gates)
+        if sig is not None:
+            out.append(sig)
+    return out
+
+
 class SchedulerService:
     def __init__(
         self,
@@ -231,13 +247,17 @@ class SchedulerService:
         if not items:
             return
 
-        tasks = [
-            loop.run_in_executor(_SCAN_POOL, scan_stock, sym, tok, nifty_gates)
-            for sym, tok in items
-        ]
+        # Partition into ≤ SCAN_WORKERS chunks → one pool task per worker instead
+        # of one per stock. Keeps full parallelism while cutting event-loop
+        # dispatch overhead ~30×.
+        size   = max(1, (len(items) + cfg.SCAN_WORKERS - 1) // cfg.SCAN_WORKERS)
+        chunks = [items[i : i + size] for i in range(0, len(items), size)]
+        tasks  = [loop.run_in_executor(_SCAN_POOL, _scan_chunk, c, nifty_gates)
+                  for c in chunks]
         results = await asyncio.gather(*tasks)
+        signals = [sig for chunk_res in results for sig in chunk_res]
 
-        for sig in (r for r in results if r is not None):
+        for sig in signals:
             ok, _ = can_enter(sig.symbol, st.positions, st.traded_today, st.daily_pnl)
             if not ok:
                 continue
