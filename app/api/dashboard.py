@@ -69,7 +69,7 @@ def get_scans() -> Dict[str, Any]:
         "lastBarTime": st.last_5m_bar_time,
         "results": [
             {"symbol": sym, **res}
-            for sym, res in list(st.last_scan_results.items())[-40:]
+            for sym, res in st.scan_snapshot()[-40:]
         ],
     }
 

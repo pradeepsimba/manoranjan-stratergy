@@ -347,7 +347,7 @@ class SchedulerService:
         st.nifty_candles_5m.clear()
         st.nifty_candles_1d.clear()
         st.dirty_ticks.clear()
-        st.last_scan_results.clear()
+        st.clear_scan_results()
         st.last_5m_bar_time = None
 
     # ── Historical data loader ────────────────────────────────────────────────
@@ -432,7 +432,7 @@ class SchedulerService:
             "positions":   positions_out,
             "scanResults": [
                 {"symbol": sym, **res}
-                for sym, res in list(st.last_scan_results.items())[-20:]
+                for sym, res in st.scan_snapshot()[-20:]
             ],
             "lastBarTime": st.last_5m_bar_time,
         }

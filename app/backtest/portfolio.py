@@ -86,7 +86,9 @@ class Portfolio:
         gross      = sell_value - buy_value
         costs      = round_trip_costs(buy_value, sell_value)
         net        = gross - costs
-        risk       = pos.sl_offset * pos.qty
+        # Risk against the REALIZED entry (slipped fill) and actual stop level, not
+        # the pre-slippage sl_offset — otherwise R disagrees with net P&L.
+        risk       = (pos.entry_price - pos.stop_loss) * pos.qty
         r_mult     = (net / risk) if risk > 0 else 0.0
 
         self.daily_pnl += net

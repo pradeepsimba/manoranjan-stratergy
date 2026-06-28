@@ -57,7 +57,11 @@ class AppState:
         self.daily_pnl:        float               = 0.0
 
         # ── Scan diagnostics ──────────────────────────────────────────────────
+        # Written by scan worker threads, read by the event loop (dashboard /
+        # API), so all access goes through the lock below to avoid a
+        # "dict changed size during iteration" race.
         self.last_scan_results: Dict[str, dict]   = {}
+        self._scan_results_lock: threading.Lock   = threading.Lock()
         self.pending_signals:   List[EntrySignal] = []
         self.last_5m_bar_time:  Optional[str]     = None   # "HH:MM" of last scanned bar
 
@@ -84,6 +88,21 @@ class AppState:
                 if token not in self._token_locks:
                     self._token_locks[token] = threading.Lock()
                 return self._token_locks[token]
+
+    # ── Scan-results access (thread-safe) ──────────────────────────────────────
+    def record_scan(self, symbol: str, result: dict) -> None:
+        """Worker-thread write of a per-stock scan diagnostic."""
+        with self._scan_results_lock:
+            self.last_scan_results[symbol] = result
+
+    def scan_snapshot(self) -> list:
+        """Event-loop read: a consistent (symbol, result) list snapshot."""
+        with self._scan_results_lock:
+            return list(self.last_scan_results.items())
+
+    def clear_scan_results(self) -> None:
+        with self._scan_results_lock:
+            self.last_scan_results.clear()
 
 
 def get_state() -> AppState:

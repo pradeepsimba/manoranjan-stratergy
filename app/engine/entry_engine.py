@@ -44,7 +44,7 @@ def scan_stock(
     # Circuit breakers first — cheap before any computation
     allowed, reason = can_enter(symbol, st.positions, st.traded_today, st.daily_pnl)
     if not allowed:
-        st.last_scan_results[symbol] = {"pass": False, "reason": reason}
+        st.record_scan(symbol, {"pass": False, "reason": reason})
         return None
 
     # Thread-safe snapshot — hold lock only for the list copy, not for math
@@ -54,7 +54,7 @@ def scan_stock(
         candles_1h = list(st.candles_1h.get(token, []))
 
     if len(candles_5m) < 30:
-        st.last_scan_results[symbol] = {"pass": False, "reason": "Insufficient 5m bars"}
+        st.record_scan(symbol, {"pass": False, "reason": "Insufficient 5m bars"})
         return None
 
     # LTP dict writes are GIL-protected in CPython — safe to read without a lock
@@ -80,7 +80,7 @@ def scan_stock(
             "NIFTY not daily-green" if not gate.nifty_daily_green else
             "NIFTY below VWAP"
         )
-        st.last_scan_results[symbol] = {"pass": False, "reason": reason}
+        st.record_scan(symbol, {"pass": False, "reason": reason})
         return None
 
     # Compute indicators on snapshot — TA-Lib's C layer releases GIL, giving
@@ -100,17 +100,17 @@ def scan_stock(
 
     failed = [k for k, v in checks.items() if not v]
     if failed:
-        st.last_scan_results[symbol] = {
+        st.record_scan(symbol, {
             "pass":   False,
             "reason": f"Failed: {', '.join(failed)}",
             "ind":    {k: v for k, v in checks.items()},
-        }
+        })
         return None
 
     # ── Position sizing ───────────────────────────────────────────────────────
     qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level)
     if qty == 0:
-        st.last_scan_results[symbol] = {"pass": False, "reason": "Invalid SL / size=0"}
+        st.record_scan(symbol, {"pass": False, "reason": "Invalid SL / size=0"})
         return None
 
     capital_needed = (ltp * qty) / cfg.INTRADAY_LEVERAGE
@@ -129,7 +129,7 @@ def scan_stock(
         bar_time       = _bar_time(candles_5m),
     )
 
-    st.last_scan_results[symbol] = {
+    st.record_scan(symbol, {
         "pass":   True,
         "signal": {
             "ltp":     ltp,
@@ -141,5 +141,5 @@ def scan_stock(
             "rsi":     ind.rsi,
             "pattern": ind.candle_pattern,
         },
-    }
+    })
     return signal
