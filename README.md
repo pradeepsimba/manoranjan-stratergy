@@ -1,1 +1,1 @@
-# manoranjan-stratergy
+# Algo trading

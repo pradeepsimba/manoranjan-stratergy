@@ -1,0 +1,35 @@
+# ── VCS ──
+.git
+.gitignore
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Test / type caches ──
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ── Local env / secrets (passed at runtime, never baked in) ──
+.env
+.env.*
+!.env.example
+
+# ── Docker / IDE / OS ──
+Dockerfile
+docker-compose.yml
+.dockerignore
+.vscode/
+.idea/
+.DS_Store
+
+# ── Logs / local db ──
+*.log
+*.db
+*.sqlite3

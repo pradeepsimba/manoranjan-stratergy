@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Kolkata
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      # Connects to PostgreSQL running on the host machine.
+      # host.docker.internal resolves to the host via the mapping below (Linux).
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://postgres:postgres@host.docker.internal:5432/trading_db}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
