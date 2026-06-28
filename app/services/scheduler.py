@@ -259,9 +259,7 @@ class SchedulerService:
             return
 
         with st._nifty_lock:
-            nifty_gates = compute_nifty_gates(
-                st.nifty_ltp, st.nifty_candles_1d, st.nifty_candles_5m,
-            )
+            nifty_gates = compute_nifty_gates(st.nifty_ltp, st.nifty_candles_5m)
 
         items = [(sym, tok) for sym, tok in st.active_watchlist.items() if tok in dirty]
         if not items:
@@ -363,12 +361,11 @@ class SchedulerService:
             for token_key, candles in hist.items():
                 st.candles_5m[token_key] = candles
 
-            today = await fetch_today_candles(
-                st.active_watchlist, [cfg.INTERVAL_1H, cfg.INTERVAL_1D]
-            )
+            # Only 1H is needed now — the daily gate derives today's open from the
+            # 5m session, so the (never-live-updated) 1d series is no longer fetched.
+            today = await fetch_today_candles(st.active_watchlist, [cfg.INTERVAL_1H])
             for token_key, frames in today.items():
                 st.candles_1h[token_key] = frames.get(cfg.INTERVAL_1H, [])
-                st.candles_1d[token_key] = frames.get(cfg.INTERVAL_1D, [])
 
             # Replace (not extend) so a re-run of the loader can't accumulate
             # duplicate NIFTY bars, which would skew the index VWAP / daily-open.

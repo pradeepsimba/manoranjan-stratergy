@@ -65,16 +65,15 @@ def _scan_symbol(
     cur = ss.series[gidx]
     ltp = cur.close
 
-    # Trend gate FIRST (cheap) — derive daily/forming-hour candles from 5m data
-    # with no look-ahead. The expensive lookback slice + indicators are built
-    # only once the gate clears, so gate-failing symbols cost almost nothing.
+    # Trend gate FIRST (cheap) — daily open from today's first 5m bar, forming-hour
+    # candle synthesized from 5m data, with no look-ahead. The expensive lookback
+    # slice + indicators are built only once the gate clears.
     day_open  = ss.series[day_start].open
     cur_hour  = cur.start_time[11:13]
     hour_open = next((b.open for b in session if b.start_time[11:13] == cur_hour), day_open)
-    c1d = [Candle(start_time=cur.start_time, open=day_open, close=ltp, high=cur.high, low=cur.low)]
     c1h = [Candle(start_time=cur.start_time, open=hour_open, close=ltp, high=cur.high, low=cur.low)]
 
-    gate = check_trend(ltp, c1d, c1h, nifty_daily_green, nifty_above_vwap)
+    gate = check_trend(ltp, day_open, c1h, nifty_daily_green, nifty_above_vwap)
     if not gate.all_clear:
         return None
 

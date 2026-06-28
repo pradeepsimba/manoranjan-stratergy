@@ -52,7 +52,6 @@ def scan_stock(
     with lock:
         candles_5m = list(st.candles_5m.get(token, []))
         candles_1h = list(st.candles_1h.get(token, []))
-        candles_1d = list(st.candles_1d.get(token, []))
 
     if len(candles_5m) < 30:
         st.last_scan_results[symbol] = {"pass": False, "reason": "Insufficient 5m bars"}
@@ -61,12 +60,19 @@ def scan_stock(
     # LTP dict writes are GIL-protected in CPython — safe to read without a lock
     ltp = st.ltp.get(symbol, candles_5m[-1].close)
 
+    # Session bars = TODAY only. Used for the session-anchored VWAP AND to source
+    # today's open (first bar) for the daily gate — so the gate never depends on a
+    # 1d fetch that isn't updated live and may be empty at 09:15.
+    today      = candles_5m[-1].start_time[:10]
+    session_5m = [c for c in candles_5m if c.start_time[:10] == today]
+    day_open   = session_5m[0].open if session_5m else 0.0
+
     nifty_daily_green, nifty_above_vwap = nifty_gates
 
     # ── Trend gate FIRST (cheap, hard pre-filter) ──────────────────────────────
     # Evaluated before the expensive indicator pass so a failing gate — including
     # a red NIFTY that fails every stock — skips compute_indicators entirely.
-    gate = check_trend(ltp, candles_1d, candles_1h, nifty_daily_green, nifty_above_vwap)
+    gate = check_trend(ltp, day_open, candles_1h, nifty_daily_green, nifty_above_vwap)
     if not gate.all_clear:
         reason = (
             "Daily not green"       if not gate.daily_green      else
@@ -76,12 +82,6 @@ def scan_stock(
         )
         st.last_scan_results[symbol] = {"pass": False, "reason": reason}
         return None
-
-    # Session bars = TODAY only, for a correct session-anchored VWAP. The full
-    # candles_5m buffer holds ~5 days of warmup history (needed for TA-Lib), so
-    # passing it as the VWAP session would compute a multi-day VWAP — wrong.
-    today      = candles_5m[-1].start_time[:10]
-    session_5m = [c for c in candles_5m if c.start_time[:10] == today]
 
     # Compute indicators on snapshot — TA-Lib's C layer releases GIL, giving
     # real parallelism across the 500-stock thread pool

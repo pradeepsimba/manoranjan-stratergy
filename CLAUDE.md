@@ -89,8 +89,8 @@ static/                      dashboard (index.html + js/dashboard.js + css)
 ## Gotchas & known limitations
 
 - **Pure tick-wise on the forming bar** (by design): RSI/MACD/ADX/volume are recomputed on the *incomplete* 5m bar each cycle, so they jitter and signals can appear/vanish within a bar. Volume-surge naturally fires late in each bar.
-- **`GEMINI_MODEL = "gemini-3.5-flash"`** — verify this id is valid for your `google-genai` version. On failure the screen returns `[]` and silently falls back to the full watchlist (so a bad id disables the AI filter without an error).
-- **Daily-green gate** reads `candles_1d[-1].open`, loaded once at 09:15 and never updated live (only 5m+1h are subscribed). If the server doesn't return today's daily bar at 09:15, the daily gate stays false all day. (Robust alternative: derive daily-open from today's first 5m bar.)
+- **`GEMINI_MODEL`** — must be a real `google-genai` model id (currently `gemini-2.5-flash`). On any failure the screen returns `[]` and silently falls back to the full watchlist, so a bad id disables the AI filter without an error.
+- **Daily-green gate** uses today's open = the open of today's first 5m bar (derived in `scan_stock` / `compute_nifty_gates`). The 1d series is no longer fetched or used; if you re-add it, remember it is not updated by the WS.
 - **Backtest hourly gate** buckets by clock-hour from 5m data, which may not match the server's real 1h candle boundaries — possible live/backtest parity drift.
 - **JSONB reads:** asyncpg returns `jsonb` columns as strings — decode with `_decode_jsonb` (see `database.py`) on any new read path.
 - **Secrets:** `.env` is gitignored; never put real keys in `config.py` defaults or `.env.example` (GitHub push-protection will block, and it has happened here).
