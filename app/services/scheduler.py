@@ -74,7 +74,12 @@ def _scan_chunk(items, nifty_gates):
     """
     out = []
     for sym, tok in items:
-        sig = scan_stock(sym, tok, nifty_gates)
+        try:
+            sig = scan_stock(sym, tok, nifty_gates)
+        except Exception as e:
+            # Isolate per stock — one bad symbol must not kill the whole chunk.
+            print(f"Scan error ({sym}): {e}")
+            continue
         if sig is not None:
             out.append(sig)
     return out
@@ -108,37 +113,44 @@ class SchedulerService:
     async def _phase_driver(self) -> None:
         st = get_state()
         while True:
-            now = _now()
-            if now.weekday() >= 5:
-                await asyncio.sleep(3600)
-                continue
+            try:
+                now = _now()
+                if now.weekday() >= 5:
+                    await asyncio.sleep(3600)
+                    continue
 
-            h, m = now.hour, now.minute
+                h, m = now.hour, now.minute
 
-            if h < cfg.PREMARKET_HOUR or (h == cfg.PREMARKET_HOUR and m < cfg.PREMARKET_MIN):
-                st.phase = TradingPhase.PRE_MARKET
-                await asyncio.sleep(_seconds_until(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN))
+                if h < cfg.PREMARKET_HOUR or (h == cfg.PREMARKET_HOUR and m < cfg.PREMARKET_MIN):
+                    st.phase = TradingPhase.PRE_MARKET
+                    await asyncio.sleep(_seconds_until(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN))
 
-            elif h < cfg.MARKET_OPEN_HOUR or (h == cfg.MARKET_OPEN_HOUR and m < cfg.MARKET_OPEN_MIN):
-                await self._run_premarket()
-                await asyncio.sleep(_seconds_until(cfg.MARKET_OPEN_HOUR, cfg.MARKET_OPEN_MIN))
+                elif h < cfg.MARKET_OPEN_HOUR or (h == cfg.MARKET_OPEN_HOUR and m < cfg.MARKET_OPEN_MIN):
+                    await self._run_premarket()
+                    await asyncio.sleep(_seconds_until(cfg.MARKET_OPEN_HOUR, cfg.MARKET_OPEN_MIN))
 
-            elif h < cfg.SCAN_START_HOUR or (h == cfg.SCAN_START_HOUR and m < cfg.SCAN_START_MIN):
-                st.phase = TradingPhase.WAIT_ZONE
-                await self._run_wait_zone()
-                await asyncio.sleep(_seconds_until(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN))
+                elif h < cfg.SCAN_START_HOUR or (h == cfg.SCAN_START_HOUR and m < cfg.SCAN_START_MIN):
+                    st.phase = TradingPhase.WAIT_ZONE
+                    await self._run_wait_zone()
+                    await asyncio.sleep(_seconds_until(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN))
 
-            elif h < cfg.CUTOFF_HOUR or (h == cfg.CUTOFF_HOUR and m < cfg.CUTOFF_MIN):
-                st.phase = TradingPhase.ACTIVE
-                await self._run_active_phase()
+                elif h < cfg.CUTOFF_HOUR or (h == cfg.CUTOFF_HOUR and m < cfg.CUTOFF_MIN):
+                    st.phase = TradingPhase.ACTIVE
+                    await self._run_active_phase()
 
-            elif h < cfg.SESSION_END_HOUR or (h == cfg.SESSION_END_HOUR and m < cfg.SESSION_END_MIN):
-                st.phase = TradingPhase.CUTOFF
-                await asyncio.sleep(_seconds_until(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN))
+                elif h < cfg.SESSION_END_HOUR or (h == cfg.SESSION_END_HOUR and m < cfg.SESSION_END_MIN):
+                    st.phase = TradingPhase.CUTOFF
+                    await asyncio.sleep(_seconds_until(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN))
 
-            else:
-                st.phase = TradingPhase.CLOSED
-                await self._run_eod()
+                else:
+                    st.phase = TradingPhase.CLOSED
+                    await self._run_eod()
+            except asyncio.CancelledError:
+                raise   # let shutdown cancel cleanly
+            except Exception as e:
+                # A handler crash must not kill the driver; back off briefly and retry.
+                print(f"Phase driver error: {e}")
+                await asyncio.sleep(5)
                 await asyncio.sleep(_seconds_until(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN))
 
     # ── Phase handlers ────────────────────────────────────────────────────────
@@ -197,12 +209,16 @@ class SchedulerService:
         interval = max(0.0, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)
 
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
-            in_cutoff = _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN)
-            st.phase  = TradingPhase.CUTOFF if in_cutoff else TradingPhase.ACTIVE
+            try:
+                in_cutoff = _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN)
+                st.phase  = TradingPhase.CUTOFF if in_cutoff else TradingPhase.ACTIVE
 
-            await self._tick_exits()
-            if not in_cutoff:
-                await self._tick_entries(loop)
+                await self._tick_exits()
+                if not in_cutoff:
+                    await self._tick_entries(loop)
+            except Exception as e:
+                # Never let one bad cycle kill the engine for the rest of the day.
+                print(f"Tick loop error: {e}")
 
             await asyncio.sleep(interval)
 
