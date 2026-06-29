@@ -1,6 +1,6 @@
 'use strict';
 
-// ── Live WebSocket ─────────────────────────────────────────────────────────────
+// ── WebSocket ──────────────────────────────────────────────────────────────────
 
 let ws = null;
 let reconnectTimer = null;
@@ -24,31 +24,42 @@ function connect() {
   };
 }
 
-// ── Render (matches scheduler._build_payload) ──────────────────────────────────
+// ── Render ─────────────────────────────────────────────────────────────────────
 
 const PHASE_CLS = {
   pre_market: 'gray', wait_zone: 'yellow', active: 'green',
-  cutoff: 'yellow', closed: 'gray',
+  cutoff: 'yellow',   closed: 'gray',
 };
 
 function render(d) {
   document.getElementById('clock').textContent = d.clock || '—';
 
+  const lbEl = document.getElementById('last-bar-time');
+  if (lbEl) lbEl.textContent = d.lastBarTime ? `Last bar ${d.lastBarTime}` : 'Live';
+
   setStatus('ws',  d.wsStatus  || '—', d.wsStatus  === 'WS Connected' ? 'green' : 'red');
-  setStatus('api', d.apiStatus || '—', d.apiStatus === 'API OK'       ? 'green' : 'red');
+  setStatus('api', d.apiStatus || '—', d.apiStatus === 'API OK'        ? 'green' : 'red');
 
   const phase = d.phase || '—';
   const pb = document.getElementById('phase-badge');
-  pb.textContent = phase.replace('_', ' ').toUpperCase();
-  pb.className = 'badge ' + (PHASE_CLS[phase] || 'gray');
+  pb.textContent = phase.replace(/_/g, ' ').toUpperCase();
+  pb.className   = 'badge ' + (PHASE_CLS[phase] || 'gray');
 
-  // Stat boxes
-  document.getElementById('stat-nifty').textContent = d.niftyLtp ? fmt2(d.niftyLtp) : '—';
+  document.getElementById('stat-nifty').textContent =
+    d.niftyLtp ? fmt2(d.niftyLtp) : '—';
 
-  const pnlEl = document.getElementById('stat-pnl');
-  const pnl   = d.dailyPnl || 0;
+  // P&L — update value + card accent
+  const pnl    = d.dailyPnl || 0;
+  const pnlEl  = document.getElementById('stat-pnl');
   pnlEl.textContent = (pnl >= 0 ? '+' : '') + '₹' + fmt2(pnl);
-  pnlEl.className   = 'value ' + (pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : '');
+  pnlEl.className   = 'stat-value' + (pnl > 0 ? ' pnl-pos' : pnl < 0 ? ' pnl-neg' : '');
+
+  const pnlCard = document.getElementById('card-pnl');
+  if (pnlCard) {
+    pnlCard.classList.remove('is-pos', 'is-neg');
+    if (pnl > 0) pnlCard.classList.add('is-pos');
+    else if (pnl < 0) pnlCard.classList.add('is-neg');
+  }
 
   const positions = d.positions || [];
   const openCount = positions.filter(p => p.status === 'OPEN').length;
@@ -64,7 +75,7 @@ function renderPositions(positions, openCount) {
   document.getElementById('pos-count').textContent = openCount;
   const tbody = document.getElementById('positions-tbody');
   if (!positions.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="color:#8b949e;text-align:center">No positions yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-cell">No positions yet</td></tr>';
     return;
   }
   tbody.innerHTML = positions.map(p => {
@@ -88,45 +99,59 @@ function renderGemini(list) {
   document.getElementById('gemini-count').textContent = list.length;
   const el = document.getElementById('gemini-list');
   if (!list.length) {
-    el.innerHTML = '<span style="color:#8b949e">Built at 09:00…</span>';
+    el.innerHTML = '<span class="muted-text">Building at 09:00 IST…</span>';
     return;
   }
-  el.innerHTML = list.map(s => `<span class="badge gray">${s}</span>`).join('');
+  el.innerHTML = list.map(s => `<span class="stock-chip">${s}</span>`).join('');
 }
 
 function renderScans(scans) {
+  const passCount = scans.filter(r => r.pass).length;
+  const skipCount = scans.length - passCount;
+
+  const passEl = document.getElementById('scan-pass');
+  const skipEl = document.getElementById('scan-skip');
+  if (passEl) passEl.textContent = passCount + ' signal' + (passCount !== 1 ? 's' : '');
+  if (skipEl) skipEl.textContent = skipCount + ' skipped';
+
   const tbody = document.getElementById('scans-tbody');
   if (!scans.length) {
-    tbody.innerHTML = '<tr><td colspan="3" style="color:#8b949e;text-align:center">Waiting for scans…</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" class="empty-cell">Waiting for scans…</td></tr>';
     return;
   }
   tbody.innerHTML = scans.slice(-25).reverse().map(r => {
     const passed = !!r.pass;
     const detail = passed
-      ? (r.signal ? `@${fmt2(r.signal.ltp)} RSI ${fmt2(r.signal.rsi)} ADX ${fmt2(r.signal.adx)}` : 'signal')
+      ? (r.signal
+          ? `@${fmt2(r.signal.ltp)} &middot; RSI ${fmt2(r.signal.rsi)} &middot; ADX ${fmt2(r.signal.adx)}`
+          : 'signal')
       : (r.reason || '');
     return `<tr>
       <td>${r.symbol}</td>
       <td><span class="badge ${passed ? 'green' : 'gray'}">${passed ? 'SIGNAL' : 'skip'}</span></td>
-      <td style="color:#8b949e">${detail}</td>
+      <td style="color:var(--txt-2);font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis">${detail}</td>
     </tr>`;
   }).join('');
 }
 
-// ── Backtest (POST /api/backtest → poll GET /api/backtest/{id}) ─────────────────
+// ── Backtest ───────────────────────────────────────────────────────────────────
 
 let btPoll = null;
 
 function runBacktest() {
   const from_date = document.getElementById('bt-from').value;
   const to_date   = document.getElementById('bt-to').value;
-  if (!from_date || !to_date) { alert('Pick a from and to date'); return; }
+  if (!from_date || !to_date) { alert('Select both a from and to date.'); return; }
 
   setBtStatus('starting…', 'yellow');
+  document.getElementById('bt-summary').innerHTML = '';
+  document.getElementById('bt-trades').innerHTML =
+    '<tr><td colspan="7" class="empty-cell">Running…</td></tr>';
+
   fetch('/api/backtest', {
-    method: 'POST',
+    method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from_date, to_date }),
+    body:    JSON.stringify({ from_date, to_date }),
   })
     .then(r => r.json())
     .then(d => {
@@ -147,50 +172,57 @@ function pollBacktest(runId) {
       if (run.status === 'error') {
         setBtStatus('failed', 'red');
         document.getElementById('bt-summary').innerHTML =
-          `<span class="pnl-neg">${run.error || 'backtest failed'}</span>`;
+          `<p class="pnl-neg" style="padding:8px 0;font-size:12px">${run.error || 'Backtest failed'}</p>`;
+        document.getElementById('bt-trades').innerHTML =
+          '<tr><td colspan="7" class="empty-cell">—</td></tr>';
         return;
       }
       setBtStatus('done', 'green');
       renderBacktestSummary(run.summary || {});
       fetch(`/api/backtest/${runId}/trades`).then(r => r.json()).then(renderBacktestTrades);
     })
-    .catch(e => { clearInterval(btPoll); setBtStatus('error: ' + e.message, 'red'); });
+    .catch(e => {
+      clearInterval(btPoll);
+      setBtStatus('error: ' + e.message, 'red');
+    });
 }
 
 function renderBacktestSummary(s) {
   const pf = s.profit_factor != null ? s.profit_factor : '—';
   const cells = [
-    ['Trades',       s.total_trades ?? 0],
-    ['Win rate',     ((s.win_rate ?? 0) * 100).toFixed(1) + '%'],
-    ['Net P&L',      '₹' + fmt2(s.net_pnl ?? 0)],
+    ['Trades',        s.total_trades ?? 0],
+    ['Win rate',      ((s.win_rate ?? 0) * 100).toFixed(1) + '%'],
+    ['Net P&L',       '₹' + fmt2(s.net_pnl ?? 0)],
     ['Profit factor', pf],
-    ['Max DD',       '₹' + fmt2(s.max_drawdown ?? 0)],
-    ['Avg R',        s.avg_r_multiple ?? 0],
-    ['Costs',        '₹' + fmt2(s.total_costs ?? 0)],
-    ['Days',         s.days_traded ?? 0],
+    ['Max DD',        '₹' + fmt2(s.max_drawdown ?? 0)],
+    ['Avg R',         s.avg_r_multiple ?? 0],
+    ['Costs',         '₹' + fmt2(s.total_costs ?? 0)],
+    ['Days',          s.days_traded ?? 0],
   ];
   document.getElementById('bt-summary').innerHTML =
-    `<div class="trade-info" style="grid-template-columns:repeat(4,1fr)">` +
+    '<div class="bt-grid">' +
     cells.map(([l, v]) =>
-      `<div class="stat-box"><div class="label">${l}</div><div class="value" style="font-size:13px">${v}</div></div>`
-    ).join('') + `</div>`;
+      `<div class="bt-cell"><div class="bt-cell-label">${l}</div><div class="bt-cell-val">${v}</div></div>`
+    ).join('') +
+    '</div>';
 }
 
 function renderBacktestTrades(trades) {
   const tbody = document.getElementById('bt-trades');
   if (!Array.isArray(trades) || !trades.length) {
-    tbody.innerHTML = '<tr><td colspan="7" style="color:#8b949e;text-align:center">No trades</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-cell">No trades</td></tr>';
     return;
   }
   tbody.innerHTML = trades.map(t => {
-    const cls = Number(t.net_pnl) > 0 ? 'pnl-pos' : Number(t.net_pnl) < 0 ? 'pnl-neg' : '';
+    const pnlCls = Number(t.net_pnl) > 0 ? 'pnl-pos' : Number(t.net_pnl) < 0 ? 'pnl-neg' : '';
+    const ocCls  = t.outcome === 'TARGET' ? 'oc-target' : t.outcome === 'STOP' ? 'oc-stop' : 'oc-eod';
     return `<tr>
       <td>${t.symbol}</td>
       <td>${fmt2(t.entry_price)}</td>
       <td>${fmt2(t.exit_price)}</td>
       <td>${t.quantity}</td>
-      <td>${t.outcome}</td>
-      <td class="${cls}">${fmt2(t.net_pnl)}</td>
+      <td class="${ocCls}">${t.outcome}</td>
+      <td class="${pnlCls}">${fmt2(t.net_pnl)}</td>
       <td>${t.r_multiple}</td>
     </tr>`;
   }).join('');
@@ -199,10 +231,10 @@ function renderBacktestTrades(trades) {
 function setBtStatus(text, cls) {
   const el = document.getElementById('bt-status');
   el.textContent = text;
-  el.className = 'badge ' + cls;
+  el.className   = 'badge ' + cls;
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
 function setStatus(which, text, cls) {
   const el = document.getElementById(which + '-status');
@@ -214,6 +246,16 @@ function fmt2(n) {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// ── Start ────────────────────────────────────────────────────────────────────────
+// ── Theme ──────────────────────────────────────────────────────────────────────
+
+function toggleTheme() {
+  const root    = document.documentElement;
+  const current = root.getAttribute('data-theme') || 'dark';
+  const next    = current === 'light' ? 'dark' : 'light';
+  root.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────────
 
 connect();

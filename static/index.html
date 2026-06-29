@@ -1,126 +1,172 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NSE Equity Paper Trader</title>
-<link rel="stylesheet" href="/css/dashboard.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NSE Paper Trader</title>
+  <meta name="description" content="Live NSE equity intraday paper-trading dashboard">
+  <link rel="stylesheet" href="/css/dashboard.css">
+  <script>
+    (function(){
+      var t = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
 </head>
 <body>
 
-<header>
-  <h1>NSE EQUITY PAPER TRADER</h1>
-  <div class="header-right">
-    <span id="phase-badge" class="badge gray">—</span>
-    <span id="ws-status"   class="badge gray">Connecting…</span>
-    <span id="api-status"  class="badge gray">API —</span>
-    <span id="clock">—:—:—</span>
+<!-- ── Top App Bar ──────────────────────────────────────────────────────────── -->
+<header class="app-bar">
+  <div class="brand">
+    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <polyline points="3,17 8,10 12,14 17,7 21,11"
+        stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-name">NSE Paper Trader</span>
+      <span class="brand-sub" id="last-bar-time">Live</span>
+    </div>
   </div>
+
+  <div class="status-row">
+    <span id="phase-badge" class="badge gray">—</span>
+    <span id="ws-status"  class="badge gray">Connecting…</span>
+    <span id="api-status" class="badge gray">API —</span>
+  </div>
+
+  <div class="clock-wrap">
+    <div id="clock" class="clock">—:—:—</div>
+    <div class="clock-sub">IST</div>
+  </div>
+
+  <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" aria-label="Toggle theme">
+    <!-- Sun: shown in dark mode to switch to light -->
+    <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <!-- Moon: shown in light mode to switch to dark -->
+    <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
 </header>
 
+<!-- ── Stat strip ──────────────────────────────────────────────────────────── -->
+<div class="stat-strip">
+  <div class="stat-card">
+    <span class="stat-label">NIFTY 50</span>
+    <span class="stat-value" id="stat-nifty">—</span>
+  </div>
+  <div class="stat-card" id="card-pnl">
+    <span class="stat-label">Daily P&amp;L</span>
+    <span class="stat-value" id="stat-pnl">—</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">Open Positions</span>
+    <span class="stat-value" id="stat-open">—</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">Watchlist</span>
+    <span class="stat-value" id="stat-watch">—</span>
+  </div>
+</div>
+
+<!-- ── Main grid ───────────────────────────────────────────────────────────── -->
 <div class="main-grid">
 
-  <!-- LEFT COL -->
-  <div style="display:flex;flex-direction:column;gap:12px">
+  <!-- LEFT: Positions + Scans ──────────────────────────────────────────────── -->
+  <div class="col">
 
-    <!-- Summary -->
-    <div class="panel">
-      <div class="panel-header">Session</div>
-      <div class="panel-body">
-        <div class="trade-info" style="grid-template-columns:repeat(4,1fr)">
-          <div class="stat-box">
-            <div class="label">NIFTY 50</div>
-            <div class="value" id="stat-nifty">—</div>
-          </div>
-          <div class="stat-box">
-            <div class="label">Daily P&amp;L</div>
-            <div class="value" id="stat-pnl">—</div>
-          </div>
-          <div class="stat-box">
-            <div class="label">Open</div>
-            <div class="value" id="stat-open">—</div>
-          </div>
-          <div class="stat-box">
-            <div class="label">Watchlist</div>
-            <div class="value" id="stat-watch">—</div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Positions -->
     <div class="panel">
       <div class="panel-header">
-        <span>Positions</span>
+        <span class="panel-title">Positions</span>
         <span id="pos-count" class="badge gray">0</span>
       </div>
-      <div class="tbl-scroll">
+      <div class="tbl-wrap">
         <table>
           <thead><tr>
             <th>Symbol</th><th>Status</th><th>Entry</th><th>Time</th>
             <th>Qty</th><th>SL</th><th>Target</th><th>LTP</th><th>P&amp;L ₹</th>
           </tr></thead>
           <tbody id="positions-tbody">
-            <tr><td colspan="9" style="color:#8b949e;text-align:center">No positions yet</td></tr>
+            <tr><td colspan="9" class="empty-cell">No positions yet</td></tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <!-- Scan results -->
     <div class="panel">
-      <div class="panel-header">Latest Scan Results</div>
-      <div class="tbl-scroll">
+      <div class="panel-header">
+        <span class="panel-title">Scan Results</span>
+        <div class="scan-meta">
+          <span class="scan-pass" id="scan-pass">0 signals</span>
+          <span class="scan-skip" id="scan-skip">0 skipped</span>
+        </div>
+      </div>
+      <div class="tbl-wrap">
         <table>
           <thead><tr><th>Symbol</th><th>Result</th><th>Detail</th></tr></thead>
           <tbody id="scans-tbody">
-            <tr><td colspan="3" style="color:#8b949e;text-align:center">Waiting for scans…</td></tr>
+            <tr><td colspan="3" class="empty-cell">Waiting for scans…</td></tr>
           </tbody>
         </table>
       </div>
     </div>
 
-  </div><!-- /LEFT -->
+  </div>
 
-  <!-- RIGHT COL -->
-  <div style="display:flex;flex-direction:column;gap:12px">
+  <!-- RIGHT: AI Watchlist + Backtest ───────────────────────────────────────── -->
+  <div class="col">
 
-    <!-- Gemini shortlist -->
     <div class="panel">
       <div class="panel-header">
-        <span>Watchlist (Gemini-screened)</span>
+        <span class="panel-title">AI Watchlist</span>
         <span id="gemini-count" class="badge gray">0</span>
       </div>
-      <div class="panel-body" id="gemini-list" style="display:flex;flex-wrap:wrap;gap:5px;max-height:160px;overflow-y:auto">
-        <span style="color:#8b949e">Built at 09:00…</span>
+      <div class="panel-body chip-cloud" id="gemini-list">
+        <span class="muted-text">Building at 09:00 IST…</span>
       </div>
     </div>
 
-    <!-- Backtest -->
     <div class="panel">
-      <div class="panel-header">Backtest</div>
+      <div class="panel-header">
+        <span class="panel-title">Backtest</span>
+        <span id="bt-status" class="badge gray">idle</span>
+      </div>
       <div class="panel-body">
-        <div class="trade-controls" style="align-items:center">
-          <label style="color:#8b949e">From <input class="price-input" id="bt-from" type="date" style="width:140px"></label>
-          <label style="color:#8b949e">To <input class="price-input" id="bt-to" type="date" style="width:140px"></label>
-          <button class="btn btn-buy" onclick="runBacktest()">Run</button>
-          <span id="bt-status" class="badge gray">idle</span>
+        <div class="bt-controls">
+          <div class="field">
+            <label class="field-label" for="bt-from">From</label>
+            <input class="field-input" id="bt-from" type="date">
+          </div>
+          <div class="field">
+            <label class="field-label" for="bt-to">To</label>
+            <input class="field-input" id="bt-to" type="date">
+          </div>
+          <button class="btn-run" onclick="runBacktest()">Run</button>
         </div>
-        <div id="bt-summary" style="margin-top:10px"></div>
-        <div class="tbl-scroll" style="margin-top:8px;max-height:220px">
+        <div id="bt-summary"></div>
+        <div class="tbl-wrap bt-tbl">
           <table>
             <thead><tr>
-              <th>Symbol</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Outcome</th><th>Net ₹</th><th>R</th>
+              <th>Symbol</th><th>Entry</th><th>Exit</th>
+              <th>Qty</th><th>Outcome</th><th>Net ₹</th><th>R</th>
             </tr></thead>
-            <tbody id="bt-trades"></tbody>
+            <tbody id="bt-trades">
+              <tr><td colspan="7" class="empty-cell">No trades yet</td></tr>
+            </tbody>
           </table>
         </div>
       </div>
     </div>
 
-  </div><!-- /RIGHT -->
+  </div>
 
-</div><!-- /main-grid -->
+</div>
 
 <script src="/js/dashboard.js"></script>
 </body>
