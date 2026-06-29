@@ -178,6 +178,69 @@ async def list_backtests() -> List[Dict[str, Any]]:
     return await _db.list_backtest_runs() if _db else []
 
 
+# ── Live indicators ───────────────────────────────────────────────────────────
+
+@router.get("/api/indicators")
+async def get_live_indicators() -> List[Dict[str, Any]]:
+    """
+    Compute RSI / MACD / ADX / support / VWAP for every stock in the active
+    watchlist.  Runs sequentially in a background thread — TA-Lib's C layer
+    releases the GIL so the event loop stays unblocked.
+    """
+    from app.engine.indicator_engine import compute_indicators   # avoid circular at module level
+
+    st = get_state()
+    if not st.active_watchlist:
+        return []
+
+    def _compute_all() -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for sym, tok in list(st.active_watchlist.items()):
+            with st.candle_lock(tok):
+                c5 = list(st.candles_5m.get(tok, []))
+
+            ltp   = st.ltp.get(sym, c5[-1].close if c5 else 0.0)
+            bar_t = c5[-1].start_time[11:16] if c5 else "—"
+
+            empty = dict(
+                symbol=sym, ltp=round(ltp, 2), bar_time=bar_t,
+                rsi=None, adx=None, plus_di=None, minus_di=None,
+                macd=None, macd_signal=None, macd_hist=None,
+                support=None, vwap=None, above_vwap=None, pattern=None,
+            )
+            if len(c5) < 30:
+                out.append(empty)
+                continue
+
+            today   = c5[-1].start_time[:10]
+            session = [c for c in c5 if c.start_time[:10] == today]
+            ind     = compute_indicators(c5, session_candles_5m=session)
+
+            hist = (round(ind.macd_line - ind.macd_signal_line, 4)
+                    if ind.macd_line is not None and ind.macd_signal_line is not None
+                    else None)
+            out.append(dict(
+                symbol      = sym,
+                ltp         = round(ltp, 2),
+                bar_time    = bar_t,
+                rsi         = round(ind.rsi, 1)          if ind.rsi         is not None else None,
+                adx         = round(ind.adx, 1)          if ind.adx                     else None,
+                plus_di     = round(ind.plus_di, 1)      if ind.plus_di                 else None,
+                minus_di    = round(ind.minus_di, 1)     if ind.minus_di                else None,
+                macd        = round(ind.macd_line, 4)    if ind.macd_line   is not None else None,
+                macd_signal = round(ind.macd_signal_line, 4) if ind.macd_signal_line is not None else None,
+                macd_hist   = hist,
+                support     = round(ind.support_level, 2) if ind.support_level          else None,
+                vwap        = round(ind.vwap, 2)          if ind.vwap                   else None,
+                above_vwap  = ind.price_above_vwap,
+                pattern     = ind.candle_pattern,
+            ))
+
+        return sorted(out, key=lambda x: x["symbol"])
+
+    return await asyncio.to_thread(_compute_all)
+
+
 # ── Dashboard WebSocket ───────────────────────────────────────────────────────
 
 @router.websocket("/ws/dashboard")

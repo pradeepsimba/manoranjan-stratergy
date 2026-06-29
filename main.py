@@ -55,6 +55,11 @@ def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
+@app.get("/indicators")
+def indicators_page() -> FileResponse:
+    return FileResponse("static/indicators.html")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=False)

@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Indicators — NSE Paper Trader</title>
+  <meta name="description" content="Real-time RSI, MACD, ADX and support for all watchlist stocks">
+  <link rel="stylesheet" href="/css/dashboard.css">
+  <script>
+    (function(){
+      var t = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <style>
+    /* ── Indicators page additions ─────────────────────────────────────────── */
+
+    .ind-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 10px 18px;
+      background: var(--surf);
+      border-bottom: 1px solid var(--edge-soft);
+    }
+
+    .ind-search {
+      padding: 5px 12px;
+      background: var(--surf-raised);
+      border: 1px solid var(--edge);
+      border-radius: var(--r-sm);
+      color: var(--txt);
+      font-family: inherit;
+      font-size: 12px;
+      outline: none;
+      width: 200px;
+    }
+    .ind-search:focus { border-color: var(--prime); }
+
+    .ind-meta {
+      margin-left: auto;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      font-size: 11px;
+      color: var(--txt-3);
+    }
+
+    .btn-irefresh {
+      padding: 5px 12px;
+      background: var(--surf-raised);
+      border: 1px solid var(--edge);
+      border-radius: var(--r-sm);
+      color: var(--txt-2);
+      font-size: 11px;
+      font-family: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn-irefresh:hover { border-color: var(--prime); color: var(--prime); }
+
+    /* ── Summary strip ──────────────────────────────────────────────────────── */
+    .sum-strip {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 8px 18px;
+      background: var(--surf);
+      border-bottom: 1px solid var(--edge-soft);
+    }
+
+    .sum-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 10px;
+      border: 1px solid var(--edge);
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--txt-2);
+      background: var(--surf-raised);
+      white-space: nowrap;
+    }
+    .sum-chip .cv { font-weight: 700; color: var(--txt); }
+    .sum-chip.pos { color: var(--pos); border-color: var(--pos-edge); background: var(--pos-bg); }
+    .sum-chip.pos .cv { color: var(--pos); }
+    .sum-chip.neg { color: var(--neg); border-color: var(--neg-edge); background: var(--neg-bg); }
+    .sum-chip.neg .cv { color: var(--neg); }
+    .sum-chip.warn { color: var(--warn); border-color: var(--warn-edge); background: var(--warn-bg); }
+    .sum-chip.warn .cv { color: var(--warn); }
+
+    /* ── Main table wrapper ─────────────────────────────────────────────────── */
+    .ind-wrap {
+      padding: 12px 18px;
+      overflow-x: auto;
+    }
+
+    /* Override the global sticky z-index for this page so it doesn't fight the app-bar */
+    .ind-wrap thead th {
+      z-index: 2;
+      cursor: pointer;
+      user-select: none;
+    }
+    .ind-wrap thead th:hover { color: var(--prime); }
+    .ind-wrap thead th.sorted {
+      color: var(--prime);
+      border-bottom-color: var(--prime);
+    }
+
+    /* Cell helpers */
+    .rsi-hi  { color: var(--pos);   font-weight: 600; }
+    .rsi-lo  { color: var(--neg);   font-weight: 600; }
+    .rsi-mid { color: var(--txt-2); }
+    .adx-on  { color: var(--prime); font-weight: 700; }
+    .adx-off { color: var(--txt-3); }
+    .pos-num { color: var(--pos);   }
+    .neg-num { color: var(--neg);   }
+    .muted   { color: var(--txt-3); }
+    .pat-td  { color: var(--warn);  font-size: 11px; }
+
+    .empty-row td {
+      text-align: center;
+      padding: 40px !important;
+      color: var(--txt-3) !important;
+    }
+
+    tbody td { vertical-align: middle; }
+  </style>
+</head>
+<body>
+
+<!-- ── App Bar ──────────────────────────────────────────────────────────────── -->
+<header class="app-bar">
+  <div class="brand">
+    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <polyline points="3,17 8,10 12,14 17,7 21,11"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-name">NSE Paper Trader</span>
+      <span class="brand-sub">Live Indicators</span>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:10px;align-items:center">
+    <span id="mkt-badge" class="badge gray">—</span>
+    <a href="/" style="text-decoration:none">
+      <button class="btn-irefresh">← Dashboard</button>
+    </a>
+    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<!-- ── Toolbar ──────────────────────────────────────────────────────────────── -->
+<div class="ind-toolbar">
+  <input class="ind-search" id="search" type="text" placeholder="Search symbol…" oninput="renderTable()">
+  <div class="ind-meta">
+    <span id="updated-txt">Not loaded</span>
+    <span id="countdown-txt" style="color:var(--txt-2);min-width:50px;text-align:right"></span>
+    <button class="btn-irefresh" onclick="fetchNow()">↺ Refresh</button>
+  </div>
+</div>
+
+<!-- ── Summary strip ────────────────────────────────────────────────────────── -->
+<div class="sum-strip">
+  <span class="sum-chip">Stocks <span class="cv" id="s-total">—</span></span>
+  <span class="sum-chip pos">Above VWAP <span class="cv" id="s-vwap">—</span></span>
+  <span class="sum-chip warn">RSI &lt; 30 <span class="cv" id="s-rsi-lo">—</span></span>
+  <span class="sum-chip neg">RSI &gt; 70 <span class="cv" id="s-rsi-hi">—</span></span>
+  <span class="sum-chip">ADX &gt; 20 <span class="cv" id="s-adx">—</span></span>
+  <span class="sum-chip pos">Pattern <span class="cv" id="s-pat">—</span></span>
+</div>
+
+<!-- ── Table ────────────────────────────────────────────────────────────────── -->
+<div class="ind-wrap">
+  <table>
+    <thead>
+      <tr id="thead-row">
+        <th data-key="symbol">Symbol</th>
+        <th data-key="ltp"      style="text-align:right">LTP ₹</th>
+        <th data-key="bar_time">Bar Time</th>
+        <th data-key="rsi"      style="text-align:right">RSI</th>
+        <th data-key="adx"      style="text-align:right">ADX</th>
+        <th data-key="plus_di"  style="text-align:right">+DI</th>
+        <th data-key="minus_di" style="text-align:right">−DI</th>
+        <th data-key="macd_hist" style="text-align:right">MACD Hist</th>
+        <th data-key="support"  style="text-align:right">Support ₹</th>
+        <th data-key="vwap"     style="text-align:right">VWAP ₹</th>
+        <th data-key="above_vwap">VWAP Pos</th>
+        <th data-key="pattern">Pattern</th>
+      </tr>
+    </thead>
+    <tbody id="ind-tbody">
+      <tr class="empty-row"><td colspan="12">Click Refresh or wait for auto-load…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+'use strict';
+
+var rows     = [];      // full fetched dataset
+var sortKey  = 'symbol';
+var sortAsc  = true;
+var cdTimer  = null;
+var cdVal    = 0;
+
+// ── Market hours (IST) ────────────────────────────────────────────────────────
+function marketStatus() {
+  var ist  = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  var mins = ist.getHours() * 60 + ist.getMinutes();
+  if (mins < 9 * 60 + 15)  return { open: false, label: 'Pre-Market' };
+  if (mins < 9 * 60 + 45)  return { open: true,  label: 'Wait Zone'  };
+  if (mins < 15 * 60 + 30) return { open: true,  label: 'Active'     };
+  return { open: false, label: 'Market Closed' };
+}
+
+function updateMarketBadge() {
+  var s  = marketStatus();
+  var el = document.getElementById('mkt-badge');
+  el.textContent = s.label;
+  el.className   = 'badge ' + (s.open ? 'green' : 'gray');
+}
+
+// ── Fetch ─────────────────────────────────────────────────────────────────────
+function fetchNow() {
+  clearInterval(cdTimer);
+  document.getElementById('countdown-txt').textContent = '';
+  document.getElementById('updated-txt').textContent   = 'Loading…';
+  updateMarketBadge();
+
+  fetch('/api/indicators')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      rows = Array.isArray(data) ? data : [];
+      renderTable();
+      renderSummary();
+      var now = new Date();
+      document.getElementById('updated-txt').textContent =
+        'Updated ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      startCountdown();
+    })
+    .catch(function() {
+      document.getElementById('updated-txt').textContent = 'Fetch failed — retry in 30 s';
+      startCountdown();
+    });
+}
+
+function startCountdown() {
+  cdVal = 30;
+  clearInterval(cdTimer);
+  cdTimer = setInterval(function() {
+    cdVal--;
+    document.getElementById('countdown-txt').textContent = '↺ ' + cdVal + 's';
+    if (cdVal <= 0) fetchNow();
+  }, 1000);
+}
+
+// ── Summary strip ─────────────────────────────────────────────────────────────
+function renderSummary() {
+  var n       = rows.length;
+  var aboveV  = rows.filter(function(r) { return r.above_vwap; }).length;
+  var rsiLo   = rows.filter(function(r) { return r.rsi != null && r.rsi < 30; }).length;
+  var rsiHi   = rows.filter(function(r) { return r.rsi != null && r.rsi > 70; }).length;
+  var adxOn   = rows.filter(function(r) { return r.adx != null && r.adx > 20; }).length;
+  var pats    = rows.filter(function(r) { return r.pattern; }).length;
+
+  document.getElementById('s-total').textContent  = n;
+  document.getElementById('s-vwap').textContent   = aboveV;
+  document.getElementById('s-rsi-lo').textContent = rsiLo;
+  document.getElementById('s-rsi-hi').textContent = rsiHi;
+  document.getElementById('s-adx').textContent    = adxOn;
+  document.getElementById('s-pat').textContent    = pats;
+}
+
+// ── Sort ──────────────────────────────────────────────────────────────────────
+function sortBy(key) {
+  if (sortKey === key) { sortAsc = !sortAsc; }
+  else { sortKey = key; sortAsc = true; }
+  renderTable();
+}
+
+// Wire up header clicks
+document.querySelectorAll('#thead-row th').forEach(function(th) {
+  th.addEventListener('click', function() { sortBy(th.getAttribute('data-key')); });
+});
+
+function updateSortHeaders() {
+  document.querySelectorAll('#thead-row th').forEach(function(th) {
+    var k   = th.getAttribute('data-key');
+    var txt = th.getAttribute('data-label') || th.textContent.replace(/[▲▼]\s*$/, '').trim();
+    if (!th.getAttribute('data-label')) th.setAttribute('data-label', txt);
+    th.classList.toggle('sorted', k === sortKey);
+    th.textContent = k === sortKey ? txt + (sortAsc ? ' ▲' : ' ▼') : txt;
+  });
+}
+
+// ── Format helpers ────────────────────────────────────────────────────────────
+function fmtINR(v, dp) {
+  if (v == null) return '<span class="muted">—</span>';
+  return v.toLocaleString('en-IN', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+}
+
+// ── Render table ──────────────────────────────────────────────────────────────
+function renderTable() {
+  updateSortHeaders();
+
+  var q = document.getElementById('search').value.toLowerCase();
+  var data = rows.filter(function(r) { return r.symbol.toLowerCase().indexOf(q) !== -1; });
+
+  data.sort(function(a, b) {
+    var va = a[sortKey], vb = b[sortKey];
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    var cmp = (typeof va === 'string') ? va.localeCompare(vb) : va - vb;
+    return sortAsc ? cmp : -cmp;
+  });
+
+  var tbody = document.getElementById('ind-tbody');
+  if (!data.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="12">No stocks match</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.map(function(r) {
+    // RSI colour
+    var rsiCls = r.rsi == null ? 'muted' : r.rsi < 30 ? 'rsi-lo' : r.rsi > 70 ? 'rsi-hi' : 'rsi-mid';
+    // ADX colour
+    var adxCls = r.adx == null ? 'muted' : r.adx >= 20 ? 'adx-on' : 'adx-off';
+    // MACD histogram colour
+    var histCls = r.macd_hist == null ? 'muted' : r.macd_hist >= 0 ? 'pos-num' : 'neg-num';
+    var histTxt = r.macd_hist != null
+      ? (r.macd_hist >= 0 ? '+' : '') + r.macd_hist.toFixed(4)
+      : '—';
+    // VWAP position
+    var vposCls = r.above_vwap == null ? 'muted'
+      : r.above_vwap ? 'pos-num' : 'neg-num';
+    var vposTxt = r.above_vwap == null ? '—' : r.above_vwap ? '▲ Above' : '▼ Below';
+
+    return [
+      '<tr>',
+      '<td style="font-weight:600">' + r.symbol + '</td>',
+      '<td style="text-align:right">' + fmtINR(r.ltp, 2) + '</td>',
+      '<td>' + (r.bar_time || '<span class="muted">—</span>') + '</td>',
+      '<td class="' + rsiCls + '" style="text-align:right">' + (r.rsi != null ? r.rsi.toFixed(1) : '—') + '</td>',
+      '<td class="' + adxCls + '" style="text-align:right">' + (r.adx != null ? r.adx.toFixed(1) : '—') + '</td>',
+      '<td class="pos-num" style="text-align:right">' + (r.plus_di  != null ? r.plus_di.toFixed(1)  : '<span class="muted">—</span>') + '</td>',
+      '<td class="neg-num" style="text-align:right">' + (r.minus_di != null ? r.minus_di.toFixed(1) : '<span class="muted">—</span>') + '</td>',
+      '<td class="' + histCls + '" style="text-align:right">' + histTxt + '</td>',
+      '<td style="text-align:right">' + fmtINR(r.support, 2) + '</td>',
+      '<td style="text-align:right">' + fmtINR(r.vwap,    2) + '</td>',
+      '<td class="' + vposCls + '">' + vposTxt + '</td>',
+      '<td class="' + (r.pattern ? 'pat-td' : 'muted') + '">' + (r.pattern || '—') + '</td>',
+      '</tr>',
+    ].join('');
+  }).join('');
+}
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+function toggleTheme() {
+  var root = document.documentElement;
+  var next = (root.getAttribute('data-theme') || 'dark') === 'light' ? 'dark' : 'light';
+  root.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+fetchNow();
+</script>
+</body>
+</html>
