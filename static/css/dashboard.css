@@ -295,6 +295,8 @@ body {
 
 .bt-tbl { max-height: 200px; }
 
+.bt-controls.hidden { display: none; }
+
 table {
   width: 100%;
   border-collapse: collapse;

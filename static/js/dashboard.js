@@ -160,7 +160,6 @@ function runBacktest() {
     .then(r => r.json())
     .then(d => {
       if (!d.run_id) throw new Error(d.detail || 'no run_id');
-      localStorage.setItem('bt_run_id', d.run_id);
       startPolling(d.run_id);
     })
     .catch(e => {
@@ -180,7 +179,6 @@ function pollBacktest(runId) {
     .then(run => {
       if (run.status === 'running') { setBtStatus('running…', 'yellow'); return; }
       clearInterval(btPoll);
-      localStorage.removeItem('bt_run_id');
       setRunBtn(false);
 
       if (run.status === 'error') {
@@ -202,13 +200,9 @@ function pollBacktest(runId) {
     });
 }
 
-function setRunBtn(disabled) {
-  const btn = document.getElementById('bt-run-btn');
-  if (!btn) return;
-  btn.disabled    = disabled;
-  btn.textContent = disabled ? 'Running…' : 'Run';
-  btn.style.opacity = disabled ? '.6' : '';
-  btn.style.cursor  = disabled ? 'not-allowed' : '';
+function setRunBtn(running) {
+  const controls = document.querySelector('.bt-controls');
+  if (controls) controls.classList.toggle('hidden', running);
 }
 
 function renderBacktestSummary(s) {
@@ -282,15 +276,19 @@ function toggleTheme() {
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 
-// Resume any in-progress backtest that was running before a page refresh.
-(function resumeBacktest() {
-  const runId = localStorage.getItem('bt_run_id');
-  if (!runId) return;
-  setBtStatus('running…', 'yellow');
-  setRunBtn(true);
-  document.getElementById('bt-trades').innerHTML =
-    '<tr><td colspan="7" class="empty-cell">Running…</td></tr>';
-  startPolling(runId);
-})();
+// On every page load, ask the backend if there is already a running backtest.
+// If yes, hide the form and resume polling — no localStorage involved.
+fetch('/api/backtests')
+  .then(r => r.json())
+  .then(runs => {
+    const active = Array.isArray(runs) && runs.find(r => r.status === 'running');
+    if (!active) return;
+    setBtStatus('running…', 'yellow');
+    setRunBtn(true);
+    document.getElementById('bt-trades').innerHTML =
+      '<tr><td colspan="7" class="empty-cell">Running…</td></tr>';
+    startPolling(active.run_id);
+  })
+  .catch(() => { /* server not ready yet — form stays visible */ });
 
 connect();
