@@ -162,7 +162,7 @@ function runBacktest() {
   setRunBtn(true);
   document.getElementById('bt-summary').innerHTML = '';
   document.getElementById('bt-trades').innerHTML =
-    '<tr><td colspan="12" class="empty-cell">Running…</td></tr>';
+    '<tr><td colspan="14" class="empty-cell">Running…</td></tr>';
 
   fetch('/api/backtest', {
     method:  'POST',
@@ -198,7 +198,7 @@ function pollBacktest(runId) {
         document.getElementById('bt-summary').innerHTML =
           `<p class="pnl-neg" style="padding:8px 0;font-size:12px">${run.error || 'Backtest failed'}</p>`;
         document.getElementById('bt-trades').innerHTML =
-          '<tr><td colspan="12" class="empty-cell">—</td></tr>';
+          '<tr><td colspan="14" class="empty-cell">—</td></tr>';
         return;
       }
       setBtStatus('done', 'green');
@@ -243,17 +243,21 @@ function renderBacktestSummary(s) {
 function renderBacktestTrades(trades) {
   const tbody = document.getElementById('bt-trades');
   if (!Array.isArray(trades) || !trades.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-cell">No trades</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="empty-cell">No trades</td></tr>';
     return;
   }
   tbody.innerHTML = trades.map(t => {
-    const pnlCls = Number(t.net_pnl) > 0 ? 'pnl-pos' : Number(t.net_pnl) < 0 ? 'pnl-neg' : '';
-    const ocCls  = t.outcome === 'TARGET' ? 'oc-target' : t.outcome === 'STOP' ? 'oc-stop' : 'oc-eod';
-    const entryT = fmtDT(t.entry_time);
-    const exitT  = fmtDT(t.exit_time);
-    const rsi    = t.rsi != null ? Number(t.rsi).toFixed(1) : '—';
-    const adx    = t.adx != null ? Number(t.adx).toFixed(1) : '—';
-    const pat    = t.candle_pattern || '—';
+    const pnlCls  = Number(t.net_pnl) > 0 ? 'pnl-pos' : Number(t.net_pnl) < 0 ? 'pnl-neg' : '';
+    const ocCls   = t.outcome === 'TARGET' ? 'oc-target' : t.outcome === 'STOP' ? 'oc-stop' : 'oc-eod';
+    const entryT  = fmtDT(t.entry_time);
+    const exitT   = fmtDT(t.exit_time);
+    const rsi     = t.rsi  != null ? Number(t.rsi).toFixed(1)  : '—';
+    const adx     = t.adx  != null ? Number(t.adx).toFixed(1)  : '—';
+    const macdVal = t.macd != null ? Number(t.macd)            : null;
+    const macd    = macdVal != null ? macdVal.toFixed(3)        : '—';
+    const macdCls = macdVal != null ? (macdVal >= 0 ? 'pnl-pos' : 'pnl-neg') : '';
+    const sup     = t.support_level != null ? fmt2(t.support_level) : '—';
+    const pat     = t.candle_pattern || '—';
     return `<tr>
       <td class="sym-col">${t.symbol}</td>
       <td>${fmt2(t.entry_price)}</td>
@@ -264,6 +268,8 @@ function renderBacktestTrades(trades) {
       <td class="${ocCls}">${t.outcome}</td>
       <td class="num-col">${rsi}</td>
       <td class="num-col">${adx}</td>
+      <td class="num-col ${macdCls}">${macd}</td>
+      <td class="num-col">${sup}</td>
       <td class="pat-col">${pat}</td>
       <td class="${pnlCls}">${fmt2(t.net_pnl)}</td>
       <td class="num-col">${t.r_multiple}</td>
@@ -375,7 +381,7 @@ fetch('/api/backtests')
       setBtStatus('running…', 'yellow');
       setRunBtn(true);
       document.getElementById('bt-trades').innerHTML =
-        '<tr><td colspan="12" class="empty-cell">Running…</td></tr>';
+        '<tr><td colspan="14" class="empty-cell">Running…</td></tr>';
       startPolling(active.run_id);
       return;
     }

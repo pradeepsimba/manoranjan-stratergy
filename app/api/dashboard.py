@@ -151,16 +151,16 @@ async def export_backtest_csv(run_id: str) -> Response:
         "Symbol", "Entry Price", "Entry Time", "Exit Price", "Exit Time",
         "Qty", "Outcome", "Stop Loss", "Target",
         "Gross P&L", "Costs", "Net P&L", "R Multiple",
-        "RSI", "ADX", "Pattern",
+        "RSI", "ADX", "MACD", "Support", "Pattern",
     ])
     for t in trades:
         w.writerow([
-            t.get("symbol"),      t.get("entry_price"),  t.get("entry_time"),
-            t.get("exit_price"),  t.get("exit_time"),    t.get("quantity"),
-            t.get("outcome"),     t.get("stop_loss"),    t.get("target"),
-            t.get("gross_pnl"),   t.get("costs"),        t.get("net_pnl"),
-            t.get("r_multiple"),  t.get("rsi"),          t.get("adx"),
-            t.get("candle_pattern"),
+            t.get("symbol"),      t.get("entry_price"),    t.get("entry_time"),
+            t.get("exit_price"),  t.get("exit_time"),      t.get("quantity"),
+            t.get("outcome"),     t.get("stop_loss"),      t.get("target"),
+            t.get("gross_pnl"),   t.get("costs"),          t.get("net_pnl"),
+            t.get("r_multiple"),  t.get("rsi"),            t.get("adx"),
+            t.get("macd"),        t.get("support_level"),  t.get("candle_pattern"),
         ])
 
     from_d = str(run.get("from_date", "")).replace("-", "")

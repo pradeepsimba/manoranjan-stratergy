@@ -30,6 +30,8 @@ class BTPosition:
     entry_rsi:     Optional[float] = None
     entry_adx:     Optional[float] = None
     entry_pattern: Optional[str]   = None
+    entry_macd:    Optional[float] = None
+    entry_support: Optional[float] = None
 
 
 @dataclass
@@ -52,6 +54,8 @@ class BTTrade:
     entry_rsi:     Optional[float] = None
     entry_adx:     Optional[float] = None
     entry_pattern: Optional[str]   = None
+    entry_macd:    Optional[float] = None
+    entry_support: Optional[float] = None
 
 
 @dataclass
@@ -114,6 +118,8 @@ class Portfolio:
             entry_rsi=round(pos.entry_rsi, 1) if pos.entry_rsi is not None else None,
             entry_adx=round(pos.entry_adx, 1) if pos.entry_adx is not None else None,
             entry_pattern=pos.entry_pattern,
+            entry_macd=round(pos.entry_macd, 4) if pos.entry_macd is not None else None,
+            entry_support=round(pos.entry_support, 2) if pos.entry_support is not None else None,
         )
         self.trades.append(trade)
         return trade

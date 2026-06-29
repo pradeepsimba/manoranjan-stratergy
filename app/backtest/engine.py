@@ -104,6 +104,8 @@ def _scan_symbol(
         entry_rsi=ind.rsi,
         entry_adx=ind.adx,
         entry_pattern=ind.candle_pattern,
+        entry_macd=ind.macd_line,
+        entry_support=ind.support_level,
     )
 
 

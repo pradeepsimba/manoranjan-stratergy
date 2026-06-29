@@ -100,6 +100,8 @@ CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS rsi            NUMERIC(6,2);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS adx            NUMERIC(6,2);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS candle_pattern VARCHAR(50);
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS macd           NUMERIC(12,4);
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS support_level  NUMERIC(12,2);
 """
 
 
@@ -257,7 +259,8 @@ class DatabaseService:
             (run_id, t.symbol, t.token, t.entry_time, t.entry_price,
              t.exit_time, t.exit_price, t.qty, t.stop_loss, t.target,
              t.outcome, t.gross_pnl, t.costs, t.net_pnl, t.r_multiple,
-             t.entry_rsi, t.entry_adx, t.entry_pattern)
+             t.entry_rsi, t.entry_adx, t.entry_pattern,
+             t.entry_macd, t.entry_support)
             for t in trades
         ]
         async with self._pool.acquire() as conn:
@@ -267,8 +270,9 @@ class DatabaseService:
                     (run_id, symbol, token, entry_time, entry_price, exit_time,
                      exit_price, quantity, stop_loss, target, outcome,
                      gross_pnl, costs, net_pnl, r_multiple,
-                     rsi, adx, candle_pattern)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                     rsi, adx, candle_pattern, macd, support_level)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                        $16,$17,$18,$19,$20)
                 """,
                 rows,
             )
