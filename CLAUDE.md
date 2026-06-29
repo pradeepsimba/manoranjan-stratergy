@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for working in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this is
 
@@ -39,7 +39,7 @@ python main.py                # serves http://0.0.0.0:8080
 Driven by `scheduler.SchedulerService._phase_driver` (IST wall clock):
 
 1. **09:00 PRE_MARKET** — `fetch_active_watchlist()` (client status) → `analyse_stocks()` (Gemini, returns bullish names) → `active_watchlist = {name: token}`. Empty Gemini result ⇒ trade the full list.
-2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h/1d + NIFTY), then `market_data.start()` opens the WS.
+2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h + NIFTY), then `market_data.start()` opens the WS.
 3. **09:45–15:30 ACTIVE** — `_run_active_phase()` is a **tick-wise loop** every `TICK_EVAL_INTERVAL_MS` (default 100ms):
    - `_tick_exits` — every open position's live price vs SL/target.
    - `_tick_entries` — re-scan stocks that ticked since last cycle (`dirty_ticks`), on the **forming** 5m bar; fill those whose 7 signals align. Entries stop at 14:30 (CUTOFF); exits continue to 15:30.
@@ -54,7 +54,7 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 
 ## Hard conventions — get these wrong and it breaks
 
-- **Keying:** `candles_5m/1h/1d` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today` are keyed by **SYMBOL NAME**. `active_watchlist = {name: token}` is the bridge. Always map correctly.
+- **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today` are keyed by **SYMBOL NAME**. `active_watchlist = {name: token}` is the bridge. Always map correctly.
 - **`positions` holds OPEN trades only.** Closing moves a position to `closed_positions` (in `paper_trade._finalize`). `len(positions)` is therefore a true *concurrent* count — do not reintroduce closed positions into it.
 - **Locking:** candle lists are mutated by the WS thread and read by pool workers — every shared-candle access goes through `st.candle_lock(token)`; NIFTY lists through `st._nifty_lock`. Positions/`daily_pnl`/`dirty_ticks` are mutated only on the event-loop thread (no lock needed); pool workers only *read* them.
 - **TA-Lib inputs:** pass raw NumPy `float64` arrays (built from candle slices), never DataFrames or `.ta` chains, into worker threads. Only the minimum lookback tail (`TALIB_LOOKBACK`) is materialized; session VWAP is the exception and uses today's bars.
@@ -64,7 +64,7 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 ## Layout
 
 ```
-main.py                      FastAPI app + lifespan (DB init → scheduler.start)
+main.py                      FastAPI app + lifespan (DB init → scheduler.start); serves / and /indicators
 app/config.py                ALL tunables (timing, risk, strategy params, costs, intervals)
 app/state.py                 AppState singleton (candles, ltp, positions, locks, dirty_ticks)
 app/models.py                Candle (slots), Position, EntrySignal, IndicatorResult, TrendGate, enums
@@ -81,10 +81,12 @@ app/services/
   paper_trade.py             place_paper_order, check_tick_exit, force_close, _finalize
   database.py                asyncpg pool + schema + positions/scan_log/daily_stats/backtest tables
 app/backtest/                data.py, engine.py, portfolio.py, fills.py, metrics.py
-app/api/dashboard.py         REST + WS endpoints (/api/status, /api/backtest, /ws/dashboard, …)
+app/api/dashboard.py         REST + WS endpoints (/api/status, /api/indicators, /api/backtest[/{id}/trades|export.csv], /ws/dashboard, …)
 app/ws/dashboard_ws.py       browser WS broadcast manager
-static/                      dashboard (index.html + js/dashboard.js + css)
+static/                      index.html, indicators.html, js/dashboard.js, css/
 ```
+
+Backtest is triggered from the dashboard: `POST /api/backtest {from_date, to_date, slippage_bps?, capital?}` runs in a background task and is polled via `GET /api/backtest/{id}`; results export at `…/export.csv`.
 
 ## Gotchas & known limitations
 
