@@ -20,7 +20,7 @@ def calc_quantity(
     Returns (quantity, sl_offset, target_offset).
     Returns (0, ...) if the setup is invalid or capital is insufficient.
     """
-    sl_offset = round(entry_price - support, 2)
+    sl_offset = round(max(entry_price - support, cfg.MIN_SL_OFFSET), 2)
     if sl_offset <= 0:
         return 0, 0.0, 0.0
 

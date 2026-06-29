@@ -136,7 +136,19 @@ function renderScans(scans) {
 
 // ── Backtest ───────────────────────────────────────────────────────────────────
 
-let btPoll = null;
+let btPoll       = null;
+let currentRunId = null;
+
+function setExportBtn(runId) {
+  currentRunId = runId || null;
+  const btn = document.getElementById('btn-export');
+  if (btn) btn.style.display = currentRunId ? '' : 'none';
+}
+
+function exportCsv() {
+  if (!currentRunId) return;
+  window.location.href = `/api/backtest/${currentRunId}/export.csv`;
+}
 
 function runBacktest() {
   const from_date = document.getElementById('bt-from').value;
@@ -150,7 +162,7 @@ function runBacktest() {
   setRunBtn(true);
   document.getElementById('bt-summary').innerHTML = '';
   document.getElementById('bt-trades').innerHTML =
-    '<tr><td colspan="7" class="empty-cell">Running…</td></tr>';
+    '<tr><td colspan="12" class="empty-cell">Running…</td></tr>';
 
   fetch('/api/backtest', {
     method:  'POST',
@@ -186,12 +198,15 @@ function pollBacktest(runId) {
         document.getElementById('bt-summary').innerHTML =
           `<p class="pnl-neg" style="padding:8px 0;font-size:12px">${run.error || 'Backtest failed'}</p>`;
         document.getElementById('bt-trades').innerHTML =
-          '<tr><td colspan="7" class="empty-cell">—</td></tr>';
+          '<tr><td colspan="12" class="empty-cell">—</td></tr>';
         return;
       }
       setBtStatus('done', 'green');
+      setExportBtn(runId);
       renderBacktestSummary(run.summary || {});
       fetch(`/api/backtest/${runId}/trades`).then(r => r.json()).then(renderBacktestTrades);
+      // Refresh history strip so the new run appears
+      fetch('/api/backtests').then(r => r.json()).then(renderBtHistory).catch(() => {});
     })
     .catch(e => {
       clearInterval(btPoll);
@@ -228,20 +243,30 @@ function renderBacktestSummary(s) {
 function renderBacktestTrades(trades) {
   const tbody = document.getElementById('bt-trades');
   if (!Array.isArray(trades) || !trades.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty-cell">No trades</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-cell">No trades</td></tr>';
     return;
   }
   tbody.innerHTML = trades.map(t => {
     const pnlCls = Number(t.net_pnl) > 0 ? 'pnl-pos' : Number(t.net_pnl) < 0 ? 'pnl-neg' : '';
     const ocCls  = t.outcome === 'TARGET' ? 'oc-target' : t.outcome === 'STOP' ? 'oc-stop' : 'oc-eod';
+    const entryT = fmtDT(t.entry_time);
+    const exitT  = fmtDT(t.exit_time);
+    const rsi    = t.rsi != null ? Number(t.rsi).toFixed(1) : '—';
+    const adx    = t.adx != null ? Number(t.adx).toFixed(1) : '—';
+    const pat    = t.candle_pattern || '—';
     return `<tr>
-      <td>${t.symbol}</td>
+      <td class="sym-col">${t.symbol}</td>
       <td>${fmt2(t.entry_price)}</td>
+      <td class="time-col">${entryT}</td>
       <td>${fmt2(t.exit_price)}</td>
-      <td>${t.quantity}</td>
+      <td class="time-col">${exitT}</td>
+      <td class="num-col">${t.quantity}</td>
       <td class="${ocCls}">${t.outcome}</td>
+      <td class="num-col">${rsi}</td>
+      <td class="num-col">${adx}</td>
+      <td class="pat-col">${pat}</td>
       <td class="${pnlCls}">${fmt2(t.net_pnl)}</td>
-      <td>${t.r_multiple}</td>
+      <td class="num-col">${t.r_multiple}</td>
     </tr>`;
   }).join('');
 }
@@ -264,6 +289,18 @@ function fmt2(n) {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function fmtDT(s) {
+  if (!s) return '—';
+  // s: "2024-06-15T09:45:00" or "2024-06-15 09:45:00"
+  const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  try {
+    const d = s.substring(0, 10);         // "2024-06-15"
+    const t = s.substring(11, 16);        // "09:45"
+    const [yy, mm, dd] = d.split('-');
+    return `${parseInt(dd,10)} ${MON[parseInt(mm,10)-1]} ${yy} ${t}`;
+  } catch { return s; }
+}
+
 // ── Theme ──────────────────────────────────────────────────────────────────────
 
 function toggleTheme() {
@@ -276,18 +313,75 @@ function toggleTheme() {
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 
-// On every page load, ask the backend if there is already a running backtest.
-// If yes, hide the form and resume polling — no localStorage involved.
+// ── Backtest history ───────────────────────────────────────────────────────────
+
+function fmtShortDate(s) {
+  if (!s) return '';
+  try {
+    const [, m, d] = String(s).split('-');
+    return `${d} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(m,10)-1]}`;
+  } catch { return s; }
+}
+
+function renderBtHistory(runs) {
+  if (!Array.isArray(runs)) return;
+  const done = runs.filter(r => r.status === 'done');
+  const wrap = document.getElementById('bt-history');
+  const list = document.getElementById('bt-hist-list');
+  if (!done.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  list.innerHTML = done.map(r => {
+    const net = r.summary && r.summary.net_pnl != null ? r.summary.net_pnl : null;
+    const cls = net != null ? (net >= 0 ? 'pnl-pos' : 'pnl-neg') : '';
+    const label = `${fmtShortDate(r.from_date)} – ${fmtShortDate(r.to_date)}`;
+    const pnl   = net != null ? `<span class="${cls}">₹${fmt2(net)}</span>` : '';
+    return `<span class="bt-hist-item">
+      <button class="bt-hist-load" onclick="loadRun('${r.run_id}')">${label} ${pnl}</button>
+      <button class="bt-hist-del" onclick="deleteRun('${r.run_id}')" title="Delete">×</button>
+    </span>`;
+  }).join('');
+}
+
+function loadRun(runId) {
+  setBtStatus('done', 'green');
+  setExportBtn(runId);
+  fetch(`/api/backtest/${runId}`)
+    .then(r => r.json())
+    .then(run => {
+      renderBacktestSummary(run.summary || {});
+      fetch(`/api/backtest/${runId}/trades`).then(r => r.json()).then(renderBacktestTrades);
+    })
+    .catch(e => setBtStatus('error: ' + e.message, 'red'));
+}
+
+function deleteRun(runId) {
+  fetch(`/api/backtest/${runId}`, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(() => {
+      if (currentRunId === runId) setExportBtn(null);
+      fetch('/api/backtests').then(r => r.json()).then(renderBtHistory);
+    })
+    .catch(e => console.error('Delete failed:', e));
+}
+
+// On page load: check for a running backtest (resume polling if found), then
+// load the most recent done run so results survive a refresh — no localStorage.
 fetch('/api/backtests')
   .then(r => r.json())
   .then(runs => {
+    renderBtHistory(runs);
     const active = Array.isArray(runs) && runs.find(r => r.status === 'running');
-    if (!active) return;
-    setBtStatus('running…', 'yellow');
-    setRunBtn(true);
-    document.getElementById('bt-trades').innerHTML =
-      '<tr><td colspan="7" class="empty-cell">Running…</td></tr>';
-    startPolling(active.run_id);
+    if (active) {
+      setBtStatus('running…', 'yellow');
+      setRunBtn(true);
+      document.getElementById('bt-trades').innerHTML =
+        '<tr><td colspan="12" class="empty-cell">Running…</td></tr>';
+      startPolling(active.run_id);
+      return;
+    }
+    // Auto-load the most recent completed run so the page is never blank.
+    const latest = Array.isArray(runs) && runs.find(r => r.status === 'done');
+    if (latest) loadRun(latest.run_id);
   })
   .catch(() => { /* server not ready yet — form stays visible */ });
 

@@ -467,10 +467,117 @@ tbody tr:hover td      { background: var(--surf-hover); }
   line-height: 1;
 }
 
+/* ── Backtest panel header right group ─────────────────────────────────────── */
+.bt-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-export {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 12px;
+  background: var(--surf-raised);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-sm);
+  color: var(--txt-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s, color .15s;
+}
+
+.btn-export:hover {
+  background: var(--surf-hover);
+  border-color: var(--prime);
+  color: var(--prime);
+}
+
 /* ── Backtest trade outcome coloring ───────────────────────────────────────── */
 .oc-target { color: var(--pos); font-weight: 600; }
 .oc-stop   { color: var(--neg); font-weight: 600; }
 .oc-eod    { color: var(--txt-2); }
+
+/* ── Backtest trade table compact columns ──────────────────────────────────── */
+.time-col { color: var(--txt-2); font-size: 11px; min-width: 115px; white-space: nowrap; }
+.num-col  { text-align: right; min-width: 44px; }
+.sym-col  { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.pat-col  { color: var(--txt-2); font-size: 11px; max-width: 110px;
+            overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Backtest run history strip ────────────────────────────────────────────── */
+.bt-hist-wrap {
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--edge-soft);
+}
+
+.bt-hist-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--txt-3);
+  margin-bottom: 6px;
+}
+
+.bt-hist-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bt-hist-item {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--edge);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--surf);
+  transition: border-color .15s;
+}
+
+.bt-hist-item:hover { border-color: var(--prime); }
+
+.bt-hist-load {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  background: none;
+  border: none;
+  color: var(--txt-2);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+
+.bt-hist-load:hover { background: var(--surf-hover); color: var(--txt); }
+
+.bt-hist-del {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  border-left: 1px solid var(--edge);
+  color: var(--txt-3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+
+.bt-hist-del:hover { background: var(--neg-bg); color: var(--neg); }
+
+/* Increase bt table height now that it has more rows of data to show */
+.bt-tbl { max-height: 340px; }
 
 /* ── Theme toggle button ───────────────────────────────────────────────────── */
 .theme-toggle {

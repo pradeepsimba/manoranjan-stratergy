@@ -5,7 +5,11 @@ import uuid
 from datetime import date
 from typing import Any, Dict, List
 
+import csv
+import io
+
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 import app.config as cfg
@@ -119,9 +123,54 @@ async def get_backtest(run_id: str) -> Dict[str, Any]:
     return run
 
 
+@router.delete("/api/backtest/{run_id}")
+async def delete_backtest(run_id: str) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    await _db.delete_backtest_run(run_id)
+    return {"deleted": run_id}
+
+
 @router.get("/api/backtest/{run_id}/trades")
 async def get_backtest_trades(run_id: str) -> List[Dict[str, Any]]:
     return await _db.get_backtest_trades(run_id) if _db else []
+
+
+@router.get("/api/backtest/{run_id}/export.csv")
+async def export_backtest_csv(run_id: str) -> Response:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    run    = await _db.get_backtest_run(run_id)
+    trades = await _db.get_backtest_trades(run_id)
+    if run is None:
+        raise HTTPException(404, "Unknown run_id")
+
+    buf = io.StringIO()
+    w   = csv.writer(buf)
+    w.writerow([
+        "Symbol", "Entry Price", "Entry Time", "Exit Price", "Exit Time",
+        "Qty", "Outcome", "Stop Loss", "Target",
+        "Gross P&L", "Costs", "Net P&L", "R Multiple",
+        "RSI", "ADX", "Pattern",
+    ])
+    for t in trades:
+        w.writerow([
+            t.get("symbol"),      t.get("entry_price"),  t.get("entry_time"),
+            t.get("exit_price"),  t.get("exit_time"),    t.get("quantity"),
+            t.get("outcome"),     t.get("stop_loss"),    t.get("target"),
+            t.get("gross_pnl"),   t.get("costs"),        t.get("net_pnl"),
+            t.get("r_multiple"),  t.get("rsi"),          t.get("adx"),
+            t.get("candle_pattern"),
+        ])
+
+    from_d = str(run.get("from_date", "")).replace("-", "")
+    to_d   = str(run.get("to_date",   "")).replace("-", "")
+    fname  = f"backtest_{from_d}_{to_d}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.get("/api/backtests")

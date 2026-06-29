@@ -135,9 +135,20 @@
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Backtest</span>
-        <span id="bt-status" class="badge gray">idle</span>
+        <div class="bt-header-right">
+          <button id="btn-export" class="btn-export" onclick="exportCsv()" style="display:none">
+            ↓ Export CSV
+          </button>
+          <span id="bt-status" class="badge gray">idle</span>
+        </div>
       </div>
       <div class="panel-body">
+        <!-- Past run history strip -->
+        <div id="bt-history" class="bt-hist-wrap" style="display:none">
+          <div class="bt-hist-label">Recent Runs</div>
+          <div id="bt-hist-list" class="bt-hist-list"></div>
+        </div>
+
         <div class="bt-controls">
           <div class="field">
             <label class="field-label" for="bt-from">From</label>
@@ -158,11 +169,14 @@
         <div class="tbl-wrap bt-tbl">
           <table>
             <thead><tr>
-              <th>Symbol</th><th>Entry</th><th>Exit</th>
-              <th>Qty</th><th>Outcome</th><th>Net ₹</th><th>R</th>
+              <th>Symbol</th><th>Entry ₹</th><th>Entry Time</th>
+              <th>Exit ₹</th><th>Exit Time</th>
+              <th>Qty</th><th>Outcome</th>
+              <th>RSI</th><th>ADX</th><th>Pattern</th>
+              <th>Net ₹</th><th>R</th>
             </tr></thead>
             <tbody id="bt-trades">
-              <tr><td colspan="7" class="empty-cell">No trades yet</td></tr>
+              <tr><td colspan="12" class="empty-cell">No trades yet</td></tr>
             </tbody>
           </table>
         </div>

@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     r_multiple  NUMERIC(8,3)
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
+
+-- Add indicator columns to existing tables (idempotent)
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS rsi            NUMERIC(6,2);
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS adx            NUMERIC(6,2);
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS candle_pattern VARCHAR(50);
 """
 
 
@@ -251,7 +256,8 @@ class DatabaseService:
         rows = [
             (run_id, t.symbol, t.token, t.entry_time, t.entry_price,
              t.exit_time, t.exit_price, t.qty, t.stop_loss, t.target,
-             t.outcome, t.gross_pnl, t.costs, t.net_pnl, t.r_multiple)
+             t.outcome, t.gross_pnl, t.costs, t.net_pnl, t.r_multiple,
+             t.entry_rsi, t.entry_adx, t.entry_pattern)
             for t in trades
         ]
         async with self._pool.acquire() as conn:
@@ -260,8 +266,9 @@ class DatabaseService:
                 INSERT INTO backtest_trades
                     (run_id, symbol, token, entry_time, entry_price, exit_time,
                      exit_price, quantity, stop_loss, target, outcome,
-                     gross_pnl, costs, net_pnl, r_multiple)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                     gross_pnl, costs, net_pnl, r_multiple,
+                     rsi, adx, candle_pattern)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                 """,
                 rows,
             )
@@ -280,6 +287,11 @@ class DatabaseService:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM backtest_runs WHERE run_id=$1", run_id)
         return self._decode_jsonb(dict(row), "params", "summary") if row else None
+
+    async def delete_backtest_run(self, run_id: str) -> None:
+        async with self._pool.acquire() as conn:
+            # backtest_trades has ON DELETE CASCADE — trades deleted automatically
+            await conn.execute("DELETE FROM backtest_runs WHERE run_id=$1", run_id)
 
     async def get_backtest_trades(self, run_id: str) -> List[Dict[str, Any]]:
         async with self._pool.acquire() as conn:

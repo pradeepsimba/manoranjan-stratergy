@@ -101,6 +101,9 @@ def _scan_symbol(
         stop_loss=round(fill - sl_offset, 2),
         target=round(fill + target_offset, 2),
         sl_offset=sl_offset, entry_gidx=gidx,
+        entry_rsi=ind.rsi,
+        entry_adx=ind.adx,
+        entry_pattern=ind.candle_pattern,
     )
 
 

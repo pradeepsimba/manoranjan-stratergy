@@ -40,10 +40,12 @@ RSI_PERIOD         = 14
 RSI_OVERSOLD       = 30
 RSI_RISING_BARS    = 3      # RSI must rise for this many consecutive bars
 SWING_LOW_BARS     = 10     # Lookback bars for structural support floor
-SUPPORT_TOUCH_PCT  = 0.005  # Price within 0.5% of support = "at support"
+SUPPORT_TOUCH_PCT  = 0.015  # Price within 1.5% of support = "at support"
+MIN_SL_OFFSET      = 5.0    # Minimum SL distance in ₹ (prevents oversized qty on tiny stops)
 VOLUME_MA_PERIOD   = 20
 VOLUME_MULTIPLIER  = 1.5    # Bar volume must exceed 1.5× 20-bar avg
 RR_RATIO           = 1.5    # target_offset = sl_offset × 1.5
+MACD_CROSS_BARS    = 3      # Allow entry up to N bars after a bullish MACD cross
 
 # Tail length fed to TA-Lib per scan. 120 bars lets RSI(14)/ADX(14)/MACD(26,9)
 # fully converge (Wilder smoothing) while skipping the multi-day warmup history.

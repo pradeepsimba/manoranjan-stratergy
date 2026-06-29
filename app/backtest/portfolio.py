@@ -26,6 +26,10 @@ class BTPosition:
     target:      float
     sl_offset:   float
     entry_gidx:  int       # index into the symbol's full series (exit only after this)
+    # indicator snapshot at entry (optional — None for legacy positions)
+    entry_rsi:     Optional[float] = None
+    entry_adx:     Optional[float] = None
+    entry_pattern: Optional[str]   = None
 
 
 @dataclass
@@ -44,6 +48,10 @@ class BTTrade:
     costs:       float
     net_pnl:     float
     r_multiple:  float      # net_pnl / (sl_offset * qty)
+    # indicator snapshot at entry
+    entry_rsi:     Optional[float] = None
+    entry_adx:     Optional[float] = None
+    entry_pattern: Optional[str]   = None
 
 
 @dataclass
@@ -103,6 +111,9 @@ class Portfolio:
             outcome=outcome,
             gross_pnl=round(gross, 2), costs=round(costs, 2), net_pnl=round(net, 2),
             r_multiple=round(r_mult, 3),
+            entry_rsi=round(pos.entry_rsi, 1) if pos.entry_rsi is not None else None,
+            entry_adx=round(pos.entry_adx, 1) if pos.entry_adx is not None else None,
+            entry_pattern=pos.entry_pattern,
         )
         self.trades.append(trade)
         return trade

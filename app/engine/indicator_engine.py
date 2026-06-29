@@ -154,9 +154,18 @@ def compute_indicators(
     prev_sig = _last(macdsignal, -2)
     if (prev_ml is not None and prev_sig is not None
             and _last(macd) is not None and _last(macdsignal) is not None):
-        ind.macd_histogram     = ind.macd_line - ind.macd_signal_line
-        ind.macd_bullish_cross = (prev_ml <= prev_sig
-                                  and ind.macd_line > ind.macd_signal_line)
+        ind.macd_histogram = ind.macd_line - ind.macd_signal_line
+        # "Bullish cross" — MACD is above signal now AND was below signal within
+        # the last MACD_CROSS_BARS bars.  A window wider than 1 lets the entry
+        # fire on confirming bars after the cross, not only on the exact cross bar.
+        lookback_n = cfg.MACD_CROSS_BARS + 1
+        m_tail  = macd[~np.isnan(macd)][-lookback_n:]
+        s_tail  = macdsignal[~np.isnan(macdsignal)][-lookback_n:]
+        n       = min(len(m_tail), len(s_tail))
+        if n >= 2:
+            above_now    = m_tail[-1] > s_tail[-1]
+            was_below    = bool(np.any(m_tail[: n - 1] <= s_tail[: n - 1]))
+            ind.macd_bullish_cross = above_now and was_below
 
     # ── ADX (14) + directional movement ──────────────────────────────────────
     adx_arr = talib.ADX(high, low, close, timeperiod=cfg.ADX_PERIOD)
