@@ -88,6 +88,7 @@ class BacktestRequest(BaseModel):
     from_date:    date
     to_date:      date
     slippage_bps: float = cfg.SLIPPAGE_BPS
+    capital:      float = cfg.ACCOUNT_BALANCE
 
 
 @router.post("/api/backtest")
@@ -96,15 +97,16 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         raise HTTPException(503, "Database not ready")
     if req.from_date > req.to_date:
         raise HTTPException(400, "from_date must be on or before to_date")
+    if req.capital <= 0:
+        raise HTTPException(400, "capital must be greater than 0")
 
     run_id = uuid.uuid4().hex[:12]
     await _db.create_backtest_run(
-        run_id, req.from_date, req.to_date, {"slippage_bps": req.slippage_bps}
+        run_id, req.from_date, req.to_date,
+        {"slippage_bps": req.slippage_bps, "capital": req.capital},
     )
-    # Run in the background so the request returns immediately and the live
-    # scheduler is never blocked.
     asyncio.create_task(
-        run_backtest(_db, run_id, req.from_date, req.to_date, req.slippage_bps)
+        run_backtest(_db, run_id, req.from_date, req.to_date, req.slippage_bps, req.capital)
     )
     return {"run_id": run_id, "status": "running"}
 

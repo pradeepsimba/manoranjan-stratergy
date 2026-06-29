@@ -5,10 +5,17 @@ from typing import Container, Set
 import app.config as cfg
 
 
-def calc_quantity(entry_price: float, support: float) -> tuple[int, float, float]:
+def calc_quantity(
+    entry_price: float,
+    support:     float,
+    capital:     float = cfg.ACCOUNT_BALANCE,
+) -> tuple[int, float, float]:
     """
     Compute trade quantity using the blueprint formula:
         Qty = RISK_PER_TRADE / (entry - support)
+
+    `capital` overrides cfg.ACCOUNT_BALANCE so the backtest can be run with a
+    user-supplied starting balance without touching global config.
 
     Returns (quantity, sl_offset, target_offset).
     Returns (0, ...) if the setup is invalid or capital is insufficient.
@@ -20,10 +27,10 @@ def calc_quantity(entry_price: float, support: float) -> tuple[int, float, float
     raw_qty = cfg.RISK_PER_TRADE / sl_offset
     qty     = max(1, int(raw_qty))
 
-    # Effective capital check: Angel One provides 5× intraday leverage
+    # Effective capital check: 5× intraday leverage
     capital_needed = (entry_price * qty) / cfg.INTRADAY_LEVERAGE
-    if capital_needed > cfg.ACCOUNT_BALANCE:
-        qty = max(1, int((cfg.ACCOUNT_BALANCE * cfg.INTRADAY_LEVERAGE) / entry_price))
+    if capital_needed > capital:
+        qty = max(1, int((capital * cfg.INTRADAY_LEVERAGE) / entry_price))
 
     target_offset = round(sl_offset * cfg.RR_RATIO, 2)
     return qty, sl_offset, target_offset

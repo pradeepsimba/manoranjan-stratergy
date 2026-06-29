@@ -50,6 +50,7 @@ def _scan_symbol(
     traded,
     daily_pnl:         float,
     slippage_bps:      float,
+    capital:           float = cfg.ACCOUNT_BALANCE,
 ) -> Optional[BTPosition]:
     """Evaluate one symbol at bar `gidx`. Returns a ready BTPosition or None."""
     ok, _ = can_enter(ss.name, open_syms, traded, daily_pnl)
@@ -89,7 +90,7 @@ def _scan_symbol(
             and ind.volume_surge and ind.price_above_vwap):
         return None
 
-    qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level)
+    qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level, capital)
     if qty == 0:
         return None
 
@@ -128,6 +129,7 @@ def _simulate_day(
     symbols:      Dict[str, SymbolSeries],
     nifty:        SymbolSeries,
     slippage_bps: float,
+    capital:      float = cfg.ACCOUNT_BALANCE,
 ) -> List:
     """
     Simulate ONE trading day with its own fresh portfolio. Days are fully
@@ -179,7 +181,7 @@ def _simulate_day(
                         continue
                     sig = _scan_symbol(
                         ss, gidx, day, nifty_daily_green, nifty_above_vwap,
-                        open_syms, traded, dpnl, slippage_bps,
+                        open_syms, traded, dpnl, slippage_bps, capital,
                     )
                     if sig:
                         signals.append(sig)
@@ -206,11 +208,12 @@ def _simulate_day(
 
 
 def simulate(
-    symbols: Dict[str, SymbolSeries],
-    nifty:   SymbolSeries,
-    from_d:  date,
-    to_d:    date,
+    symbols:      Dict[str, SymbolSeries],
+    nifty:        SymbolSeries,
+    from_d:       date,
+    to_d:         date,
     slippage_bps: float,
+    capital:      float = cfg.ACCOUNT_BALANCE,
 ) -> Tuple[List, List, int]:
     """
     Run the full replay. Days are independent, so they execute in parallel across
@@ -227,7 +230,7 @@ def simulate(
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bt-day") as pool:
         # map preserves input order → results already in chronological day order
         per_day = list(pool.map(
-            lambda d: _simulate_day(d, symbols, nifty, slippage_bps), days
+            lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital), days
         ))
 
     trades: List = []
@@ -244,7 +247,10 @@ def simulate(
     return trades, equity_curve, len(days)
 
 
-async def run_backtest(db, run_id: str, from_d: date, to_d: date, slippage_bps: float) -> None:
+async def run_backtest(
+    db, run_id: str, from_d: date, to_d: date,
+    slippage_bps: float, capital: float = cfg.ACCOUNT_BALANCE,
+) -> None:
     """Orchestrate one backtest run: fetch → simulate (in a worker thread) → persist."""
     try:
         universe, symbols, nifty = await load_backtest_data(from_d, to_d)
@@ -253,7 +259,7 @@ async def run_backtest(db, run_id: str, from_d: date, to_d: date, slippage_bps: 
             return
 
         trades, equity, days = await asyncio.to_thread(
-            simulate, symbols, nifty, from_d, to_d, slippage_bps
+            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital
         )
 
         summary = compute_metrics(trades, equity, days)

@@ -141,9 +141,13 @@ let btPoll = null;
 function runBacktest() {
   const from_date = document.getElementById('bt-from').value;
   const to_date   = document.getElementById('bt-to').value;
-  if (!from_date || !to_date) { alert('Select both a from and to date.'); return; }
+  const capital   = parseFloat(document.getElementById('bt-capital').value) || 40000;
 
-  setBtStatus('starting…', 'yellow');
+  if (!from_date || !to_date) { alert('Select both a from and to date.'); return; }
+  if (capital < 1000) { alert('Capital must be at least ₹1,000.'); return; }
+
+  setBtStatus('running…', 'yellow');
+  setRunBtn(true);
   document.getElementById('bt-summary').innerHTML = '';
   document.getElementById('bt-trades').innerHTML =
     '<tr><td colspan="7" class="empty-cell">Running…</td></tr>';
@@ -151,16 +155,23 @@ function runBacktest() {
   fetch('/api/backtest', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ from_date, to_date }),
+    body:    JSON.stringify({ from_date, to_date, capital }),
   })
     .then(r => r.json())
     .then(d => {
       if (!d.run_id) throw new Error(d.detail || 'no run_id');
-      setBtStatus('running…', 'yellow');
-      clearInterval(btPoll);
-      btPoll = setInterval(() => pollBacktest(d.run_id), 1500);
+      localStorage.setItem('bt_run_id', d.run_id);
+      startPolling(d.run_id);
     })
-    .catch(e => setBtStatus('error: ' + e.message, 'red'));
+    .catch(e => {
+      setBtStatus('error: ' + e.message, 'red');
+      setRunBtn(false);
+    });
+}
+
+function startPolling(runId) {
+  clearInterval(btPoll);
+  btPoll = setInterval(() => pollBacktest(runId), 1500);
 }
 
 function pollBacktest(runId) {
@@ -169,6 +180,9 @@ function pollBacktest(runId) {
     .then(run => {
       if (run.status === 'running') { setBtStatus('running…', 'yellow'); return; }
       clearInterval(btPoll);
+      localStorage.removeItem('bt_run_id');
+      setRunBtn(false);
+
       if (run.status === 'error') {
         setBtStatus('failed', 'red');
         document.getElementById('bt-summary').innerHTML =
@@ -184,7 +198,17 @@ function pollBacktest(runId) {
     .catch(e => {
       clearInterval(btPoll);
       setBtStatus('error: ' + e.message, 'red');
+      setRunBtn(false);
     });
+}
+
+function setRunBtn(disabled) {
+  const btn = document.getElementById('bt-run-btn');
+  if (!btn) return;
+  btn.disabled    = disabled;
+  btn.textContent = disabled ? 'Running…' : 'Run';
+  btn.style.opacity = disabled ? '.6' : '';
+  btn.style.cursor  = disabled ? 'not-allowed' : '';
 }
 
 function renderBacktestSummary(s) {
@@ -257,5 +281,16 @@ function toggleTheme() {
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────────
+
+// Resume any in-progress backtest that was running before a page refresh.
+(function resumeBacktest() {
+  const runId = localStorage.getItem('bt_run_id');
+  if (!runId) return;
+  setBtStatus('running…', 'yellow');
+  setRunBtn(true);
+  document.getElementById('bt-trades').innerHTML =
+    '<tr><td colspan="7" class="empty-cell">Running…</td></tr>';
+  startPolling(runId);
+})();
 
 connect();

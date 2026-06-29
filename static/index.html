@@ -147,7 +147,12 @@
             <label class="field-label" for="bt-to">To</label>
             <input class="field-input" id="bt-to" type="date">
           </div>
-          <button class="btn-run" onclick="runBacktest()">Run</button>
+          <div class="field">
+            <label class="field-label" for="bt-capital">Capital ₹</label>
+            <input class="field-input" id="bt-capital" type="number"
+              min="1000" step="1000" value="40000" style="width:110px">
+          </div>
+          <button class="btn-run" id="bt-run-btn" onclick="runBacktest()">Run</button>
         </div>
         <div id="bt-summary"></div>
         <div class="tbl-wrap bt-tbl">
