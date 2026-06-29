@@ -32,7 +32,8 @@ def compute_nifty_gates(
             [c.close for c in nifty_candles_5m],
             [c.volume for c in nifty_candles_5m],
         )
-        above_vwap = vwap > 0 and nifty_ltp > vwap
+        # vwap==0 means the server returned no volume for NIFTY — degrade gracefully
+        above_vwap = (vwap == 0.0) or (nifty_ltp > vwap)
 
     return daily_green, above_vwap
 

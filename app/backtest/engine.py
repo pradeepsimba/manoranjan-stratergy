@@ -97,8 +97,8 @@ def _scan_symbol(
     return BTPosition(
         symbol=ss.name, token=ss.token,
         entry_time=cur.start_time, entry_price=fill, qty=qty,
-        stop_loss=round(ltp - sl_offset, 2),       # = support level
-        target=round(ltp + target_offset, 2),
+        stop_loss=round(fill - sl_offset, 2),
+        target=round(fill + target_offset, 2),
         sl_offset=sl_offset, entry_gidx=gidx,
     )
 
@@ -151,7 +151,8 @@ def _simulate_day(
         nifty_ltp  = nbar.close
         nifty_vwap = (cum_tpv / cum_vol) if cum_vol > 0 else 0.0
         nifty_daily_green = nifty_ltp > nifty_day_open
-        nifty_above_vwap  = nifty_vwap > 0 and nifty_ltp > nifty_vwap
+        # nifty_vwap==0 means NIFTY has no volume data — degrade gracefully
+        nifty_above_vwap  = (nifty_vwap == 0.0) or (nifty_ltp > nifty_vwap)
 
         # 1) Exits first — only for positions opened on an earlier bar.
         for sym in list(port.positions.keys()):

@@ -44,7 +44,7 @@ async def fetch_active_watchlist() -> Dict[str, str]:
         token     = str(entry[2]).strip()
         if not stockname or not token:
             continue
-        if stockname.upper() in _INDEX_NAMES or stockname in _INDEX_NAMES:
+        if stockname.upper() in _INDEX_NAMES:
             continue
         watchlist[stockname] = token
 

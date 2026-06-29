@@ -159,7 +159,7 @@ async def fetch_today_candles(
 async def fetch_nifty_candles() -> Tuple[List[Candle], List[Candle]]:
     stocks       = [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}]
     from_d, to_d = _week_range()
-    data         = await _fetch(stocks, [cfg.INTERVAL_5M, cfg.INTERVAL_1D], from_d, to_d)
+    data         = await _fetch(stocks, [cfg.INTERVAL_1D], from_d, to_d)
     node         = data.get(cfg.NIFTY50_TOKEN, {})
     today_d, today_t = _today_range()
     today_data   = await _fetch(stocks, [cfg.INTERVAL_5M], today_d, today_t)
@@ -180,4 +180,4 @@ async def fetch_indicator_history(
     if not stocks:
         return {}
     data = await _fetch_all(stocks, [interval], from_date, to_date)
-    return {sym: node.get(interval, []) for sym, node in data.items()}
+    return {tok: node.get(interval, []) for tok, node in data.items()}
