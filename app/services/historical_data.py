@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -49,18 +49,11 @@ def _parse_candles(arr: list) -> List[Candle]:
 # ── Date helpers ───────────────────────────────────────────────────────────────
 
 def _today_range() -> Tuple[str, str]:
-    today     = date.today()
+    today     = datetime.now(IST).date()
     from_date = datetime(today.year, today.month, today.day, 9, 15,
                          tzinfo=IST).strftime("%Y-%m-%dT%H:%M:%S")
     to_date   = datetime(today.year, today.month, today.day, 15, 30,
                          tzinfo=IST).strftime("%Y-%m-%dT%H:%M:%S")
-    return from_date, to_date
-
-
-def _week_range() -> Tuple[str, str]:
-    today     = date.today()
-    from_date = (today - timedelta(days=7)).isoformat()
-    to_date   = (today + timedelta(days=1)).isoformat()
     return from_date, to_date
 
 
@@ -157,14 +150,11 @@ async def fetch_today_candles(
 
 
 async def fetch_nifty_candles() -> Tuple[List[Candle], List[Candle]]:
-    stocks       = [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}]
-    from_d, to_d = _week_range()
-    data         = await _fetch(stocks, [cfg.INTERVAL_1D], from_d, to_d)
-    node         = data.get(cfg.NIFTY50_TOKEN, {})
+    stocks           = [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}]
     today_d, today_t = _today_range()
-    today_data   = await _fetch(stocks, [cfg.INTERVAL_5M], today_d, today_t)
-    today_5m     = today_data.get(cfg.NIFTY50_TOKEN, {}).get(cfg.INTERVAL_5M, [])
-    return node.get(cfg.INTERVAL_1D, []), today_5m
+    today_data       = await _fetch(stocks, [cfg.INTERVAL_5M], today_d, today_t)
+    today_5m         = today_data.get(cfg.NIFTY50_TOKEN, {}).get(cfg.INTERVAL_5M, [])
+    return [], today_5m
 
 
 async def fetch_indicator_history(
@@ -172,7 +162,7 @@ async def fetch_indicator_history(
     interval:  str = cfg.INTERVAL_5M,
     days_back: int = 5,
 ) -> Dict[str, List[Candle]]:
-    today     = date.today()
+    today     = datetime.now(IST).date()
     from_date = (today - timedelta(days=days_back)).isoformat()
     to_date   = (today + timedelta(days=1)).isoformat()
     stocks    = [{"stockname": sym, "stock_symbol": tok}

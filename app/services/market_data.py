@@ -159,6 +159,9 @@ class MarketDataService:
                 elif interval == "1d":
                     self._upsert(self.state.candles_1d, symbol, candle)
 
+        if interval == "5m":
+            self.state.last_5m_bar_time = candle.start_time[11:16]
+
         if ltp > 0:
             if symbol == cfg.NIFTY50_TOKEN:
                 self.state.nifty_ltp = ltp

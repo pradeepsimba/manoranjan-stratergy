@@ -20,6 +20,7 @@ function connect() {
 
   ws.onclose = ws.onerror = () => {
     setStatus('ws', 'Disconnected', 'red');
+    clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 3000);
   };
 }

@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from app.backtest.fills import round_trip_costs
 from app.models import Position, PositionStatus
 from app.state import get_state
 
@@ -63,9 +64,13 @@ def place_paper_order(
 
 
 def _finalize(pos: Position, exit_price: float, label: str) -> Position:
-    """Close a position at exit_price, record P&L, and move it out of the open book."""
-    st  = get_state()
-    pnl = round((exit_price - pos.entry_price) * pos.quantity, 2)
+    """Close a position at exit_price, record net P&L (after costs), and move it out of the open book."""
+    st         = get_state()
+    buy_value  = pos.entry_price * pos.quantity
+    sell_value = exit_price      * pos.quantity
+    gross      = round((exit_price - pos.entry_price) * pos.quantity, 2)
+    costs      = round(round_trip_costs(buy_value, sell_value), 2)
+    pnl        = round(gross - costs, 2)
 
     pos.status     = PositionStatus.CLOSED
     pos.exit_price = round(exit_price, 2)
@@ -81,7 +86,7 @@ def _finalize(pos: Position, exit_price: float, label: str) -> Position:
 
     print(
         f"[PAPER] {label} {pos.symbol} @ {exit_price:.2f} | "
-        f"PnL ₹{pnl:+.2f}  (daily ₹{st.daily_pnl:+.2f})"
+        f"gross ₹{gross:+.2f}  costs ₹{costs:.2f}  net ₹{pnl:+.2f}  (daily ₹{st.daily_pnl:+.2f})"
     )
     return pos
 

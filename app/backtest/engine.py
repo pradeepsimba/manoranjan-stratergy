@@ -37,7 +37,7 @@ from app.models import Candle
 
 _SCAN_START  = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"   # "09:45"
 _CUTOFF      = f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d}"           # "14:30"
-_LOOKBACK    = 160   # bars passed to compute_indicators (covers TALIB_LOOKBACK + pattern/swing)
+_LOOKBACK    = cfg.TALIB_LOOKBACK + 40   # +40 covers pattern lookback and swing_low bars
 
 
 def _scan_symbol(

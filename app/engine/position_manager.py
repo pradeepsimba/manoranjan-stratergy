@@ -21,8 +21,6 @@ def calc_quantity(
     Returns (0, ...) if the setup is invalid or capital is insufficient.
     """
     sl_offset = round(max(entry_price - support, cfg.MIN_SL_OFFSET), 2)
-    if sl_offset <= 0:
-        return 0, 0.0, 0.0
 
     raw_qty = cfg.RISK_PER_TRADE / sl_offset
     qty     = max(1, int(raw_qty))
