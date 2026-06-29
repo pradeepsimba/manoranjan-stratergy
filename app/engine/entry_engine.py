@@ -60,12 +60,14 @@ def scan_stock(
     # LTP dict writes are GIL-protected in CPython — safe to read without a lock
     ltp = st.ltp.get(symbol, candles_5m[-1].close)
 
-    # Session bars = TODAY only. Used for the session-anchored VWAP AND to source
-    # today's open (first bar) for the daily gate — so the gate never depends on a
-    # 1d fetch that isn't updated live and may be empty at 09:15.
-    today      = candles_5m[-1].start_time[:10]
-    session_5m = [c for c in candles_5m if c.start_time[:10] == today]
-    day_open   = session_5m[0].open if session_5m else 0.0
+    # Today's bars are a contiguous suffix (candles are chronological). Find the
+    # suffix start with an O(today) backward walk instead of an O(buffer) scan,
+    # so the daily gate is cheap and the session slice is built only if it passes.
+    today  = candles_5m[-1].start_time[:10]
+    i      = len(candles_5m)
+    while i > 0 and candles_5m[i - 1].start_time[:10] == today:
+        i -= 1
+    day_open = candles_5m[i].open   # i < len: the last bar is always today's
 
     nifty_daily_green, nifty_above_vwap = nifty_gates
 
@@ -83,8 +85,10 @@ def scan_stock(
         st.record_scan(symbol, {"pass": False, "reason": reason})
         return None
 
-    # Compute indicators on snapshot — TA-Lib's C layer releases GIL, giving
-    # real parallelism across the 500-stock thread pool
+    # Session bars = today only (suffix), for the session-anchored VWAP. Built now
+    # that the gate has cleared. Compute indicators on the snapshot — TA-Lib's C
+    # layer releases the GIL, giving real parallelism across the thread pool.
+    session_5m = candles_5m[i:]
     ind = compute_indicators(candles_5m, candles_1h, session_candles_5m=session_5m)
 
     # ── 7 entry conditions ────────────────────────────────────────────────────

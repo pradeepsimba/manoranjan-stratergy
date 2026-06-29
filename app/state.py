@@ -33,6 +33,9 @@ class AppState:
         self.gemini_shortlist: List[str]      = []
         # Active watchlist subscribed via WebSocket: {symbol: token}
         self.active_watchlist: Dict[str, str] = {}
+        # Reverse map {token: symbol} — lets the tick loop iterate the (small)
+        # dirty-token set directly instead of scanning the whole watchlist.
+        self.token_to_name:    Dict[str, str] = {}
 
         # ── Candle stores (symbol → list[Candle], capped at 300 bars) ─────────
         self.candles_5m: Dict[str, List[Candle]] = {}

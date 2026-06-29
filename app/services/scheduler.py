@@ -189,6 +189,7 @@ class SchedulerService:
             st.active_watchlist = full_watchlist
 
         st.gemini_shortlist = list(st.active_watchlist.keys())
+        st.token_to_name    = {tok: name for name, tok in st.active_watchlist.items()}
         print(f"=== PRE-MARKET done: {len(st.active_watchlist)} stocks will be scanned ===")
 
     async def _run_wait_zone(self) -> None:
@@ -261,7 +262,9 @@ class SchedulerService:
         with st._nifty_lock:
             nifty_gates = compute_nifty_gates(st.nifty_ltp, st.nifty_candles_5m)
 
-        items = [(sym, tok) for sym, tok in st.active_watchlist.items() if tok in dirty]
+        # Iterate the (small) dirty-token set directly — O(dirty), not O(watchlist).
+        t2n   = st.token_to_name
+        items = [(t2n[tok], tok) for tok in dirty if tok in t2n]
         if not items:
             return
 
@@ -347,6 +350,7 @@ class SchedulerService:
         st.nifty_candles_5m.clear()
         st.nifty_candles_1d.clear()
         st.dirty_ticks.clear()
+        st.token_to_name.clear()
         st.clear_scan_results()
         st.last_5m_bar_time = None
 

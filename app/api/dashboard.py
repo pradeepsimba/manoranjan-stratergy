@@ -212,9 +212,11 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
                 out.append(empty)
                 continue
 
-            today   = c5[-1].start_time[:10]
-            session = [c for c in c5 if c.start_time[:10] == today]
-            ind     = compute_indicators(c5, session_candles_5m=session)
+            today = c5[-1].start_time[:10]   # today's bars are a contiguous suffix
+            j = len(c5)
+            while j > 0 and c5[j - 1].start_time[:10] == today:
+                j -= 1
+            ind = compute_indicators(c5, session_candles_5m=c5[j:])
 
             hist = (round(ind.macd_line - ind.macd_signal_line, 4)
                     if ind.macd_line is not None and ind.macd_signal_line is not None
