@@ -8,3 +8,4 @@ google-genai
 loguru
 numpy
 TA-Lib
+python-dotenv
