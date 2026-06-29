@@ -48,6 +48,8 @@
     }
 
     .btn-irefresh {
+      display: inline-flex;
+      align-items: center;
       padding: 5px 12px;
       background: var(--surf-raised);
       border: 1px solid var(--edge);
@@ -97,8 +99,14 @@
       overflow-x: auto;
     }
 
-    /* Override the global sticky z-index for this page so it doesn't fight the app-bar */
+    /*
+     * The global dashboard.css sets thead th { position:sticky; top:0; z-index:1 }.
+     * On the indicators page the table scrolls with the viewport (no fixed-height
+     * container), so "top:0" would anchor the header UNDER the 56 px app-bar.
+     * Override top to clear the app-bar, and raise z-index above the row cells.
+     */
     .ind-wrap thead th {
+      top: 56px;
       z-index: 2;
       cursor: pointer;
       user-select: none;
@@ -146,9 +154,7 @@
 
   <div style="display:flex;gap:10px;align-items:center">
     <span id="mkt-badge" class="badge gray">—</span>
-    <a href="/" style="text-decoration:none">
-      <button class="btn-irefresh">← Dashboard</button>
-    </a>
+    <a href="/" class="btn-irefresh" style="text-decoration:none">← Dashboard</a>
     <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
       <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
@@ -263,8 +269,8 @@ function startCountdown() {
   clearInterval(cdTimer);
   cdTimer = setInterval(function() {
     cdVal--;
+    if (cdVal <= 0) { fetchNow(); return; }   // clear + fetch before touching the DOM
     document.getElementById('countdown-txt').textContent = '↺ ' + cdVal + 's';
-    if (cdVal <= 0) fetchNow();
   }, 1000);
 }
 
