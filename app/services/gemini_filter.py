@@ -14,10 +14,15 @@ client-status list" — the architecture's built-in safe fallback.
 
 import asyncio
 import json
+import re
 from datetime import date
 from typing import List
 
 import app.config as cfg
+
+# Pulls the first JSON array out of a grounded text response (which may wrap it
+# in markdown fences or surround it with prose / citations).
+_JSON_ARRAY = re.compile(r"\[.*\]", re.DOTALL)
 
 
 async def analyse_stocks(stocknames: List[str]) -> List[str]:
@@ -55,19 +60,18 @@ def _grounded_screen(stocknames: List[str]) -> List[str]:
             f"news, results announcements, sector momentum, and overnight global "
             f"cues for Indian (NSE) equities.\n\n"
             f"From the following NSE stocks, return ONLY the symbols most likely to "
-            f"show INTRADAY BULLISH momentum today. Use each symbol exactly as given.\n\n"
+            f"show INTRADAY BULLISH momentum today, using each symbol exactly as "
+            f"given. Respond with ONLY a JSON array of strings, e.g. "
+            f'["RELIANCE","TCS"]. No prose, no markdown.\n\n'
             f"Stocks: {stock_list}"
         )
 
-        # Live Grounding with Google Search + strict JSON-array-of-strings output.
+        # Google-Search grounding. NOTE: the API rejects a response_schema /
+        # response_mime_type when a search tool is present, so we ask for a JSON
+        # array in the prompt and extract it from the grounded text below.
         config = types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
             temperature=1.0,
-            response_mime_type="application/json",
-            response_schema=types.Schema(
-                type=types.Type.ARRAY,
-                items=types.Schema(type=types.Type.STRING),
-            ),
         )
 
         response = client.models.generate_content(
@@ -76,8 +80,11 @@ def _grounded_screen(stocknames: List[str]) -> List[str]:
             config=config,
         )
 
-        raw = (response.text or "").strip()
-        symbols = json.loads(raw)
+        raw   = (response.text or "").strip()
+        match = _JSON_ARRAY.search(raw)
+        if not match:
+            raise ValueError("no JSON array in grounded response")
+        symbols = json.loads(match.group(0))
         if not isinstance(symbols, list):
             raise ValueError(f"Expected JSON array, got {type(symbols).__name__}")
 
