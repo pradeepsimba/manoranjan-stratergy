@@ -2,14 +2,22 @@ from __future__ import annotations
 
 """
 Live WebSocket feed from the custom market data server.
-Subscribes to every watchlist symbol at 5m and 1h, plus NIFTY 50 at 5m,
-and updates AppState candle stores in real time via per-token locks.
+
+Two concurrent WS connections share the same tick processor:
+
+  Primary   — active_watchlist (Gemini subset) at 5m + 1h, plus NIFTY 5m.
+  Secondary — non-Gemini full_watchlist stocks at 5m only.
+
+Splitting the subscription avoids the server's per-connection output-buffer
+limit (which rejects subscriptions for too many stocks at once with 1009).
+Both connections feed into the same dirty_ticks set so the tick-wise engine
+computes indicators for every stock on every bar update.
 """
 
 import asyncio
 import json
 import re
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 import websockets
 import websockets.exceptions
@@ -18,107 +26,130 @@ import app.config as cfg
 from app.models import Candle, TradingPhase
 from app.state import get_state
 
-if TYPE_CHECKING:
-    pass
-
 _LTP_PAT = re.compile(r"LTP\s*([\d.]+)")
 
 _MAX_CANDLES = 300   # per symbol per interval in memory
+_WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
 
 
 class MarketDataService:
     def __init__(self) -> None:
-        self._running = False
-        self._task:   Optional[asyncio.Task] = None
-        self.state    = get_state()
+        self._running  = False
+        self._task:    Optional[asyncio.Task] = None
+        self._task2:   Optional[asyncio.Task] = None
+        self.state     = get_state()
 
     def start(self) -> None:
         self._running = True
-        self._task    = asyncio.create_task(self._connect_loop())
+        # Primary: active_watchlist + NIFTY (5m + 1h for trading)
+        self._task  = asyncio.create_task(
+            self._connect_loop(self._build_filters_primary, "primary")
+        )
+        # Secondary: non-Gemini stocks (5m only for indicator display)
+        self._task2 = asyncio.create_task(
+            self._connect_loop(self._build_filters_secondary, "secondary")
+        )
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._task, self._task2):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
-    # ── WebSocket connection loop ─────────────────────────────────────────────
+    # ── WebSocket connection loops ─────────────────────────────────────────────
 
-    async def _connect_loop(self) -> None:
+    async def _connect_loop(
+        self,
+        filter_fn: Callable[[], List[dict]],
+        label:     str,
+    ) -> None:
         while self._running:
             try:
-                await self._run_ws()
+                filters = filter_fn()
+                if not filters:
+                    # Nothing to subscribe to yet (e.g. secondary before premarket)
+                    await asyncio.sleep(10)
+                    continue
+                await self._run_ws(filters, label)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.state.ws_status = f"WS Error: {e}"
-                print(f"WS error: {e}")
+                self.state.ws_status = f"WS Error ({label}): {e}"
+                print(f"WS error ({label}): {e}")
             if self._running:
                 await asyncio.sleep(5)
 
-    async def _run_ws(self) -> None:
+    async def _run_ws(self, filters: List[dict], label: str) -> None:
         async with websockets.connect(
             cfg.WS_URL,
             ping_interval=20,
             ping_timeout=30,
             open_timeout=15,
-            max_size=16 * 1024 * 1024,   # 16 MiB — full watchlist dumps can exceed the 1 MiB default
+            max_size=_WS_MAX_SIZE,
         ) as ws:
-            self.state.ws_status = "WS Connected"
+            if label == "primary":
+                self.state.ws_status = "WS Connected"
 
-            filters = self._build_filters()
             await ws.send(json.dumps({
                 "type":       "LIVE_FEED_INIT",
                 "filters":    filters,
                 "latestOnly": True,
             }))
-            print(f"WS subscribed: {len(filters)} symbol-interval pairs")
+            print(f"WS [{label}] subscribed: {len(filters)} symbol-interval pairs")
 
             async for message in ws:
                 if not self._running:
                     break
                 try:
-                    data = json.loads(message)
+                    data  = json.loads(message)
                     items = data if isinstance(data, list) else [data]
                     for item in items:
                         self._process_tick(item)
                 except Exception as e:
-                    print(f"Tick parse error: {e}")
+                    print(f"Tick parse error ({label}): {e}")
 
-        self.state.ws_status = "WS Disconnected"
+        if label == "primary":
+            self.state.ws_status = "WS Disconnected"
 
-    # ── Subscription filter builder ───────────────────────────────────────────
+    # ── Subscription filter builders ──────────────────────────────────────────
 
-    def _build_filters(self):
+    def _build_filters_primary(self) -> List[dict]:
         """
-        Subscribe to every symbol in the full watchlist at 5m, 1h.
-        Using the full pre-Gemini list ensures the indicators page can show live
-        data for ALL high-volume stocks, not just the AI-selected subset.
-        Always include NIFTY 50 at 5m for the trend gate.
+        Active_watchlist stocks at 5m + 1h (needed for hourly trend gate),
+        plus NIFTY 50 at 5m for the index trend filter.
         """
         st        = get_state()
-        # Subscribe WS to the Gemini-filtered subset only — the market-data server
-        # rejects subscriptions for the full high-volume list (too many symbols).
-        # Non-Gemini stocks are still scanned periodically via _full_scan_all.
         watchlist = st.active_watchlist
-        intervals = ["5m", "1h"]
-
-        filters = [
+        filters   = [
             {"stock_symbol": token, "stockname": sym, "interval": iv}
             for sym, token in watchlist.items()
-            for iv in intervals
+            for iv in ("5m", "1h")
         ]
-
-        # NIFTY 50 for index correlation filter
         filters.append({
             "stock_symbol": cfg.NIFTY50_TOKEN,
             "stockname":    cfg.NIFTY50_NAME,
             "interval":     "5m",
         })
         return filters
+
+    def _build_filters_secondary(self) -> List[dict]:
+        """
+        Non-Gemini stocks at 5m only — gives the indicators page per-tick
+        updates for every high-volume stock without needing 1h data.
+        Returns [] when full_watchlist is not yet populated (before premarket).
+        """
+        st     = get_state()
+        active = set(st.active_watchlist.values())   # set of tokens
+        extra  = [
+            {"stock_symbol": token, "stockname": sym, "interval": "5m"}
+            for sym, token in st.full_watchlist.items()
+            if token not in active
+        ]
+        return extra
 
     # ── Tick processing ───────────────────────────────────────────────────────
 
