@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Set
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 
 class DashboardWSManager:
@@ -23,7 +23,7 @@ class DashboardWSManager:
         for ws in list(self._clients):
             try:
                 await ws.send_text(json_str)
-            except Exception:
+            except (WebSocketDisconnect, ConnectionResetError, RuntimeError, OSError):
                 dead.add(ws)
         self._clients -= dead
 

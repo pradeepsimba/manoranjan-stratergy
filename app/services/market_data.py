@@ -16,6 +16,7 @@ subscribed at once):
 import asyncio
 import json
 import re
+from collections import deque as _deque
 from typing import Callable, Dict, List, Optional
 
 import websockets
@@ -268,13 +269,14 @@ class MarketDataService:
 
     @staticmethod
     def _upsert(store: Dict[str, list], symbol: str, candle: Candle) -> None:
-        lst = store.setdefault(symbol, [])
-        if lst and lst[-1].start_time == candle.start_time:
+        lst = store.get(symbol)
+        if lst is None:
+            store[symbol] = _deque([candle], maxlen=_MAX_CANDLES)
+            return
+        if lst[-1].start_time == candle.start_time:
             lst[-1] = candle          # update in-progress bar
         else:
-            lst.append(candle)
-            if len(lst) > _MAX_CANDLES:
-                lst.pop(0)
+            lst.append(candle)        # deque(maxlen) auto-evicts from left — O(1)
 
     @staticmethod
     def _upsert_list(lst: list, candle: Candle) -> None:

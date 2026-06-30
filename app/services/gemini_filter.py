@@ -20,9 +20,25 @@ from typing import List
 
 import app.config as cfg
 
-# Pulls the first JSON array out of a grounded text response (which may wrap it
-# in markdown fences or surround it with prose / citations).
-_JSON_ARRAY = re.compile(r"\[.*\]", re.DOTALL)
+# Non-greedy pattern: stops at the FIRST ] so multiple arrays in one response
+# (e.g. from citations) don't merge into a single wrong match.
+_JSON_ARRAY = re.compile(r"\[.*?\]", re.DOTALL)
+
+
+def _find_json_array(text: str) -> list:
+    """Return the last valid JSON string-array from a grounded model response.
+
+    Tries each `[...]` match in reverse (last match is most likely the answer)
+    so citation arrays like `[1]` or table arrays are skipped gracefully.
+    """
+    for candidate in reversed(_JSON_ARRAY.findall(text)):
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list) and all(isinstance(s, str) for s in parsed):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("no valid JSON string-array in grounded response")
 
 
 async def analyse_stocks(stocknames: List[str]) -> List[str]:
@@ -80,13 +96,8 @@ def _grounded_screen(stocknames: List[str]) -> List[str]:
             config=config,
         )
 
-        raw   = (response.text or "").strip()
-        match = _JSON_ARRAY.search(raw)
-        if not match:
-            raise ValueError("no JSON array in grounded response")
-        symbols = json.loads(match.group(0))
-        if not isinstance(symbols, list):
-            raise ValueError(f"Expected JSON array, got {type(symbols).__name__}")
+        raw     = (response.text or "").strip()
+        symbols = _find_json_array(raw)
 
         clean = [
             s.strip().upper()

@@ -116,8 +116,8 @@ class AppState:
     def clear_scan_results(self) -> None:
         with self._scan_results_lock:
             self.last_scan_results.clear()
-        self.indicator_snapshot.clear()
-        self.depth.clear()
+            self.indicator_snapshot.clear()
+            self.depth.clear()
 
 
 def get_state() -> AppState:

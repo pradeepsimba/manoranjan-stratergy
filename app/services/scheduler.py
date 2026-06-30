@@ -12,6 +12,7 @@ Timing orchestrator — drives the trading session through its 5 phases:
 
 import asyncio
 import json
+from collections import deque as _deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, List
@@ -271,7 +272,9 @@ class SchedulerService:
             return
         try:
             with st._nifty_lock:
-                nifty_gates = compute_nifty_gates(st.nifty_ltp, st.nifty_candles_5m)
+                _nifty_ltp = st.nifty_ltp
+                _nifty_5m  = list(st.nifty_candles_5m)
+            nifty_gates = compute_nifty_gates(_nifty_ltp, _nifty_5m)
 
             tradeable_set = set(st.active_watchlist.keys())
             items = [(name, tok, name in tradeable_set)
@@ -317,7 +320,9 @@ class SchedulerService:
             return
 
         with st._nifty_lock:
-            nifty_gates = compute_nifty_gates(st.nifty_ltp, st.nifty_candles_5m)
+            _nifty_ltp = st.nifty_ltp
+            _nifty_5m  = list(st.nifty_candles_5m)
+        nifty_gates = compute_nifty_gates(_nifty_ltp, _nifty_5m)
 
         # Iterate the (small) dirty-token set directly — O(dirty), not O(watchlist).
         # token_to_name covers the FULL watchlist; tradeable_set is the Gemini subset.
@@ -434,13 +439,15 @@ class SchedulerService:
                 wl, cfg.INTERVAL_5M, days_back=5
             )
             for token_key, candles in hist.items():
-                st.candles_5m[token_key] = candles
+                st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
 
             # Only 1H is needed now — the daily gate derives today's open from the
             # 5m session, so the (never-live-updated) 1d series is no longer fetched.
             today = await fetch_today_candles(wl, [cfg.INTERVAL_1H])
             for token_key, frames in today.items():
-                st.candles_1h[token_key] = frames.get(cfg.INTERVAL_1H, [])
+                st.candles_1h[token_key] = _deque(
+                    frames.get(cfg.INTERVAL_1H, []), maxlen=cfg.MAX_CANDLE_BUFFER
+                )
 
             # Replace (not extend) so a re-run of the loader can't accumulate
             # duplicate NIFTY bars, which would skew the index VWAP / daily-open.
@@ -510,5 +517,5 @@ class SchedulerService:
                 for sym, res in st.scan_snapshot()[-20:]
             ],
             "lastBarTime":       st.last_5m_bar_time,
-            "indicatorSnapshot": dict(st.indicator_snapshot),
+            "indicatorSnapshot": st.indicator_snapshot.copy(),
         }

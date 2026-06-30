@@ -140,10 +140,10 @@ async def get_backtest_trades(run_id: str) -> List[Dict[str, Any]]:
 async def export_backtest_csv(run_id: str) -> Response:
     if _db is None:
         raise HTTPException(503, "Database not ready")
-    run    = await _db.get_backtest_run(run_id)
-    trades = await _db.get_backtest_trades(run_id)
+    run = await _db.get_backtest_run(run_id)
     if run is None:
         raise HTTPException(404, "Unknown run_id")
+    trades = await _db.get_backtest_trades(run_id)
 
     buf = io.StringIO()
     w   = csv.writer(buf)
@@ -230,9 +230,9 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
                 ltp         = round(ltp, 2),
                 bar_time    = bar_t,
                 rsi         = round(ind.rsi, 1)          if ind.rsi         is not None else None,
-                adx         = round(ind.adx, 1)          if ind.adx                     else None,
-                plus_di     = round(ind.plus_di, 1)      if ind.plus_di                 else None,
-                minus_di    = round(ind.minus_di, 1)     if ind.minus_di                else None,
+                adx         = round(ind.adx, 1)          if ind.adx      is not None else None,
+                plus_di     = round(ind.plus_di, 1)      if ind.plus_di  is not None else None,
+                minus_di    = round(ind.minus_di, 1)     if ind.minus_di is not None else None,
                 macd        = round(ind.macd_line, 4)    if ind.macd_line   is not None else None,
                 macd_signal = round(ind.macd_signal_line, 4) if ind.macd_signal_line is not None else None,
                 macd_hist   = hist,
@@ -261,5 +261,5 @@ async def dashboard_ws(websocket: WebSocket) -> None:
     try:
         while True:
             await websocket.receive_text()
-    except WebSocketDisconnect:
+    except Exception:
         ws_manager.disconnect(websocket)

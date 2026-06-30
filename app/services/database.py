@@ -7,8 +7,11 @@ and daily P&L summary.
 """
 
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 import asyncpg
 
@@ -153,15 +156,17 @@ class DatabaseService:
                 UPDATE positions
                 SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3
                 WHERE symbol=$4 AND status='OPEN'
+                AND created_at > NOW() - INTERVAL '1 day'
                 """,
                 exit_price, exit_time, pnl, symbol,
             )
 
     async def get_today_positions(self) -> List[Dict[str, Any]]:
-        today = date.today().isoformat()
+        today = datetime.now(_IST).date()
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM positions WHERE created_at::date = $1 ORDER BY id",
+                "SELECT * FROM positions "
+                "WHERE (created_at AT TIME ZONE 'Asia/Kolkata')::date = $1 ORDER BY id",
                 today,
             )
         return [dict(r) for r in rows]

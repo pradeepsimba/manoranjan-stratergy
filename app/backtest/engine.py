@@ -71,7 +71,7 @@ def _scan_symbol(
     # slice + indicators are built only once the gate clears.
     day_open  = ss.series[day_start].open
     cur_hour  = cur.start_time[11:13]
-    hour_open = next((b.open for b in session if b.start_time[11:13] == cur_hour), day_open)
+    hour_open = ss.hour_open.get(day, {}).get(cur_hour, day_open)
     c1h = [Candle(start_time=cur.start_time, open=hour_open, close=ltp, high=cur.high, low=cur.low)]
 
     gate = check_trend(ltp, day_open, c1h, nifty_daily_green, nifty_above_vwap)
@@ -161,8 +161,8 @@ def _simulate_day(
         nifty_ltp  = nbar.close
         nifty_vwap = (cum_tpv / cum_vol) if cum_vol > 0 else 0.0
         nifty_daily_green = nifty_ltp > nifty_day_open
-        # nifty_vwap==0 means NIFTY has no volume data — degrade gracefully
-        nifty_above_vwap  = (nifty_vwap == 0.0) or (nifty_ltp > nifty_vwap)
+        # nifty_vwap==0 means NIFTY has no volume data — block entry (conservative)
+        nifty_above_vwap  = nifty_vwap > 0.0 and nifty_ltp > nifty_vwap
 
         # 1) Exits first — only for positions opened on an earlier bar.
         for sym in list(port.positions.keys()):

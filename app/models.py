@@ -62,10 +62,10 @@ class IndicatorResult:
     macd_bullish_cross: bool             = False  # line just crossed above signal
 
     # ADX
-    adx:      float = 0.0
-    plus_di:  float = 0.0
-    minus_di: float = 0.0
-    adx_ok:   bool  = False   # ADX > 20 AND +DI > -DI
+    adx:      Optional[float] = None
+    plus_di:  Optional[float] = None
+    minus_di: Optional[float] = None
+    adx_ok:   bool             = False   # ADX > 20 AND +DI > -DI
 
     # VWAP
     vwap:             float = 0.0

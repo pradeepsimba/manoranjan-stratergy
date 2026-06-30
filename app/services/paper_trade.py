@@ -103,9 +103,9 @@ def check_tick_exit(symbol: str, ltp: float) -> Optional[Position]:
         return None
 
     if ltp <= pos.stop_loss:
-        return _finalize(pos, pos.stop_loss, "SL HIT")
+        return _finalize(pos, ltp, "SL HIT")
     if ltp >= pos.target:
-        return _finalize(pos, pos.target, "TARGET HIT")
+        return _finalize(pos, ltp, "TARGET HIT")
     return None
 
 

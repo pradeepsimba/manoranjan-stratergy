@@ -61,8 +61,9 @@ NIFTY50_TOKEN  = "99926000"
 NIFTY50_NAME   = "NIFTY 50"
 
 # ── Performance ────────────────────────────────────────────────────────────────
-HIST_BATCH_SIZE = 100   # max stocks per single historical API request
-SCAN_WORKERS    = 16    # ThreadPoolExecutor size for the parallel scan
+HIST_BATCH_SIZE    = 100   # max stocks per single historical API request
+SCAN_WORKERS       = 16    # ThreadPoolExecutor size for the parallel scan
+MAX_CANDLE_BUFFER  = 300   # per-symbol in-memory candle buffer (deque maxlen)
 
 # ── Tick-wise engine ─────────────────────────────────────────────────────────
 # Cadence of the tick-driven evaluation loop in ACTIVE. Signals are recomputed

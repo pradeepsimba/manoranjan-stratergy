@@ -126,10 +126,11 @@ def compute_indicators(
     # converge while skipping the multi-day warmup history.
     window = candles_5m[-_LOOKBACK:] if len(candles_5m) > _LOOKBACK else candles_5m
 
-    close  = _f64([c.close  for c in window])
-    high   = _f64([c.high   for c in window])
-    low    = _f64([c.low    for c in window])
-    volume = _f64([c.volume for c in window])
+    _m     = np.array([(c.close, c.high, c.low, c.volume) for c in window], dtype=np.float64)
+    close  = np.ascontiguousarray(_m[:, 0])
+    high   = np.ascontiguousarray(_m[:, 1])
+    low    = np.ascontiguousarray(_m[:, 2])
+    volume = np.ascontiguousarray(_m[:, 3])
 
     ltp = float(close[-1])
 
@@ -165,9 +166,10 @@ def compute_indicators(
         # the last MACD_CROSS_BARS bars.  A window wider than 1 lets the entry
         # fire on confirming bars after the cross, not only on the exact cross bar.
         lookback_n = cfg.MACD_CROSS_BARS + 1
-        m_tail  = macd[~np.isnan(macd)][-lookback_n:]
-        s_tail  = macdsignal[~np.isnan(macdsignal)][-lookback_n:]
-        n       = min(len(m_tail), len(s_tail))
+        valid   = ~np.isnan(macd) & ~np.isnan(macdsignal)
+        m_tail  = macd[valid][-lookback_n:]
+        s_tail  = macdsignal[valid][-lookback_n:]
+        n       = len(m_tail)   # same length — joint mask guarantees alignment
         if n >= 2:
             above_now    = m_tail[-1] > s_tail[-1]
             was_below    = bool(np.any(m_tail[: n - 1] <= s_tail[: n - 1]))
@@ -177,17 +179,18 @@ def compute_indicators(
     adx_arr = talib.ADX(high, low, close, timeperiod=cfg.ADX_PERIOD)
     plus_di_arr  = talib.PLUS_DI(high, low, close, timeperiod=cfg.ADX_PERIOD)
     minus_di_arr = talib.MINUS_DI(high, low, close, timeperiod=cfg.ADX_PERIOD)
-    ind.adx      = _last(adx_arr)      or 0.0
-    ind.plus_di  = _last(plus_di_arr)  or 0.0
-    ind.minus_di = _last(minus_di_arr) or 0.0
-    ind.adx_ok   = ind.adx > cfg.ADX_THRESHOLD and ind.plus_di > ind.minus_di
+    ind.adx      = _last(adx_arr)
+    ind.plus_di  = _last(plus_di_arr)
+    ind.minus_di = _last(minus_di_arr)
+    ind.adx_ok   = (ind.adx is not None and ind.adx > cfg.ADX_THRESHOLD
+                    and ind.plus_di is not None and ind.minus_di is not None
+                    and ind.plus_di > ind.minus_di)
 
     # ── Session VWAP (full session array, not the lookback slice) ─────────────
     sess = session_candles_5m if session_candles_5m else candles_5m
-    ind.vwap = session_vwap_last(
-        [c.high for c in sess], [c.low for c in sess],
-        [c.close for c in sess], [c.volume for c in sess],
-    )
+    if sess:
+        _sm  = np.array([(c.high, c.low, c.close, c.volume) for c in sess], dtype=np.float64)
+        ind.vwap = session_vwap_last(_sm[:, 0], _sm[:, 1], _sm[:, 2], _sm[:, 3])
     ind.price_above_vwap = ind.vwap > 0 and ltp > ind.vwap
 
     # ── Volume surge ──────────────────────────────────────────────────────────

@@ -24,15 +24,18 @@ class SymbolSeries:
     token:  str
     name:   str
     series: List[Candle]                       # full chronological 5m bars
-    by_day: Dict[str, List[int]] = field(default_factory=dict)   # "YYYY-MM-DD" -> [global idx...]
-    at:     Dict[str, Dict[str, int]] = field(default_factory=dict)  # date -> {"HH:MM": global idx}
+    by_day:    Dict[str, List[int]]         = field(default_factory=dict)  # "YYYY-MM-DD" -> [idx...]
+    at:        Dict[str, Dict[str, int]]    = field(default_factory=dict)  # date -> {"HH:MM": idx}
+    hour_open: Dict[str, Dict[str, float]]  = field(default_factory=dict)  # date -> {HH: open}
 
     def index_days(self) -> None:
         for i, c in enumerate(self.series):
             d  = c.start_time[:10]
             tm = c.start_time[11:16]
+            hr = c.start_time[11:13]
             self.by_day.setdefault(d, []).append(i)
             self.at.setdefault(d, {})[tm] = i
+            self.hour_open.setdefault(d, {}).setdefault(hr, self.series[i].open)
 
 
 def _sort_candles(candles: List[Candle]) -> List[Candle]:

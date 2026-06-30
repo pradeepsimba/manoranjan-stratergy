@@ -21,7 +21,7 @@ def compute_metrics(trades: List, equity_curve: List, days: int) -> Dict:
         return _empty(days)
 
     wins   = [t for t in trades if t.net_pnl > 0]
-    losses = [t for t in trades if t.net_pnl <= 0]
+    losses = [t for t in trades if t.net_pnl < 0]
 
     gross_profit = sum(t.net_pnl for t in wins)
     gross_loss   = sum(t.net_pnl for t in losses)          # ≤ 0
