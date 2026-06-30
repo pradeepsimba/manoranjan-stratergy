@@ -21,6 +21,7 @@ def scan_stock(
     symbol:      str,
     token:       str,
     nifty_gates: Tuple[bool, bool],   # (nifty_daily_green, nifty_above_vwap) — precomputed once per bar
+    tradeable:   bool = True,         # False for non-Gemini stocks: update indicators but skip entry
 ) -> Optional[EntrySignal]:
     """
     Full 5-minute entry scan for one stock on the most recent completed bar.
@@ -40,12 +41,6 @@ def scan_stock(
       7. LTP strictly above session VWAP
     """
     st = get_state()
-
-    # Circuit breakers first — cheap before any computation
-    allowed, reason = can_enter(symbol, st.positions, st.traded_today, st.daily_pnl)
-    if not allowed:
-        st.record_scan(symbol, {"pass": False, "reason": reason})
-        return None
 
     # Thread-safe snapshot — hold lock only for the list copy, not for math
     lock = st.candle_lock(token)
@@ -71,9 +66,42 @@ def scan_stock(
 
     nifty_daily_green, nifty_above_vwap = nifty_gates
 
-    # ── Trend gate FIRST (cheap, hard pre-filter) ──────────────────────────────
-    # Evaluated before the expensive indicator pass so a failing gate — including
-    # a red NIFTY that fails every stock — skips compute_indicators entirely.
+    # Compute indicators on the snapshot — TA-Lib's C layer releases the GIL,
+    # giving real parallelism across the thread pool. Always runs (even when the
+    # trend gate would block entry) so the live indicators page receives tick-level
+    # updates for every scanned stock, not just potential entries.
+    session_5m = candles_5m[i:]
+    ind        = compute_indicators(candles_5m, candles_1h, session_candles_5m=session_5m)
+    _hist      = (round(ind.macd_line - ind.macd_signal_line, 4)
+                  if ind.macd_line is not None and ind.macd_signal_line is not None else None)
+    st.indicator_snapshot[symbol] = {
+        "ltp":         round(ltp, 2),
+        "bar_time":    _bar_time(candles_5m),
+        "rsi":         round(ind.rsi, 1)               if ind.rsi         is not None else None,
+        "adx":         round(ind.adx, 1)               if ind.adx                     else None,
+        "plus_di":     round(ind.plus_di, 1)           if ind.plus_di                 else None,
+        "minus_di":    round(ind.minus_di, 1)          if ind.minus_di                else None,
+        "macd":        round(ind.macd_line, 4)         if ind.macd_line   is not None else None,
+        "macd_signal": round(ind.macd_signal_line, 4) if ind.macd_signal_line is not None else None,
+        "macd_hist":   _hist,
+        "support":     round(ind.support_level, 2)     if ind.support_level           else None,
+        "vwap":        round(ind.vwap, 2)              if ind.vwap                    else None,
+        "above_vwap":  ind.price_above_vwap,
+        "pattern":     ind.candle_pattern,
+    }
+
+    # Non-tradeable stocks (not in Gemini watchlist) only need indicator updates.
+    if not tradeable:
+        return None
+
+    # Circuit breakers — checked after indicator snapshot so the display always
+    # reflects the latest data even when entries are blocked.
+    allowed, reason = can_enter(symbol, st.positions, st.traded_today, st.daily_pnl)
+    if not allowed:
+        st.record_scan(symbol, {"pass": False, "reason": reason})
+        return None
+
+    # ── Trend gate (entry pre-filter) ────────────────────────────────────────
     gate = check_trend(ltp, day_open, candles_1h, nifty_daily_green, nifty_above_vwap)
     if not gate.all_clear:
         reason = (
@@ -84,12 +112,6 @@ def scan_stock(
         )
         st.record_scan(symbol, {"pass": False, "reason": reason})
         return None
-
-    # Session bars = today only (suffix), for the session-anchored VWAP. Built now
-    # that the gate has cleared. Compute indicators on the snapshot — TA-Lib's C
-    # layer releases the GIL, giving real parallelism across the thread pool.
-    session_5m = candles_5m[i:]
-    ind = compute_indicators(candles_5m, candles_1h, session_candles_5m=session_5m)
 
     # ── 7 entry conditions ────────────────────────────────────────────────────
     checks = {

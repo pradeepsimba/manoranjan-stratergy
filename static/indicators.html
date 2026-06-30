@@ -173,9 +173,7 @@
 <div class="ind-toolbar">
   <input class="ind-search" id="search" type="text" placeholder="Search symbol…" oninput="renderTable()">
   <div class="ind-meta">
-    <span id="updated-txt">Not loaded</span>
-    <span id="countdown-txt" style="color:var(--txt-2);min-width:50px;text-align:right"></span>
-    <button class="btn-irefresh" onclick="fetchNow()">↺ Refresh</button>
+    <span id="updated-txt">Loading…</span>
   </div>
 </div>
 
@@ -209,7 +207,7 @@
       </tr>
     </thead>
     <tbody id="ind-tbody">
-      <tr class="empty-row"><td colspan="12">Click Refresh or wait for auto-load…</td></tr>
+      <tr class="empty-row"><td colspan="12">Loading…</td></tr>
     </tbody>
   </table>
 </div>
@@ -217,11 +215,12 @@
 <script>
 'use strict';
 
-var rows     = [];      // full fetched dataset
+// rowsMap: symbol → indicator dict. Seeded by REST, then updated per-tick by WS.
+var rowsMap  = {};
 var sortKey  = 'symbol';
 var sortAsc  = true;
-var cdTimer  = null;
-var cdVal    = 0;
+var ws       = null;
+var reconnectTimer = null;
 
 // ── Market hours (IST) ────────────────────────────────────────────────────────
 function marketStatus() {
@@ -240,50 +239,69 @@ function updateMarketBadge() {
   el.className   = 'badge ' + (s.open ? 'green' : 'gray');
 }
 
-// ── Fetch ─────────────────────────────────────────────────────────────────────
-function fetchNow() {
-  clearInterval(cdTimer);
-  document.getElementById('countdown-txt').textContent = '';
-  document.getElementById('updated-txt').textContent   = 'Loading…';
-  updateMarketBadge();
+// ── WebSocket — receives indicator updates on every scan tick ─────────────────
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host + '/ws/dashboard');
 
-  fetch('/api/indicators')
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      rows = Array.isArray(data) ? data : [];
+  ws.onopen = function() {
+    document.getElementById('updated-txt').textContent = 'Live — waiting for first tick…';
+    updateMarketBadge();
+  };
+
+  ws.onmessage = function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      if (d.type !== 'STATE_UPDATE') return;
+      var snap = d.indicatorSnapshot;
+      if (!snap || typeof snap !== 'object') return;
+      // Merge: WS values override the REST seed (WS is always fresher)
+      Object.keys(snap).forEach(function(sym) {
+        rowsMap[sym] = Object.assign({ symbol: sym }, snap[sym]);
+      });
       renderTable();
       renderSummary();
       var now = new Date();
       document.getElementById('updated-txt').textContent =
-        'Updated ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      startCountdown();
-    })
-    .catch(function() {
-      document.getElementById('updated-txt').textContent = 'Fetch failed — retry in 30 s';
-      startCountdown();
-    });
+        'Live · ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      updateMarketBadge();
+    } catch (err) { console.error(err); }
+  };
+
+  ws.onclose = ws.onerror = function() {
+    document.getElementById('updated-txt').textContent = 'Reconnecting…';
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 3000);
+  };
 }
 
-function startCountdown() {
-  cdVal = 30;
-  clearInterval(cdTimer);
-  cdTimer = setInterval(function() {
-    cdVal--;
-    if (cdVal <= 0) { fetchNow(); return; }   // clear + fetch before touching the DOM
-    document.getElementById('countdown-txt').textContent = '↺ ' + cdVal + 's';
-  }, 1000);
+// Initial REST seed — fills all watchlist symbols before the first WS tick arrives
+function loadInitial() {
+  document.getElementById('updated-txt').textContent = 'Loading…';
+  fetch('/api/indicators')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!Array.isArray(data)) return;
+      data.forEach(function(item) {
+        // Only pre-fill; WS updates (always fresher) take precedence once they arrive
+        if (!rowsMap[item.symbol]) rowsMap[item.symbol] = item;
+      });
+      renderTable();
+      renderSummary();
+    })
+    .catch(function() {});
 }
 
 // ── Summary strip ─────────────────────────────────────────────────────────────
 function renderSummary() {
-  var n       = rows.length;
-  var aboveV  = rows.filter(function(r) { return r.above_vwap; }).length;
-  var rsiLo   = rows.filter(function(r) { return r.rsi != null && r.rsi < 30; }).length;
-  var rsiHi   = rows.filter(function(r) { return r.rsi != null && r.rsi > 70; }).length;
-  var adxOn   = rows.filter(function(r) { return r.adx != null && r.adx > 20; }).length;
-  var pats    = rows.filter(function(r) { return r.pattern; }).length;
+  var rows   = Object.values(rowsMap);
+  var aboveV = rows.filter(function(r) { return r.above_vwap; }).length;
+  var rsiLo  = rows.filter(function(r) { return r.rsi != null && r.rsi < 30; }).length;
+  var rsiHi  = rows.filter(function(r) { return r.rsi != null && r.rsi > 70; }).length;
+  var adxOn  = rows.filter(function(r) { return r.adx != null && r.adx > 20; }).length;
+  var pats   = rows.filter(function(r) { return r.pattern; }).length;
 
-  document.getElementById('s-total').textContent  = n;
+  document.getElementById('s-total').textContent  = rows.length;
   document.getElementById('s-vwap').textContent   = aboveV;
   document.getElementById('s-rsi-lo').textContent = rsiLo;
   document.getElementById('s-rsi-hi').textContent = rsiHi;
@@ -298,7 +316,6 @@ function sortBy(key) {
   renderTable();
 }
 
-// Wire up header clicks
 document.querySelectorAll('#thead-row th').forEach(function(th) {
   th.addEventListener('click', function() { sortBy(th.getAttribute('data-key')); });
 });
@@ -323,8 +340,9 @@ function fmtINR(v, dp) {
 function renderTable() {
   updateSortHeaders();
 
-  var q = document.getElementById('search').value.toLowerCase();
-  var data = rows.filter(function(r) { return r.symbol.toLowerCase().indexOf(q) !== -1; });
+  var q    = document.getElementById('search').value.toLowerCase();
+  var all  = Object.values(rowsMap);
+  var data = q ? all.filter(function(r) { return r.symbol.toLowerCase().indexOf(q) !== -1; }) : all;
 
   data.sort(function(a, b) {
     var va = a[sortKey], vb = b[sortKey];
@@ -342,18 +360,11 @@ function renderTable() {
   }
 
   tbody.innerHTML = data.map(function(r) {
-    // RSI colour
-    var rsiCls = r.rsi == null ? 'muted' : r.rsi < 30 ? 'rsi-lo' : r.rsi > 70 ? 'rsi-hi' : 'rsi-mid';
-    // ADX colour
-    var adxCls = r.adx == null ? 'muted' : r.adx >= 20 ? 'adx-on' : 'adx-off';
-    // MACD histogram colour
+    var rsiCls  = r.rsi      == null ? 'muted' : r.rsi < 30 ? 'rsi-lo' : r.rsi > 70 ? 'rsi-hi' : 'rsi-mid';
+    var adxCls  = r.adx      == null ? 'muted' : r.adx >= 20 ? 'adx-on' : 'adx-off';
     var histCls = r.macd_hist == null ? 'muted' : r.macd_hist >= 0 ? 'pos-num' : 'neg-num';
-    var histTxt = r.macd_hist != null
-      ? (r.macd_hist >= 0 ? '+' : '') + r.macd_hist.toFixed(4)
-      : '—';
-    // VWAP position
-    var vposCls = r.above_vwap == null ? 'muted'
-      : r.above_vwap ? 'pos-num' : 'neg-num';
+    var histTxt = r.macd_hist != null ? (r.macd_hist >= 0 ? '+' : '') + r.macd_hist.toFixed(4) : '—';
+    var vposCls = r.above_vwap == null ? 'muted' : r.above_vwap ? 'pos-num' : 'neg-num';
     var vposTxt = r.above_vwap == null ? '—' : r.above_vwap ? '▲ Above' : '▼ Below';
 
     return [
@@ -361,8 +372,8 @@ function renderTable() {
       '<td style="font-weight:600">' + r.symbol + '</td>',
       '<td style="text-align:right">' + fmtINR(r.ltp, 2) + '</td>',
       '<td>' + (r.bar_time || '<span class="muted">—</span>') + '</td>',
-      '<td class="' + rsiCls + '" style="text-align:right">' + (r.rsi != null ? r.rsi.toFixed(1) : '—') + '</td>',
-      '<td class="' + adxCls + '" style="text-align:right">' + (r.adx != null ? r.adx.toFixed(1) : '—') + '</td>',
+      '<td class="' + rsiCls  + '" style="text-align:right">' + (r.rsi      != null ? r.rsi.toFixed(1)      : '—') + '</td>',
+      '<td class="' + adxCls  + '" style="text-align:right">' + (r.adx      != null ? r.adx.toFixed(1)      : '—') + '</td>',
       '<td class="pos-num" style="text-align:right">' + (r.plus_di  != null ? r.plus_di.toFixed(1)  : '<span class="muted">—</span>') + '</td>',
       '<td class="neg-num" style="text-align:right">' + (r.minus_di != null ? r.minus_di.toFixed(1) : '<span class="muted">—</span>') + '</td>',
       '<td class="' + histCls + '" style="text-align:right">' + histTxt + '</td>',
@@ -383,8 +394,9 @@ function toggleTheme() {
   localStorage.setItem('theme', next);
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-fetchNow();
+// ── Init — seed from REST then switch to live WS ──────────────────────────────
+loadInitial();
+connect();
 </script>
 </body>
 </html>

@@ -190,12 +190,15 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
     from app.engine.indicator_engine import compute_indicators   # avoid circular at module level
 
     st = get_state()
-    if not st.active_watchlist:
+    # Prefer the full pre-Gemini list so all high-volume stocks appear on the
+    # indicators page before the first tick cycle populates indicator_snapshot.
+    wl = st.full_watchlist if st.full_watchlist else st.active_watchlist
+    if not wl:
         return []
 
     def _compute_all() -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
-        for sym, tok in list(st.active_watchlist.items()):
+        for sym, tok in list(wl.items()):
             with st.candle_lock(tok):
                 c5 = list(st.candles_5m.get(tok, []))
 

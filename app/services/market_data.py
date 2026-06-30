@@ -65,6 +65,7 @@ class MarketDataService:
             ping_interval=20,
             ping_timeout=30,
             open_timeout=15,
+            max_size=16 * 1024 * 1024,   # 16 MiB — full watchlist dumps can exceed the 1 MiB default
         ) as ws:
             self.state.ws_status = "WS Connected"
 
@@ -93,11 +94,16 @@ class MarketDataService:
 
     def _build_filters(self):
         """
-        Subscribe to every symbol in the active watchlist at 5m, 1h.
-        Always include NIFTY 50 at 5m and 1d for the trend gate.
+        Subscribe to every symbol in the full watchlist at 5m, 1h.
+        Using the full pre-Gemini list ensures the indicators page can show live
+        data for ALL high-volume stocks, not just the AI-selected subset.
+        Always include NIFTY 50 at 5m for the trend gate.
         """
-        st       = get_state()
-        watchlist = st.active_watchlist    # {symbol: token}
+        st        = get_state()
+        # Subscribe WS to the Gemini-filtered subset only — the market-data server
+        # rejects subscriptions for the full high-volume list (too many symbols).
+        # Non-Gemini stocks are still scanned periodically via _full_scan_all.
+        watchlist = st.active_watchlist
         intervals = ["5m", "1h"]
 
         filters = [

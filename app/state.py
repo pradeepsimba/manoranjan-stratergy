@@ -31,10 +31,12 @@ class AppState:
         self.full_universe:    List[dict]     = []
         # Gemini AI shortlist: list of trading symbols e.g. ["RELIANCE", "TCS"]
         self.gemini_shortlist: List[str]      = []
-        # Active watchlist subscribed via WebSocket: {symbol: token}
+        # Active watchlist (Gemini AI-selected): {symbol: token} — trading subset
         self.active_watchlist: Dict[str, str] = {}
-        # Reverse map {token: symbol} — lets the tick loop iterate the (small)
-        # dirty-token set directly instead of scanning the whole watchlist.
+        # Full pre-Gemini watchlist: {symbol: token} — all high-volume stocks
+        self.full_watchlist:   Dict[str, str] = {}
+        # Reverse map {token: symbol} for the FULL watchlist — lets the tick loop
+        # iterate the dirty-token set directly without scanning the whole dict.
         self.token_to_name:    Dict[str, str] = {}
 
         # ── Candle stores (symbol → list[Candle], capped at 300 bars) ─────────
@@ -67,6 +69,11 @@ class AppState:
         self._scan_results_lock: threading.Lock   = threading.Lock()
         self.pending_signals:   List[EntrySignal] = []
         self.last_5m_bar_time:  Optional[str]     = None   # "HH:MM" of last scanned bar
+
+        # Per-symbol indicator snapshot — written by scan workers on every tick,
+        # read by the event loop for the WebSocket broadcast. GIL-protected dict
+        # ops make this safe in CPython without an extra lock (same as ltp).
+        self.indicator_snapshot: Dict[str, dict] = {}
 
         # ── Tick-wise engine ──────────────────────────────────────────────────
         # Tokens that received a tick since the last evaluation cycle. The WS
@@ -106,6 +113,7 @@ class AppState:
     def clear_scan_results(self) -> None:
         with self._scan_results_lock:
             self.last_scan_results.clear()
+        self.indicator_snapshot.clear()
 
 
 def get_state() -> AppState:

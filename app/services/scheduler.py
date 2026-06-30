@@ -66,16 +66,15 @@ def _past(hour: int, minute: int) -> bool:
 
 def _scan_chunk(items, nifty_gates):
     """
-    Scan a chunk of (symbol, token) pairs in one worker thread and return the
-    list of signals. Batching into ~SCAN_WORKERS chunks (instead of one pool
-    task per stock) collapses hundreds of run_in_executor dispatches per cycle
-    down to a handful — the dispatch/await happens on the single event-loop
-    thread, so that churn is the tick-wise bottleneck at 500 stocks.
+    Scan a chunk of (symbol, token, tradeable) triples in one worker thread and
+    return the list of entry signals. Batching into ~SCAN_WORKERS chunks collapses
+    hundreds of run_in_executor dispatches per cycle down to a handful.
+    tradeable=False stocks update indicator_snapshot but never generate a signal.
     """
     out = []
-    for sym, tok in items:
+    for sym, tok, tradeable in items:
         try:
-            sig = scan_stock(sym, tok, nifty_gates)
+            sig = scan_stock(sym, tok, nifty_gates, tradeable=tradeable)
         except Exception as e:
             # Isolate per stock — one bad symbol must not kill the whole chunk.
             print(f"Scan error ({sym}): {e}")
@@ -136,10 +135,20 @@ class SchedulerService:
 
                 elif h < cfg.CUTOFF_HOUR or (h == cfg.CUTOFF_HOUR and m < cfg.CUTOFF_MIN):
                     st.phase = TradingPhase.ACTIVE
+                    if not st.active_watchlist:
+                        # Mid-session restart: premarket and wait_zone were missed.
+                        # Run them now so the watchlist, candles, and WS are all set up.
+                        print("=== RECOVERY: restarted during ACTIVE — running premarket + load ===")
+                        await self._run_premarket()
+                        await self._run_wait_zone()
                     await self._run_active_phase()
 
                 elif h < cfg.SESSION_END_HOUR or (h == cfg.SESSION_END_HOUR and m < cfg.SESSION_END_MIN):
                     st.phase = TradingPhase.CUTOFF
+                    if not st.active_watchlist:
+                        print("=== RECOVERY: restarted during CUTOFF — running premarket + load ===")
+                        await self._run_premarket()
+                        await self._run_wait_zone()
                     await asyncio.sleep(_seconds_until(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN))
 
                 else:
@@ -170,6 +179,11 @@ class SchedulerService:
             print("Client status returned empty list — check server")
             return
 
+        # Persist the full pre-Gemini list so the indicators page can show all stocks.
+        st.full_watchlist = full_watchlist
+        # token_to_name maps ALL high-volume tokens → names for the tick loop.
+        st.token_to_name  = {tok: name for name, tok in full_watchlist.items()}
+
         # Step 2: grounded Gemini screen — names (not raw tokens) go to the AI,
         # which returns a clean JSON array of BULLISH symbols.
         print(f"=== PRE-MARKET: Gemini grounded screen of {len(full_watchlist)} stocks ===")
@@ -189,8 +203,10 @@ class SchedulerService:
             st.active_watchlist = full_watchlist
 
         st.gemini_shortlist = list(st.active_watchlist.keys())
-        st.token_to_name    = {tok: name for name, tok in st.active_watchlist.items()}
-        print(f"=== PRE-MARKET done: {len(st.active_watchlist)} stocks will be scanned ===")
+        print(
+            f"=== PRE-MARKET done: {len(st.active_watchlist)} tradeable / "
+            f"{len(st.full_watchlist)} total stocks ==="
+        )
 
     async def _run_wait_zone(self) -> None:
         st = get_state()
@@ -205,6 +221,9 @@ class SchedulerService:
           • Exits  — check every open position's live price vs SL/target (always).
           • Entries — re-evaluate every stock that ticked since the last cycle on
             its forming bar; fill the ones whose 7 signals align (until cutoff).
+          • Full scan — every 5 minutes, scan ALL full_watchlist stocks so non-Gemini
+            stocks also appear in indicator_snapshot (WS is only subscribed to the
+            Gemini subset; this is their only source of indicator updates).
         Heavy indicator math runs in the thread pool (TA-Lib releases the GIL);
         fills/exits/DB stay on the event-loop thread.
         """
@@ -212,6 +231,10 @@ class SchedulerService:
         st       = get_state()
         loop     = asyncio.get_running_loop()
         interval = max(0.0, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)
+
+        # Seed indicator_snapshot for ALL stocks immediately on entry.
+        asyncio.create_task(self._full_scan_all(loop))
+        last_full_scan = loop.time()
 
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
             try:
@@ -221,11 +244,46 @@ class SchedulerService:
                 await self._tick_exits()
                 if not in_cutoff:
                     await self._tick_entries(loop)
+
+                # Refresh all stocks every 5 minutes (non-Gemini stocks only update here)
+                now_ts = loop.time()
+                if now_ts - last_full_scan >= 300:
+                    asyncio.create_task(self._full_scan_all(loop))
+                    last_full_scan = now_ts
             except Exception as e:
                 # Never let one bad cycle kill the engine for the rest of the day.
                 print(f"Tick loop error: {e}")
 
             await asyncio.sleep(interval)
+
+    async def _full_scan_all(self, loop) -> None:
+        """
+        Scan every stock in full_watchlist and update indicator_snapshot.
+        Called once at ACTIVE entry and every 5 minutes thereafter.
+        Non-Gemini stocks don't get WS ticks so this is their only source of
+        live indicator data; Gemini stocks get re-scanned here too (cheap, and
+        ensures the snapshot is populated even before the first WS tick arrives).
+        """
+        st = get_state()
+        if not st.full_watchlist:
+            return
+        try:
+            with st._nifty_lock:
+                nifty_gates = compute_nifty_gates(st.nifty_ltp, st.nifty_candles_5m)
+
+            tradeable_set = set(st.active_watchlist.keys())
+            items = [(name, tok, name in tradeable_set)
+                     for name, tok in st.full_watchlist.items()]
+
+            size   = max(1, (len(items) + cfg.SCAN_WORKERS - 1) // cfg.SCAN_WORKERS)
+            chunks = [items[i : i + size] for i in range(0, len(items), size)]
+            tasks  = [loop.run_in_executor(_SCAN_POOL, _scan_chunk, c, nifty_gates)
+                      for c in chunks]
+            await asyncio.gather(*tasks)
+            # Returned signals are intentionally discarded — entries are handled
+            # only by _tick_entries (which has the dirty-tick freshness guarantee).
+        except Exception as e:
+            print(f"Full scan error: {e}")
 
     async def _tick_exits(self) -> None:
         """Tick-wise SL/target check against the live price for open positions."""
@@ -255,16 +313,15 @@ class SchedulerService:
         dirty, st.dirty_ticks = st.dirty_ticks, set()
         if not dirty:
             return
-        if (len(st.positions) >= cfg.MAX_CONCURRENT_POSITIONS
-                or st.daily_pnl <= -cfg.DAILY_LOSS_LIMIT):
-            return
 
         with st._nifty_lock:
             nifty_gates = compute_nifty_gates(st.nifty_ltp, st.nifty_candles_5m)
 
         # Iterate the (small) dirty-token set directly — O(dirty), not O(watchlist).
+        # token_to_name covers the FULL watchlist; tradeable_set is the Gemini subset.
+        tradeable_set = set(st.active_watchlist.keys())
         t2n   = st.token_to_name
-        items = [(t2n[tok], tok) for tok in dirty if tok in t2n]
+        items = [(t2n[tok], tok, t2n[tok] in tradeable_set) for tok in dirty if tok in t2n]
         if not items:
             return
 
@@ -277,6 +334,12 @@ class SchedulerService:
                   for c in chunks]
         results = await asyncio.gather(*tasks)
         signals = [sig for chunk_res in results for sig in chunk_res]
+
+        # Only fill trades when capacity allows — scanning always runs so that
+        # indicator_snapshot stays current even at max concurrent positions.
+        if (len(st.positions) >= cfg.MAX_CONCURRENT_POSITIONS
+                or st.daily_pnl <= -cfg.DAILY_LOSS_LIMIT):
+            return
 
         for sig in signals:
             ok, _ = can_enter(sig.symbol, st.positions, st.traded_today, st.daily_pnl)
@@ -351,6 +414,7 @@ class SchedulerService:
         st.nifty_candles_1d.clear()
         st.dirty_ticks.clear()
         st.token_to_name.clear()
+        st.full_watchlist.clear()
         st.clear_scan_results()
         st.last_5m_bar_time = None
 
@@ -359,15 +423,19 @@ class SchedulerService:
     async def _load_all_historical(self) -> None:
         st = get_state()
         try:
+            # Use the full watchlist so every high-volume stock has candle history —
+            # needed because the indicators page shows ALL stocks, not just the
+            # Gemini-selected subset.
+            wl = st.full_watchlist if st.full_watchlist else st.active_watchlist
             hist = await fetch_indicator_history(
-                st.active_watchlist, cfg.INTERVAL_5M, days_back=5
+                wl, cfg.INTERVAL_5M, days_back=5
             )
             for token_key, candles in hist.items():
                 st.candles_5m[token_key] = candles
 
             # Only 1H is needed now — the daily gate derives today's open from the
             # 5m session, so the (never-live-updated) 1d series is no longer fetched.
-            today = await fetch_today_candles(st.active_watchlist, [cfg.INTERVAL_1H])
+            today = await fetch_today_candles(wl, [cfg.INTERVAL_1H])
             for token_key, frames in today.items():
                 st.candles_1h[token_key] = frames.get(cfg.INTERVAL_1H, [])
 
@@ -438,5 +506,6 @@ class SchedulerService:
                 {"symbol": sym, **res}
                 for sym, res in st.scan_snapshot()[-20:]
             ],
-            "lastBarTime": st.last_5m_bar_time,
+            "lastBarTime":       st.last_5m_bar_time,
+            "indicatorSnapshot": dict(st.indicator_snapshot),
         }
