@@ -38,13 +38,15 @@ python main.py                # serves http://0.0.0.0:8080
 
 Driven by `scheduler.SchedulerService._phase_driver` (IST wall clock):
 
-1. **09:00 PRE_MARKET** — `fetch_active_watchlist()` (client status) → `analyse_stocks()` (Gemini, returns bullish names) → `active_watchlist = {name: token}`. Empty Gemini result ⇒ trade the full list.
-2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h + NIFTY), then `market_data.start()` opens the WS.
+1. **09:00 PRE_MARKET** — `fetch_active_watchlist()` (client status) → `full_watchlist = {name: token}` (ALL high-volume stocks). `analyse_stocks()` (Gemini) returns bullish names → `active_watchlist` = the **tradeable** subset. Empty/failed Gemini ⇒ fall back to the first `GEMINI_MAX_STOCKS` of the full list (capped so the WS subscription can't overflow the server buffer).
+2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h + NIFTY), then `market_data.start()` opens the WS — subscribed to the **active** (tradeable) subset only.
 3. **09:45–15:30 ACTIVE** — `_run_active_phase()` is a **tick-wise loop** every `TICK_EVAL_INTERVAL_MS` (default 100ms):
    - `_tick_exits` — every open position's live price vs SL/target.
    - `_tick_entries` — re-scan stocks that ticked since last cycle (`dirty_ticks`), on the **forming** 5m bar; fill those whose 7 signals align. Entries stop at 14:30 (CUTOFF); exits continue to 15:30.
+   - `_full_scan_all` — at entry and every 5 min, scans the **entire** `full_watchlist` to populate `indicator_snapshot` (for the `/indicators` page). Only `active_watchlist` stocks are `tradeable` and can fire signals; `scan_stock(..., tradeable=False)` updates indicators but never returns a signal. Non-Gemini stocks get no WS ticks, so this 5-min scan is their only indicator source.
    - Heavy indicator math (`scan_stock`) runs in `_SCAN_POOL` (ThreadPoolExecutor); fills/exits/DB stay on the event loop.
-4. **15:30 CLOSED** — `_run_eod()` squares off survivors, writes `daily_stats`, resets all daily state.
+   - **Mid-session restart recovery:** if `active_watchlist` is empty on entering ACTIVE/CUTOFF, premarket + historical load run on the fly.
+4. **15:30 CLOSED** — `_run_eod()` squares off survivors, writes `daily_stats`, resets all daily state, then sleeps to the next premarket.
 
 Strategy core (shared by live **and** backtest, keep it that way): `check_trend` → `compute_indicators` → 7 conditions → `calc_quantity`.
 
@@ -54,7 +56,7 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 
 ## Hard conventions — get these wrong and it breaks
 
-- **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today` are keyed by **SYMBOL NAME**. `active_watchlist = {name: token}` is the bridge. Always map correctly.
+- **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today` are keyed by **SYMBOL NAME**. `full_watchlist` (all high-volume) and `active_watchlist` (Gemini-tradeable subset) are both `{name: token}`; `token_to_name` (all tokens → name) is the reverse bridge the tick loop iterates. Always map correctly.
 - **`positions` holds OPEN trades only.** Closing moves a position to `closed_positions` (in `paper_trade._finalize`). `len(positions)` is therefore a true *concurrent* count — do not reintroduce closed positions into it.
 - **Locking:** candle lists are mutated by the WS thread and read by pool workers — every shared-candle access goes through `st.candle_lock(token)`; NIFTY lists through `st._nifty_lock`. Positions/`daily_pnl`/`dirty_ticks` are mutated only on the event-loop thread (no lock needed); pool workers only *read* them.
 - **TA-Lib inputs:** pass raw NumPy `float64` arrays (built from candle slices), never DataFrames or `.ta` chains, into worker threads. Only the minimum lookback tail (`TALIB_LOOKBACK`) is materialized; session VWAP is the exception and uses today's bars.
@@ -66,7 +68,7 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 ```
 main.py                      FastAPI app + lifespan (DB init → scheduler.start); serves / and /indicators
 app/config.py                ALL tunables (timing, risk, strategy params, costs, intervals)
-app/state.py                 AppState singleton (candles, ltp, positions, locks, dirty_ticks)
+app/state.py                 AppState singleton (candles, ltp, positions, full/active watchlist, token_to_name, indicator_snapshot, locks, dirty_ticks)
 app/models.py                Candle (slots), Position, EntrySignal, IndicatorResult, TrendGate, enums
 app/engine/
   entry_engine.py            scan_stock — the per-stock decision (live)
@@ -77,7 +79,7 @@ app/services/
   scheduler.py               phase driver + tick-wise engine + EOD + dashboard payload
   market_data.py             WebSocket client; _process_tick updates candles/ltp/dirty_ticks
   historical_data.py         REST client (batched parallel fetch, persistent httpx)
-  gemini_filter.py           analyse_stocks (google-genai, grounding + JSON-array schema)
+  gemini_filter.py           analyse_stocks (google-genai, Search grounding; JSON array parsed from text)
   paper_trade.py             place_paper_order, check_tick_exit, force_close, _finalize
   database.py                asyncpg pool + schema + positions/scan_log/daily_stats/backtest tables
 app/backtest/                data.py, engine.py, portfolio.py, fills.py, metrics.py
@@ -91,7 +93,7 @@ Backtest is triggered from the dashboard: `POST /api/backtest {from_date, to_dat
 ## Gotchas & known limitations
 
 - **Pure tick-wise on the forming bar** (by design): RSI/MACD/ADX/volume are recomputed on the *incomplete* 5m bar each cycle, so they jitter and signals can appear/vanish within a bar. Volume-surge naturally fires late in each bar.
-- **`GEMINI_MODEL`** — must be a real `google-genai` model id (currently `gemini-2.5-flash`). On any failure the screen returns `[]` and silently falls back to the full watchlist, so a bad id disables the AI filter without an error.
+- **`GEMINI_MODEL`** — must be a real `google-genai` model id (currently `gemini-2.5-flash`). On any failure the screen returns `[]` and silently falls back to the (capped) full watchlist, so a bad id disables the AI filter without an error. Note: Google-Search grounding and a `response_schema` are **mutually exclusive** — `gemini_filter` uses grounding and parses the JSON array out of the text (`_find_json_array`); do not re-add `response_schema`.
 - **Daily-green gate** uses today's open = the open of today's first 5m bar (derived in `scan_stock` / `compute_nifty_gates`). The 1d series is no longer fetched or used; if you re-add it, remember it is not updated by the WS.
 - **Backtest hourly gate** buckets by clock-hour from 5m data, which may not match the server's real 1h candle boundaries — possible live/backtest parity drift.
 - **JSONB reads:** asyncpg returns `jsonb` columns as strings — decode with `_decode_jsonb` (see `database.py`) on any new read path.
