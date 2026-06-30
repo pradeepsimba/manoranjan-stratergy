@@ -221,9 +221,10 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
                 j -= 1
             ind = compute_indicators(c5, session_candles_5m=c5[j:])
 
-            hist = (round(ind.macd_line - ind.macd_signal_line, 4)
-                    if ind.macd_line is not None and ind.macd_signal_line is not None
-                    else None)
+            hist  = (round(ind.macd_line - ind.macd_signal_line, 4)
+                     if ind.macd_line is not None and ind.macd_signal_line is not None
+                     else None)
+            depth = st.depth.get(sym, {})
             out.append(dict(
                 symbol      = sym,
                 ltp         = round(ltp, 2),
@@ -239,6 +240,12 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
                 vwap        = round(ind.vwap, 2)          if ind.vwap                   else None,
                 above_vwap  = ind.price_above_vwap,
                 pattern     = ind.candle_pattern,
+                bid         = round(depth["bid"],    2) if "bid"    in depth else None,
+                ask         = round(depth["ask"],    2) if "ask"    in depth else None,
+                spread      = depth.get("spread"),
+                buy_qty     = depth.get("buy_qty"),
+                sell_qty    = depth.get("sell_qty"),
+                ratio       = depth.get("ratio"),
             ))
 
         return sorted(out, key=lambda x: x["symbol"])

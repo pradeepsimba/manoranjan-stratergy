@@ -204,10 +204,14 @@
         <th data-key="vwap"     style="text-align:right">VWAP ₹</th>
         <th data-key="above_vwap">VWAP Pos</th>
         <th data-key="pattern">Pattern</th>
+        <th data-key="bid"      style="text-align:right">Bid ₹</th>
+        <th data-key="ask"      style="text-align:right">Ask ₹</th>
+        <th data-key="spread"   style="text-align:right">Spread</th>
+        <th data-key="ratio"    style="text-align:right">B/S Ratio</th>
       </tr>
     </thead>
     <tbody id="ind-tbody">
-      <tr class="empty-row"><td colspan="12">Loading…</td></tr>
+      <tr class="empty-row"><td colspan="16">Loading…</td></tr>
     </tbody>
   </table>
 </div>
@@ -355,7 +359,7 @@ function renderTable() {
 
   var tbody = document.getElementById('ind-tbody');
   if (!data.length) {
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="12">No stocks match</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="16">No stocks match</td></tr>';
     return;
   }
 
@@ -366,6 +370,12 @@ function renderTable() {
     var histTxt = r.macd_hist != null ? (r.macd_hist >= 0 ? '+' : '') + r.macd_hist.toFixed(4) : '—';
     var vposCls = r.above_vwap == null ? 'muted' : r.above_vwap ? 'pos-num' : 'neg-num';
     var vposTxt = r.above_vwap == null ? '—' : r.above_vwap ? '▲ Above' : '▼ Below';
+
+    // Depth columns
+    var ratioCls = r.ratio == null ? 'muted' :
+                   r.ratio >= 0.5 ? 'pos-num' :
+                   r.ratio >= 0.4 ? 'rsi-mid' : 'neg-num';
+    var ratioTxt = r.ratio != null ? (r.ratio * 100).toFixed(1) + '%' : '—';
 
     return [
       '<tr>',
@@ -381,6 +391,10 @@ function renderTable() {
       '<td style="text-align:right">' + fmtINR(r.vwap,    2) + '</td>',
       '<td class="' + vposCls + '">' + vposTxt + '</td>',
       '<td class="' + (r.pattern ? 'pat-td' : 'muted') + '">' + (r.pattern || '—') + '</td>',
+      '<td style="text-align:right">' + fmtINR(r.bid, 2) + '</td>',
+      '<td style="text-align:right">' + fmtINR(r.ask, 2) + '</td>',
+      '<td style="text-align:right" class="muted">' + (r.spread != null ? r.spread.toFixed(2) : '—') + '</td>',
+      '<td class="' + ratioCls + '" style="text-align:right">' + ratioTxt + '</td>',
       '</tr>',
     ].join('');
   }).join('');

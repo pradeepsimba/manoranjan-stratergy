@@ -52,8 +52,9 @@ def scan_stock(
         st.record_scan(symbol, {"pass": False, "reason": "Insufficient 5m bars"})
         return None
 
-    # LTP dict writes are GIL-protected in CPython — safe to read without a lock
-    ltp = st.ltp.get(symbol, candles_5m[-1].close)
+    # LTP and depth dict writes are GIL-protected in CPython — safe without a lock
+    ltp   = st.ltp.get(symbol, candles_5m[-1].close)
+    depth = st.depth.get(symbol, {})
 
     # Today's bars are a contiguous suffix (candles are chronological). Find the
     # suffix start with an O(today) backward walk instead of an O(buffer) scan,
@@ -88,6 +89,13 @@ def scan_stock(
         "vwap":        round(ind.vwap, 2)              if ind.vwap                    else None,
         "above_vwap":  ind.price_above_vwap,
         "pattern":     ind.candle_pattern,
+        # Order-book depth (None when no tick with snap data received yet)
+        "bid":         round(depth["bid"],    2) if "bid"    in depth else None,
+        "ask":         round(depth["ask"],    2) if "ask"    in depth else None,
+        "spread":      depth.get("spread"),
+        "buy_qty":     depth.get("buy_qty"),
+        "sell_qty":    depth.get("sell_qty"),
+        "ratio":       depth.get("ratio"),
     }
 
     # Non-tradeable stocks (not in Gemini watchlist) only need indicator updates.
@@ -113,7 +121,12 @@ def scan_stock(
         st.record_scan(symbol, {"pass": False, "reason": reason})
         return None
 
-    # ── 7 entry conditions ────────────────────────────────────────────────────
+    # ── 8 entry conditions ────────────────────────────────────────────────────
+    # depth_bullish: buy-side depth ≥ 40% of total (not heavily sell-skewed).
+    # Defaults True when no snap data is available yet so it never blocks on
+    # missing data — it only fires when the order book is clearly bearish.
+    ratio = depth.get("ratio")
+    depth_bullish = (ratio >= 0.4) if ratio is not None else True
     checks = {
         "near_support":    ind.near_support,
         "bullish_pattern": ind.bullish_pattern,
@@ -122,6 +135,7 @@ def scan_stock(
         "macd_cross":      ind.macd_bullish_cross,
         "volume_surge":    ind.volume_surge,
         "above_vwap":      ind.price_above_vwap,
+        "depth_bullish":   depth_bullish,
     }
 
     failed = [k for k, v in checks.items() if not v]

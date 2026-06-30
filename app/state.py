@@ -51,6 +51,9 @@ class AppState:
         # ── Live prices ───────────────────────────────────────────────────────
         self.ltp:       Dict[str, float] = {}   # symbol → latest LTP
         self.nifty_ltp: float            = 0.0
+        # Order book depth — written by WS thread, read by scan workers.
+        # GIL-protected dict ops (same pattern as ltp) make this safe in CPython.
+        self.depth: Dict[str, dict] = {}        # symbol → {bid,ask,spread,buy_qty,sell_qty,ratio}
 
         # ── Positions ─────────────────────────────────────────────────────────
         # `positions` holds ONLY currently-open trades, so len() is a true
@@ -114,6 +117,7 @@ class AppState:
         with self._scan_results_lock:
             self.last_scan_results.clear()
         self.indicator_snapshot.clear()
+        self.depth.clear()
 
 
 def get_state() -> AppState:
