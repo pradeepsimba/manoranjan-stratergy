@@ -4,7 +4,7 @@ from __future__ import annotations
 Backtest replay engine.
 
 Steps each trading day 5-minute bar by bar, driving the SAME strategy core the
-live engine uses (check_trend → compute_indicators → 7 conditions → calc_quantity).
+live engine uses (check_trend → compute_indicators → 8 conditions → calc_quantity).
 Only the driver differs: historical bars + a simulated clock instead of a live
 WebSocket feed.
 
@@ -85,9 +85,12 @@ def _scan_symbol(
 
     ind = compute_indicators(lookback, session_candles_5m=session)
 
+    # depth_bullish always True in backtest — no live order-book data available.
+    # Kept in the condition for structural parity with the live entry_engine.
+    depth_bullish = True
     if not (ind.near_support and ind.bullish_pattern and ind.adx_ok
             and (ind.rsi_above_30 or ind.rsi_rising) and ind.macd_bullish_cross
-            and ind.volume_surge and ind.price_above_vwap):
+            and ind.volume_surge and ind.price_above_vwap and depth_bullish):
         return None
 
     qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level, capital)

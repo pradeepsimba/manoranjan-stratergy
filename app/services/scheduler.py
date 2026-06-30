@@ -199,8 +199,10 @@ class SchedulerService:
             # If nothing matched after mapping back, fall back to the full list
             st.active_watchlist = filtered if filtered else full_watchlist
         else:
-            # Empty list → Gemini unavailable/failed → trade the full list
-            st.active_watchlist = full_watchlist
+            # Empty list → Gemini unavailable/failed → cap fallback so the WS
+            # subscription doesn't overflow the server's per-connection buffer.
+            items = list(full_watchlist.items())[:cfg.GEMINI_MAX_STOCKS]
+            st.active_watchlist = dict(items)
 
         st.gemini_shortlist = list(st.active_watchlist.keys())
         print(
@@ -415,6 +417,7 @@ class SchedulerService:
         st.dirty_ticks.clear()
         st.token_to_name.clear()
         st.full_watchlist.clear()
+        st.active_watchlist.clear()
         st.clear_scan_results()
         st.last_5m_bar_time = None
 

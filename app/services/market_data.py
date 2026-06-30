@@ -27,8 +27,8 @@ from app.state import get_state
 
 _LTP_PAT     = re.compile(r"LTP\s*([\d.]+)")
 _BUYQTY_PAT  = re.compile(r"BuyQty\s+(\d+)\s+SellQty\s+(\d+)")
-_BID1_PAT    = re.compile(r"Bids[^:]*:.*?1\)\s+([\d.]+)\s+x\s+(\d+)", re.DOTALL)
-_ASK1_PAT    = re.compile(r"Asks[^:]*:.*?1\)\s+([\d.]+)\s+x\s+(\d+)", re.DOTALL)
+_BID1_PAT    = re.compile(r"Bids[^:]*:.*?(?<!\d)1\)\s+([\d.]+)\s+x\s+(\d+)", re.DOTALL)
+_ASK1_PAT    = re.compile(r"Asks[^:]*:.*?(?<!\d)1\)\s+([\d.]+)\s+x\s+(\d+)", re.DOTALL)
 
 _MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
@@ -56,7 +56,7 @@ def _parse_depth(snap: str) -> dict:
         if ask_p > 0:
             out["ask"] = ask_p
     if "bid" in out and "ask" in out:
-        out["spread"] = round(out["ask"] - out["bid"], 2)
+        out["spread"] = max(0.0, round(out["ask"] - out["bid"], 2))
     return out
 
 
@@ -86,13 +86,10 @@ class MarketDataService:
 
     async def stop(self) -> None:
         self._running = False
-        for task in (self._task, self._task_1h, self._task2):
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        tasks = [t for t in (self._task, self._task_1h, self._task2) if t]
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     # ── WebSocket connection loops ─────────────────────────────────────────────
 
@@ -148,6 +145,8 @@ class MarketDataService:
 
         if label == "primary-5m":
             self.state.ws_status = "WS Disconnected"
+        elif label == "primary-1h":
+            self.state.ws_status = "WS 1h Disconnected"
 
     # ── Subscription filter builders ──────────────────────────────────────────
 
@@ -254,14 +253,15 @@ class MarketDataService:
         # real order book — its snap shows -0.01 sentinels which _parse_depth
         # discards via the bid_p > 0 guard).
         snap = n.get("snap", "")
-        if snap and stockname and symbol != cfg.NIFTY50_TOKEN:
+        if snap and stockname and symbol != cfg.NIFTY50_TOKEN and interval == "5m":
             depth = _parse_depth(snap)
             if depth:
                 self.state.depth[stockname] = depth
 
         # Tick-wise engine: flag this stock for re-evaluation on the next loop
-        # cycle. Only while ACTIVE so the set stays small and bounded.
-        if symbol != cfg.NIFTY50_TOKEN and self.state.phase == TradingPhase.ACTIVE:
+        # cycle. Only 5m ticks update the forming bar; 1h ticks must not enqueue
+        # dirty_ticks or they trigger scans on stale 5m bars. Only while ACTIVE.
+        if interval == "5m" and symbol != cfg.NIFTY50_TOKEN and self.state.phase == TradingPhase.ACTIVE:
             self.state.dirty_ticks.add(symbol)
 
     # ── Candle upsert helpers ─────────────────────────────────────────────────

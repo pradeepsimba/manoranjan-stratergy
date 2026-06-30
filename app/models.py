@@ -56,10 +56,10 @@ class IndicatorResult:
     rsi_rising:         bool            = False   # rose each of last 3 bars
 
     # MACD
-    macd_line:          float = 0.0
-    macd_signal_line:   float = 0.0
-    macd_histogram:     float = 0.0
-    macd_bullish_cross: bool  = False             # line just crossed above signal
+    macd_line:          Optional[float] = None
+    macd_signal_line:   Optional[float] = None
+    macd_histogram:     Optional[float] = None
+    macd_bullish_cross: bool             = False  # line just crossed above signal
 
     # ADX
     adx:      float = 0.0

@@ -139,8 +139,11 @@ def compute_indicators(
     if ind.rsi is not None:
         ind.rsi_above_30 = ind.rsi > cfg.RSI_OVERSOLD
         tail = rsi_arr[~np.isnan(rsi_arr)][-(cfg.RSI_RISING_BARS + 1):]
+        # Need RSI_RISING_BARS + 1 values to produce RSI_RISING_BARS diffs.
+        # Guard was previously RSI_RISING_BARS (off-by-one: only 2 diffs checked
+        # instead of 3 when tail had exactly 3 elements).
         ind.rsi_rising = (
-            tail.size >= cfg.RSI_RISING_BARS
+            tail.size >= cfg.RSI_RISING_BARS + 1
             and bool(np.all(np.diff(tail) > 0))
         )
 
@@ -148,13 +151,16 @@ def compute_indicators(
     macd, macdsignal, _ = talib.MACD(
         close, fastperiod=12, slowperiod=26, signalperiod=9
     )
-    ind.macd_line        = _last(macd)       or 0.0
-    ind.macd_signal_line = _last(macdsignal) or 0.0
+    # Store None when TA-Lib returns NaN (insufficient bars) so callers can
+    # distinguish "no data" from a legitimate value of 0.0.
+    ind.macd_line        = _last(macd)
+    ind.macd_signal_line = _last(macdsignal)
     prev_ml  = _last(macd,       -2)
     prev_sig = _last(macdsignal, -2)
-    if (prev_ml is not None and prev_sig is not None
-            and _last(macd) is not None and _last(macdsignal) is not None):
+    if ind.macd_line is not None and ind.macd_signal_line is not None:
         ind.macd_histogram = ind.macd_line - ind.macd_signal_line
+    if (prev_ml is not None and prev_sig is not None
+            and ind.macd_line is not None and ind.macd_signal_line is not None):
         # "Bullish cross" — MACD is above signal now AND was below signal within
         # the last MACD_CROSS_BARS bars.  A window wider than 1 lets the entry
         # fire on confirming bars after the cross, not only on the exact cross bar.
