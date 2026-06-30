@@ -48,15 +48,17 @@ Driven by `scheduler.SchedulerService._phase_driver` (IST wall clock):
    - **Mid-session restart recovery:** if `active_watchlist` is empty on entering ACTIVE/CUTOFF, premarket + historical load run on the fly.
 4. **15:30 CLOSED** — `_run_eod()` squares off survivors, writes `daily_stats`, resets all daily state, then sleeps to the next premarket.
 
-Strategy core (shared by live **and** backtest, keep it that way): `check_trend` → `compute_indicators` → 7 conditions → `calc_quantity`.
+Strategy core (shared by live **and** backtest, keep it that way): `check_trend` → `compute_indicators` → entry conditions → `calc_quantity`.
 
-**7 entry conditions:** near_support, bullish_pattern, adx_ok, rsi_ok (>30 or rising 3 bars), macd_bullish_cross, volume_surge, price_above_vwap. Plus a 4-gate trend filter: stock daily-green, stock hourly-green, NIFTY daily-green, NIFTY above session-VWAP.
+**Entry conditions:** near_support, bullish_pattern, adx_ok, rsi_ok (>30 or rising 3 bars), macd_bullish_cross, volume_surge, price_above_vwap — **plus** `depth_bullish` (order-book buy-side ratio ≥ 0.4, i.e. not sell-skewed). Plus a 4-gate trend filter: stock daily-green, stock hourly-green, NIFTY daily-green, NIFTY above session-VWAP.
+
+**Live = 8 conditions, backtest = 7 (parity caveat):** `depth_bullish` uses live order-book depth parsed from the WS `snap` field (`st.depth[symbol] = {bid, ask, spread, buy_qty, sell_qty, ratio}`). It defaults to **pass** when no snap data has arrived, so it only vetoes a clearly bearish book. Historical data has no order book, so the **backtest omits `depth_bullish`** — live is therefore slightly stricter than backtest.
 
 **Risk guards (`can_enter`):** max 3 concurrent open positions, no same-day re-entry, ₹2000 daily loss limit, ₹500 risk/trade.
 
 ## Hard conventions — get these wrong and it breaks
 
-- **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today` are keyed by **SYMBOL NAME**. `full_watchlist` (all high-volume) and `active_watchlist` (Gemini-tradeable subset) are both `{name: token}`; `token_to_name` (all tokens → name) is the reverse bridge the tick loop iterates. Always map correctly.
+- **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today`, `depth` (order-book snap) are keyed by **SYMBOL NAME**. `full_watchlist` (all high-volume) and `active_watchlist` (Gemini-tradeable subset) are both `{name: token}`; `token_to_name` (all tokens → name) is the reverse bridge the tick loop iterates. Always map correctly.
 - **`positions` holds OPEN trades only.** Closing moves a position to `closed_positions` (in `paper_trade._finalize`). `len(positions)` is therefore a true *concurrent* count — do not reintroduce closed positions into it.
 - **Locking:** candle lists are mutated by the WS thread and read by pool workers — every shared-candle access goes through `st.candle_lock(token)`; NIFTY lists through `st._nifty_lock`. Positions/`daily_pnl`/`dirty_ticks` are mutated only on the event-loop thread (no lock needed); pool workers only *read* them.
 - **TA-Lib inputs:** pass raw NumPy `float64` arrays (built from candle slices), never DataFrames or `.ta` chains, into worker threads. Only the minimum lookback tail (`TALIB_LOOKBACK`) is materialized; session VWAP is the exception and uses today's bars.
@@ -68,7 +70,7 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 ```
 main.py                      FastAPI app + lifespan (DB init → scheduler.start); serves / and /indicators
 app/config.py                ALL tunables (timing, risk, strategy params, costs, intervals)
-app/state.py                 AppState singleton (candles, ltp, positions, full/active watchlist, token_to_name, indicator_snapshot, locks, dirty_ticks)
+app/state.py                 AppState singleton (candles, ltp, depth, positions, full/active watchlist, token_to_name, indicator_snapshot, locks, dirty_ticks)
 app/models.py                Candle (slots), Position, EntrySignal, IndicatorResult, TrendGate, enums
 app/engine/
   entry_engine.py            scan_stock — the per-stock decision (live)
@@ -77,7 +79,7 @@ app/engine/
   position_manager.py        calc_quantity, can_enter (state injected, used by live + backtest)
 app/services/
   scheduler.py               phase driver + tick-wise engine + EOD + dashboard payload
-  market_data.py             WebSocket client; _process_tick updates candles/ltp/dirty_ticks
+  market_data.py             WebSocket client; _process_tick updates candles/ltp/depth(snap)/dirty_ticks
   historical_data.py         REST client (batched parallel fetch, persistent httpx)
   gemini_filter.py           analyse_stocks (google-genai, Search grounding; JSON array parsed from text)
   paper_trade.py             place_paper_order, check_tick_exit, force_close, _finalize
