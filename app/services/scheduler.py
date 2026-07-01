@@ -134,7 +134,9 @@ class SchedulerService:
                     if not st.active_watchlist:
                         # Started during wait-zone without a prior premarket run.
                         print("=== RECOVERY: restarted during WAIT_ZONE — running premarket first ===")
+                        st.api_status = "Recovery: fetching watchlist…"
                         await self._run_premarket()
+                        st.phase = TradingPhase.WAIT_ZONE  # restore — premarket sets PRE_MARKET
                     await self._run_wait_zone()
                     await asyncio.sleep(_seconds_until(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN))
 
@@ -144,16 +146,24 @@ class SchedulerService:
                         # Mid-session restart: premarket and wait_zone were missed.
                         # Run them now so the watchlist, candles, and WS are all set up.
                         print("=== RECOVERY: restarted during ACTIVE — running premarket + load ===")
+                        st.api_status = "Recovery: fetching watchlist…"
                         await self._run_premarket()
+                        st.phase = TradingPhase.ACTIVE   # restore — premarket sets PRE_MARKET
+                        st.api_status = "Recovery: loading historical data…"
                         await self._run_wait_zone()
+                        st.phase = TradingPhase.ACTIVE   # restore — wait_zone sets WAIT_ZONE
                     await self._run_active_phase()
 
                 elif h < cfg.SESSION_END_HOUR or (h == cfg.SESSION_END_HOUR and m < cfg.SESSION_END_MIN):
                     st.phase = TradingPhase.CUTOFF
                     if not st.active_watchlist:
                         print("=== RECOVERY: restarted during CUTOFF — running premarket + load ===")
+                        st.api_status = "Recovery: fetching watchlist…"
                         await self._run_premarket()
+                        st.phase = TradingPhase.CUTOFF   # restore — premarket sets PRE_MARKET
+                        st.api_status = "Recovery: loading historical data…"
                         await self._run_wait_zone()
+                        st.phase = TradingPhase.CUTOFF   # restore — wait_zone sets WAIT_ZONE
                     await asyncio.sleep(_seconds_until(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN))
 
                 else:
@@ -537,5 +547,19 @@ class SchedulerService:
                 for sym, res in st.scan_snapshot()[-20:]
             ],
             "lastBarTime":       st.last_5m_bar_time,
-            "indicatorSnapshot": st.indicator_snapshot.copy(),
+            "indicatorSnapshot": self._build_indicator_snapshot(st),
         }
+
+    @staticmethod
+    def _build_indicator_snapshot(st) -> dict:
+        """
+        Return indicator_snapshot extended with LTP-only stubs for every
+        full_watchlist stock that hasn't been scanned yet.  This ensures the
+        browser always receives all watchlist names — even before the first scan
+        cycle completes — so search works immediately after page load.
+        """
+        snap = dict(st.indicator_snapshot)
+        for sym in st.full_watchlist:
+            if sym not in snap:
+                snap[sym] = {"ltp": round(st.ltp.get(sym, 0.0), 2), "bar_time": "—"}
+        return snap

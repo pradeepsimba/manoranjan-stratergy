@@ -15,7 +15,14 @@ function connect() {
   };
 
   ws.onmessage = (e) => {
-    try { render(JSON.parse(e.data)); } catch (err) { console.error(err); }
+    try {
+      const d = JSON.parse(e.data);
+      // INDICATOR_UPDATE (~100 ms) only carries indicatorSnapshot — no clock/nifty/watchlist.
+      // Passing it to render() would blank every scalar field.  Dashboard doesn't use
+      // indicatorSnapshot at all, so skip anything that isn't a full STATE_UPDATE.
+      if (d.type !== 'STATE_UPDATE') return;
+      scheduleRender(d);
+    } catch (err) { console.error(err); }
   };
 
   ws.onclose = ws.onerror = () => {
@@ -23,6 +30,28 @@ function connect() {
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 3000);
   };
+}
+
+// ── Render state ──────────────────────────────────────────────────────────────
+
+let _pendingData = null;
+let _rafPending  = false;
+let _posRowEls   = {};   // symbol → <tr> for DOM diffing
+
+function scheduleRender(d) {
+  _pendingData = d;
+  if (_rafPending) return;
+  _rafPending = true;
+  requestAnimationFrame(() => {
+    _rafPending = false;
+    if (_pendingData) { render(_pendingData); _pendingData = null; }
+  });
+}
+
+// Update a single <td> only when its content or class actually changed.
+function _setCell(td, html, cls) {
+  if (td._h !== html) { td._h = html; td.innerHTML = html; }
+  if (td._c !== cls)  { td._c = cls;  td.className  = cls;  }
 }
 
 // ── Render ─────────────────────────────────────────────────────────────────────
@@ -75,35 +104,79 @@ function render(d) {
 function renderPositions(positions, openCount) {
   document.getElementById('pos-count').textContent = openCount;
   const tbody = document.getElementById('positions-tbody');
+
   if (!positions.length) {
+    _posRowEls = {};
     tbody.innerHTML = '<tr><td colspan="9" class="empty-cell">No positions yet</td></tr>';
     return;
   }
-  tbody.innerHTML = positions.map(p => {
+
+  // Clear the empty-state placeholder on first real data
+  if (tbody.querySelector('.empty-cell')) tbody.innerHTML = '';
+
+  const seen = {};
+
+  // Step 1: update cells in-place — no DOM moves
+  positions.forEach(p => {
+    seen[p.symbol] = true;
+    let tr = _posRowEls[p.symbol];
+    if (!tr) {
+      tr = document.createElement('tr');
+      for (let i = 0; i < 9; i++) {
+        const td = document.createElement('td');
+        td._h = null; td._c = null;
+        tr.appendChild(td);
+      }
+      tr._cls = null;
+      _posRowEls[p.symbol] = tr;
+    }
+    const rowCls = p.status === 'OPEN' ? 'bull-row' : '';
+    if (tr._cls !== rowCls) { tr._cls = rowCls; tr.className = rowCls; }
+
     const pnlCls = p.livePnl > 0 ? 'pnl-pos' : p.livePnl < 0 ? 'pnl-neg' : '';
     const stCls  = p.status === 'OPEN' ? 'badge green' : 'badge gray';
-    return `<tr class="${p.status === 'OPEN' ? 'bull-row' : ''}">
-      <td>${p.symbol}</td>
-      <td><span class="${stCls}">${p.status}</span></td>
-      <td>${fmt2(p.entry)}</td>
-      <td>${(p.entryTime || '').substring(11, 19)}</td>
-      <td>${p.qty}</td>
-      <td>${fmt2(p.sl)}</td>
-      <td>${fmt2(p.target)}</td>
-      <td>${fmt2(p.ltp)}</td>
-      <td class="${pnlCls}">${(p.livePnl >= 0 ? '+' : '') + fmt2(p.livePnl)}</td>
-    </tr>`;
-  }).join('');
+    const cells  = tr.children;
+    _setCell(cells[0], p.symbol,                                               '');
+    _setCell(cells[1], `<span class="${stCls}">${p.status}</span>`,            '');
+    _setCell(cells[2], fmt2(p.entry),                                          '');
+    _setCell(cells[3], (p.entryTime || '').substring(11, 19),                  '');
+    _setCell(cells[4], String(p.qty),                                          '');
+    _setCell(cells[5], fmt2(p.sl),                                             '');
+    _setCell(cells[6], fmt2(p.target),                                         '');
+    _setCell(cells[7], fmt2(p.ltp),                                            '');
+    _setCell(cells[8], (p.livePnl >= 0 ? '+' : '') + fmt2(p.livePnl),         pnlCls);
+  });
+
+  // Step 2: remove rows for positions that left
+  Object.keys(_posRowEls).forEach(sym => {
+    if (!seen[sym]) {
+      if (_posRowEls[sym].parentNode) _posRowEls[sym].remove();
+      delete _posRowEls[sym];
+    }
+  });
+
+  // Step 3: reorder only when DOM order differs from data order
+  const children = tbody.children;
+  let needReorder = children.length !== positions.length;
+  if (!needReorder) {
+    for (let i = 0; i < positions.length; i++) {
+      if (children[i] !== _posRowEls[positions[i].symbol]) { needReorder = true; break; }
+    }
+  }
+  if (needReorder) {
+    const frag = document.createDocumentFragment();
+    positions.forEach(p => frag.appendChild(_posRowEls[p.symbol]));
+    tbody.appendChild(frag);   // single atomic DOM write
+  }
 }
 
 function renderGemini(list) {
   document.getElementById('gemini-count').textContent = list.length;
-  const el = document.getElementById('gemini-list');
-  if (!list.length) {
-    el.innerHTML = '<span class="muted-text">Building at 09:00 IST…</span>';
-    return;
-  }
-  el.innerHTML = list.map(s => `<span class="stock-chip">${s}</span>`).join('');
+  const el  = document.getElementById('gemini-list');
+  const html = !list.length
+    ? '<span class="muted-text">Building at 09:00 IST…</span>'
+    : list.map(s => `<span class="stock-chip">${s}</span>`).join('');
+  if (el._h !== html) { el._h = html; el.innerHTML = html; }
 }
 
 function renderScans(scans) {
@@ -116,11 +189,14 @@ function renderScans(scans) {
   if (skipEl) skipEl.textContent = skipCount + ' skipped';
 
   const tbody = document.getElementById('scans-tbody');
+
   if (!scans.length) {
-    tbody.innerHTML = '<tr><td colspan="3" class="empty-cell">Waiting for scans…</td></tr>';
+    const empty = '<tr><td colspan="3" class="empty-cell">Waiting for scans…</td></tr>';
+    if (tbody._h !== empty) { tbody._h = empty; tbody.innerHTML = empty; }
     return;
   }
-  tbody.innerHTML = scans.slice(-25).reverse().map(r => {
+
+  const html = scans.slice(-25).reverse().map(r => {
     const passed = !!r.pass;
     const detail = passed
       ? (r.signal
@@ -133,6 +209,7 @@ function renderScans(scans) {
       <td style="color:var(--txt-2);font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis">${detail}</td>
     </tr>`;
   }).join('');
+  if (tbody._h !== html) { tbody._h = html; tbody.innerHTML = html; }
 }
 
 // ── Backtest ───────────────────────────────────────────────────────────────────
