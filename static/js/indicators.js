@@ -48,7 +48,14 @@ function _loadCache() {
     if (!parsed || typeof parsed !== 'object') return;
     var count = 0;
     Object.keys(parsed).forEach(function(sym) {
-      if (!rowsMap[sym]) { rowsMap[sym] = parsed[sym]; count++; }
+      if (!rowsMap[sym]) {
+        var entry = parsed[sym];
+        if (entry && typeof entry === 'object') {
+          entry.symbol = entry.symbol || sym;
+        }
+        rowsMap[sym] = entry;
+        count++;
+      }
     });
     if (count > 0) {
       renderTable();
@@ -231,78 +238,115 @@ function scheduleRender() {
 
 // ── Render table — DOM-diffing, zero blink ────────────────────────────────────
 function renderTable() {
-  updateSortHeaders();
+  try {
+    updateSortHeaders();
 
-  var q   = normalise(document.getElementById('search').value);
-  var all = Object.values(rowsMap);
-  var data = q ? all.filter(function(r) {
-    var sym = normalise(r.symbol);
-    if (sym.indexOf(q) !== -1) return true;
-    if (q.indexOf(sym) !== -1) return true;
-    return q.split(' ').filter(Boolean).every(function(w) { return sym.indexOf(w) !== -1; });
-  }) : all;
+    var searchEl = document.getElementById('search');
+    var q = searchEl ? normalise(searchEl.value) : '';
+    var all = Object.values(rowsMap);
 
-  data.sort(function(a, b) {
-    var va = a[sortKey], vb = b[sortKey];
-    if (va == null && vb == null) return 0;
-    if (va == null) return 1;
-    if (vb == null) return -1;
-    var cmp = (typeof va === 'string') ? va.localeCompare(vb) : va - vb;
-    return sortAsc ? cmp : -cmp;
-  });
+    var data = q ? all.filter(function(r) {
+      if (!r) return false;
+      // Get raw symbol name with multiple fallbacks:
+      var rawSymbol = r.symbol;
+      if (!rawSymbol) {
+        for (var k in rowsMap) {
+          if (rowsMap[k] === r) {
+            rawSymbol = k;
+            break;
+          }
+        }
+      }
+      if (!rawSymbol) {
+        console.warn('Skipping rowsMap entry because no symbol property or key could be resolved:', r);
+        return false;
+      }
 
-  var tbody = document.getElementById('ind-tbody');
+      var sym = normalise(rawSymbol);
+      var words = q.split(' ').filter(Boolean);
+      return words.every(function(w) { return sym.indexOf(w) !== -1; });
+    }) : all;
 
-  if (!data.length) {
-    Object.keys(_rowEls).forEach(function(sym) {
-      var tr = _rowEls[sym];
-      if (tr.parentNode) tr.parentNode.removeChild(tr);
+    data.sort(function(a, b) {
+      var va = a[sortKey], vb = b[sortKey];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      var cmp = (typeof va === 'string') ? va.localeCompare(vb) : va - vb;
+      return sortAsc ? cmp : -cmp;
     });
-    _rowEls = {};
-    var total = all.length;
-    var msg = total === 0
-      ? 'Stocks loading — the table will populate automatically'
-      : 'No match for "' + document.getElementById('search').value + '" in ' + total + ' stocks';
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="16">' + msg + '</td></tr>';
-    return;
-  }
 
-  var emptyRow = tbody.querySelector('.empty-row');
-  if (emptyRow) tbody.removeChild(emptyRow);
+    var tbody = document.getElementById('ind-tbody');
 
-  // Step 1: update cell content in-place (no DOM reorder yet)
-  var seen = {};
-  data.forEach(function(r) {
-    seen[r.symbol] = true;
-    var tr = _rowEls[r.symbol];
-    if (!tr) {
-      tr = _createTR();
-      _rowEls[r.symbol] = tr;
+    if (!data.length) {
+      Object.keys(_rowEls).forEach(function(sym) {
+        var tr = _rowEls[sym];
+        if (tr.parentNode) tr.parentNode.removeChild(tr);
+      });
+      _rowEls = {};
+      var total = all.length;
+      var msg = total === 0
+        ? 'Stocks loading — the table will populate automatically'
+        : 'No match for "' + (searchEl ? searchEl.value : '') + '" in ' + total + ' stocks';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="16">' + msg + '</td></tr>';
+      return;
     }
-    _updateTR(tr, r);
-  });
 
-  // Step 2: remove rows no longer in the filtered set
-  Object.keys(_rowEls).forEach(function(sym) {
-    if (!seen[sym]) {
+    var emptyRow = tbody.querySelector('.empty-row');
+    if (emptyRow) tbody.removeChild(emptyRow);
+
+    // Step 1: update cell content in-place (no DOM reorder yet)
+    var seen = {};
+    data.forEach(function(r) {
+      // Find the key sym in rowsMap corresponding to r if r.symbol is missing
+      var sym = r.symbol;
+      if (!sym) {
+        for (var k in rowsMap) {
+          if (rowsMap[k] === r) { sym = k; break; }
+        }
+      }
+      sym = sym || '';
+      r.symbol = sym; // self-heal the symbol property
+      
+      seen[sym] = true;
       var tr = _rowEls[sym];
-      if (tr.parentNode) tr.parentNode.removeChild(tr);
-      delete _rowEls[sym];
-    }
-  });
+      if (!tr) {
+        tr = _createTR();
+        _rowEls[sym] = tr;
+      }
+      _updateTR(tr, r);
+    });
 
-  // Step 3: reorder only when the DOM order differs from desired sort order
-  var children = tbody.children;
-  var needReorder = (children.length !== data.length);
-  if (!needReorder) {
-    for (var i = 0; i < data.length; i++) {
-      if (children[i] !== _rowEls[data[i].symbol]) { needReorder = true; break; }
+    // Step 2: remove rows no longer in the filtered set
+    Object.keys(_rowEls).forEach(function(sym) {
+      if (!seen[sym]) {
+        var tr = _rowEls[sym];
+        if (tr.parentNode) tr.parentNode.removeChild(tr);
+        delete _rowEls[sym];
+      }
+    });
+
+    // Step 3: reorder only when the DOM order differs from desired sort order
+    var children = tbody.children;
+    var needReorder = (children.length !== data.length);
+    if (!needReorder) {
+      for (var i = 0; i < data.length; i++) {
+        var sym = data[i].symbol || '';
+        if (children[i] !== _rowEls[sym]) { needReorder = true; break; }
+      }
     }
-  }
-  if (needReorder) {
-    var frag = document.createDocumentFragment();
-    data.forEach(function(r) { frag.appendChild(_rowEls[r.symbol]); });
-    tbody.appendChild(frag);
+    if (needReorder) {
+      var frag = document.createDocumentFragment();
+      data.forEach(function(r) {
+        var sym = r.symbol || '';
+        if (_rowEls[sym]) frag.appendChild(_rowEls[sym]);
+      });
+      tbody.appendChild(frag);
+    }
+    
+    // Render complete
+  } catch (err) {
+    console.error('Error rendering table:', err);
   }
 }
 

@@ -13,6 +13,13 @@
     })();
   </script>
   <style>
+    body {
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
     /* ── Indicators page additions ─────────────────────────────────────────── */
 
     .ind-toolbar {
@@ -95,18 +102,18 @@
 
     /* ── Main table wrapper ─────────────────────────────────────────────────── */
     .ind-wrap {
-      padding: 12px 18px;
-      overflow-x: auto;
+      flex: 1;
+      overflow: auto;
+      padding: 0 18px 18px 18px;
     }
 
     /*
-     * The global dashboard.css sets thead th { position:sticky; top:0; z-index:1 }.
-     * On the indicators page the table scrolls with the viewport (no fixed-height
-     * container), so "top:0" would anchor the header UNDER the 56 px app-bar.
-     * Override top to clear the app-bar, and raise z-index above the row cells.
+     * The table container is scrollable vertically and horizontally.
+     * Align the sticky header to top: 0 relative to the wrapper.
      */
     .ind-wrap thead th {
-      top: 56px;
+      position: sticky;
+      top: 0;
       z-index: 2;
       cursor: pointer;
       user-select: none;
