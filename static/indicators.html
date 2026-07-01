@@ -256,7 +256,7 @@ function connect() {
   ws.onmessage = function(e) {
     try {
       var d = JSON.parse(e.data);
-      if (d.type !== 'STATE_UPDATE') return;
+      if (d.type !== 'STATE_UPDATE' && d.type !== 'INDICATOR_UPDATE') return;
       var snap = d.indicatorSnapshot;
       if (!snap || typeof snap !== 'object') return;
       // Merge: WS values override the REST seed (WS is always fresher)
@@ -344,9 +344,18 @@ function fmtINR(v, dp) {
 function renderTable() {
   updateSortHeaders();
 
-  var q    = document.getElementById('search').value.toLowerCase();
+  var q    = document.getElementById('search').value.toLowerCase().trim();
   var all  = Object.values(rowsMap);
-  var data = q ? all.filter(function(r) { return r.symbol.toLowerCase().indexOf(q) !== -1; }) : all;
+  var data = q ? all.filter(function(r) {
+    var sym = r.symbol.toLowerCase();
+    // Primary: symbol contains query  ("rel" → "RELIANCE")
+    if (sym.indexOf(q) !== -1) return true;
+    // Secondary: query contains symbol  ("reliance industries" → "RELIANCE")
+    if (q.indexOf(sym) !== -1) return true;
+    // Tertiary: every space-separated word in query appears in symbol
+    //           ("rel ind" → "RELIANCE INDUSTRIES LTD")
+    return q.split(/\s+/).every(function(w) { return sym.indexOf(w) !== -1; });
+  }) : all;
 
   data.sort(function(a, b) {
     var va = a[sortKey], vb = b[sortKey];

@@ -131,6 +131,10 @@ class SchedulerService:
 
                 elif h < cfg.SCAN_START_HOUR or (h == cfg.SCAN_START_HOUR and m < cfg.SCAN_START_MIN):
                     st.phase = TradingPhase.WAIT_ZONE
+                    if not st.active_watchlist:
+                        # Started during wait-zone without a prior premarket run.
+                        print("=== RECOVERY: restarted during WAIT_ZONE — running premarket first ===")
+                        await self._run_premarket()
                     await self._run_wait_zone()
                     await asyncio.sleep(_seconds_until(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN))
 
@@ -216,6 +220,10 @@ class SchedulerService:
         st.phase = TradingPhase.WAIT_ZONE
         print("=== WAIT ZONE: Loading historical data ===")
         await self._load_all_historical()
+        # Stop any existing WS connections before (re)starting so that recovery
+        # runs (premarket missed → wait_zone called twice) don't leak old tasks.
+        if self._mkt._running:
+            await self._mkt.stop()
         self._mkt.start()
 
     async def _run_active_phase(self) -> None:
@@ -341,6 +349,18 @@ class SchedulerService:
                   for c in chunks]
         results = await asyncio.gather(*tasks)
         signals = [sig for chunk_res in results for sig in chunk_res]
+
+        # Push indicator delta immediately so browsers update per-scan-cycle
+        # (~100 ms) rather than waiting up to 1 second for the full broadcast.
+        if self._ws.count() > 0:
+            snap_delta = {t2n[tok]: st.indicator_snapshot[t2n[tok]]
+                          for tok in dirty
+                          if tok in t2n and t2n[tok] in st.indicator_snapshot}
+            if snap_delta:
+                asyncio.create_task(self._ws.broadcast(
+                    json.dumps({"type": "INDICATOR_UPDATE",
+                                "indicatorSnapshot": snap_delta}, default=str)
+                ))
 
         # Only fill trades when capacity allows — scanning always runs so that
         # indicator_snapshot stays current even at max concurrent positions.
