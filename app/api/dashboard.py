@@ -183,74 +183,44 @@ async def list_backtests() -> List[Dict[str, Any]]:
 @router.get("/api/indicators")
 async def get_live_indicators() -> List[Dict[str, Any]]:
     """
-    Compute RSI / MACD / ADX / support / VWAP for every stock in the active
-    watchlist.  Runs sequentially in a background thread — TA-Lib's C layer
-    releases the GIL so the event loop stays unblocked.
+    Get the pre-computed indicator snapshot for all stocks.
+    Avoids expensive sequential recalculation, returning the latest background scan state instantly.
     """
-    from app.engine.indicator_engine import compute_indicators   # avoid circular at module level
-
     st = get_state()
-    # Prefer the full pre-Gemini list so all high-volume stocks appear on the
-    # indicators page before the first tick cycle populates indicator_snapshot.
     wl = st.full_watchlist if st.full_watchlist else st.active_watchlist
     if not wl:
         return []
 
-    def _compute_all() -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        for sym, tok in list(wl.items()):
-            with st.candle_lock(tok):
-                c5 = list(st.candles_5m.get(tok, []))
-
-            ltp   = st.ltp.get(sym, c5[-1].close if c5 else 0.0)
+    out: List[Dict[str, Any]] = []
+    snapshot = dict(st.indicator_snapshot)
+    
+    for sym, tok in list(wl.items()):
+        if sym in snapshot:
+            entry = dict(snapshot[sym])
+            entry["symbol"] = sym
+        else:
+            # Stub if background scanner hasn't processed this symbol yet
+            c5 = list(st.candles_5m.get(tok, []))
+            ltp = st.ltp.get(sym, c5[-1].close if c5 else 0.0)
             bar_t = c5[-1].start_time[11:16] if c5 else "—"
-
-            empty = dict(
-                symbol=sym, ltp=round(ltp, 2), bar_time=bar_t,
+            depth = st.depth.get(sym, {})
+            entry = dict(
+                symbol=sym,
+                ltp=round(ltp, 2),
+                bar_time=bar_t,
                 rsi=None, adx=None, plus_di=None, minus_di=None,
                 macd=None, macd_signal=None, macd_hist=None,
                 support=None, vwap=None, above_vwap=None, pattern=None,
+                bid=round(depth["bid"], 2) if "bid" in depth else None,
+                ask=round(depth["ask"], 2) if "ask" in depth else None,
+                spread=depth.get("spread"),
+                buy_qty=depth.get("buy_qty"),
+                sell_qty=depth.get("sell_qty"),
+                ratio=depth.get("ratio"),
             )
-            if len(c5) < 30:
-                out.append(empty)
-                continue
+        out.append(entry)
 
-            today = c5[-1].start_time[:10]   # today's bars are a contiguous suffix
-            j = len(c5)
-            while j > 0 and c5[j - 1].start_time[:10] == today:
-                j -= 1
-            ind = compute_indicators(c5, session_candles_5m=c5[j:])
-
-            hist  = (round(ind.macd_line - ind.macd_signal_line, 4)
-                     if ind.macd_line is not None and ind.macd_signal_line is not None
-                     else None)
-            depth = st.depth.get(sym, {})
-            out.append(dict(
-                symbol      = sym,
-                ltp         = round(ltp, 2),
-                bar_time    = bar_t,
-                rsi         = round(ind.rsi, 1)          if ind.rsi         is not None else None,
-                adx         = round(ind.adx, 1)          if ind.adx      is not None else None,
-                plus_di     = round(ind.plus_di, 1)      if ind.plus_di  is not None else None,
-                minus_di    = round(ind.minus_di, 1)     if ind.minus_di is not None else None,
-                macd        = round(ind.macd_line, 4)    if ind.macd_line   is not None else None,
-                macd_signal = round(ind.macd_signal_line, 4) if ind.macd_signal_line is not None else None,
-                macd_hist   = hist,
-                support     = round(ind.support_level, 2) if ind.support_level          else None,
-                vwap        = round(ind.vwap, 2)          if ind.vwap                   else None,
-                above_vwap  = ind.price_above_vwap,
-                pattern     = ind.candle_pattern,
-                bid         = round(depth["bid"],    2) if "bid"    in depth else None,
-                ask         = round(depth["ask"],    2) if "ask"    in depth else None,
-                spread      = depth.get("spread"),
-                buy_qty     = depth.get("buy_qty"),
-                sell_qty    = depth.get("sell_qty"),
-                ratio       = depth.get("ratio"),
-            ))
-
-        return sorted(out, key=lambda x: x["symbol"])
-
-    return await asyncio.to_thread(_compute_all)
+    return sorted(out, key=lambda x: x["symbol"])
 
 
 # ── Dashboard WebSocket ───────────────────────────────────────────────────────

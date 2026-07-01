@@ -10,6 +10,9 @@ var reconnectTimer = null;
 var _rowEls     = {};
 var _rafPending = false;   // coalesce rapid WS updates into one paint frame
 
+// Pre-instantiated formatter for maximum performance (en-IN format with 2 dp)
+var _formatter2dp = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 // ── Market hours (IST) ────────────────────────────────────────────────────────
 function marketStatus() {
   var ist  = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -52,6 +55,7 @@ function _loadCache() {
         var entry = parsed[sym];
         if (entry && typeof entry === 'object') {
           entry.symbol = entry.symbol || sym;
+          entry._normSymbol = normalise(entry.symbol);
         }
         rowsMap[sym] = entry;
         count++;
@@ -88,6 +92,7 @@ function connect() {
       Object.keys(snap).forEach(function(sym) {
         var entry = Object.assign({}, snap[sym]);
         entry.symbol = sym;
+        entry._normSymbol = normalise(sym);
         rowsMap[sym] = entry;
       });
       scheduleRender();   // coalesces into one paint frame even if ticks arrive faster
@@ -119,6 +124,9 @@ function loadInitial() {
       }
       data.forEach(function(item) {
         var existing = rowsMap[item.symbol];
+        if (item && typeof item === 'object') {
+          item._normSymbol = normalise(item.symbol);
+        }
         // Upgrade a stub (ltp-only) entry with real indicator data from REST
         if (!existing || (existing.rsi == null && item.rsi != null)) {
           rowsMap[item.symbol] = item;
@@ -132,14 +140,22 @@ function loadInitial() {
 
 // ── Summary strip ─────────────────────────────────────────────────────────────
 function renderSummary() {
-  var rows   = Object.values(rowsMap);
-  var aboveV = rows.filter(function(r) { return r.above_vwap; }).length;
-  var rsiLo  = rows.filter(function(r) { return r.rsi != null && r.rsi < 30; }).length;
-  var rsiHi  = rows.filter(function(r) { return r.rsi != null && r.rsi > 70; }).length;
-  var adxOn  = rows.filter(function(r) { return r.adx != null && r.adx > 20; }).length;
-  var pats   = rows.filter(function(r) { return r.pattern; }).length;
+  var total = 0, aboveV = 0, rsiLo = 0, rsiHi = 0, adxOn = 0, pats = 0;
+  for (var sym in rowsMap) {
+    if (Object.prototype.hasOwnProperty.call(rowsMap, sym)) {
+      var r = rowsMap[sym];
+      total++;
+      if (r.above_vwap) aboveV++;
+      if (r.rsi != null) {
+        if (r.rsi < 30) rsiLo++;
+        else if (r.rsi > 70) rsiHi++;
+      }
+      if (r.adx != null && r.adx > 20) adxOn++;
+      if (r.pattern) pats++;
+    }
+  }
 
-  document.getElementById('s-total').textContent  = rows.length;
+  document.getElementById('s-total').textContent  = total;
   document.getElementById('s-vwap').textContent   = aboveV;
   document.getElementById('s-rsi-lo').textContent = rsiLo;
   document.getElementById('s-rsi-hi').textContent = rsiHi;
@@ -169,9 +185,9 @@ function updateSortHeaders() {
 }
 
 // ── Format helpers ────────────────────────────────────────────────────────────
-function fmtINR(v, dp) {
+function fmtINR(v) {
   if (v == null) return '—';
-  return v.toLocaleString('en-IN', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  return _formatter2dp.format(v);
 }
 
 function normalise(s) {
@@ -208,19 +224,19 @@ function _updateTR(tr, r) {
   var ratioCls = r.ratio == null ? 'muted' : r.ratio >= 0.5 ? 'pos-num' : r.ratio >= 0.4 ? 'rsi-mid' : 'neg-num';
 
   _setCell(c[0],  r.symbol,                                                        'col-sym');
-  _setCell(c[1],  fmtINR(r.ltp, 2),                                                'ta-r');
+  _setCell(c[1],  fmtINR(r.ltp),                                                   'ta-r');
   _setCell(c[2],  r.bar_time || '<span class="muted">—</span>',                    '');
   _setCell(c[3],  r.rsi      != null ? r.rsi.toFixed(1)      : '—',               rsiCls  + ' ta-r');
   _setCell(c[4],  r.adx      != null ? r.adx.toFixed(1)      : '—',               adxCls  + ' ta-r');
   _setCell(c[5],  r.plus_di  != null ? r.plus_di.toFixed(1)  : '<span class="muted">—</span>', 'pos-num ta-r');
   _setCell(c[6],  r.minus_di != null ? r.minus_di.toFixed(1) : '<span class="muted">—</span>', 'neg-num ta-r');
   _setCell(c[7],  histTxt,                                                          histCls + ' ta-r');
-  _setCell(c[8],  fmtINR(r.support, 2),                                            'ta-r');
-  _setCell(c[9],  fmtINR(r.vwap, 2),                                               'ta-r');
+  _setCell(c[8],  fmtINR(r.support),                                               'ta-r');
+  _setCell(c[9],  fmtINR(r.vwap),                                                  'ta-r');
   _setCell(c[10], vposTxt,                                                          vposCls);
   _setCell(c[11], r.pattern || '—',                                                 r.pattern ? 'pat-td' : 'muted');
-  _setCell(c[12], fmtINR(r.bid, 2),                                                'ta-r');
-  _setCell(c[13], fmtINR(r.ask, 2),                                                'ta-r');
+  _setCell(c[12], fmtINR(r.bid),                                                   'ta-r');
+  _setCell(c[13], fmtINR(r.ask),                                                   'ta-r');
   _setCell(c[14], r.spread != null ? r.spread.toFixed(2) : '—',                   'ta-r muted');
   _setCell(c[15], ratioTxt,                                                         ratioCls + ' ta-r');
 }
@@ -244,28 +260,18 @@ function renderTable() {
     var searchEl = document.getElementById('search');
     var q = searchEl ? normalise(searchEl.value) : '';
     var all = Object.values(rowsMap);
+    var data;
 
-    var data = q ? all.filter(function(r) {
-      if (!r) return false;
-      // Get raw symbol name with multiple fallbacks:
-      var rawSymbol = r.symbol;
-      if (!rawSymbol) {
-        for (var k in rowsMap) {
-          if (rowsMap[k] === r) {
-            rawSymbol = k;
-            break;
-          }
-        }
-      }
-      if (!rawSymbol) {
-        console.warn('Skipping rowsMap entry because no symbol property or key could be resolved:', r);
-        return false;
-      }
-
-      var sym = normalise(rawSymbol);
+    if (q) {
       var words = q.split(' ').filter(Boolean);
-      return words.every(function(w) { return sym.indexOf(w) !== -1; });
-    }) : all;
+      data = all.filter(function(r) {
+        var sym = r ? r._normSymbol : '';
+        if (!sym) return false;
+        return words.every(function(w) { return sym.indexOf(w) !== -1; });
+      });
+    } else {
+      data = all;
+    }
 
     data.sort(function(a, b) {
       var va = a[sortKey], vb = b[sortKey];
@@ -298,16 +304,7 @@ function renderTable() {
     // Step 1: update cell content in-place (no DOM reorder yet)
     var seen = {};
     data.forEach(function(r) {
-      // Find the key sym in rowsMap corresponding to r if r.symbol is missing
-      var sym = r.symbol;
-      if (!sym) {
-        for (var k in rowsMap) {
-          if (rowsMap[k] === r) { sym = k; break; }
-        }
-      }
-      sym = sym || '';
-      r.symbol = sym; // self-heal the symbol property
-      
+      var sym = r.symbol || '';
       seen[sym] = true;
       var tr = _rowEls[sym];
       if (!tr) {
