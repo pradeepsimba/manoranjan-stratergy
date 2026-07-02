@@ -5,7 +5,6 @@ httpx
 asyncpg
 python-multipart
 google-genai
-loguru
 numpy
 TA-Lib
 python-dotenv

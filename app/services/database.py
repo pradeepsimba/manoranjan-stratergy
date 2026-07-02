@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     r_multiple  NUMERIC(8,3)
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
+CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
+CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
+CREATE INDEX IF NOT EXISTS idx_scan_log_logged_at ON scan_log(logged_at);
 
 -- Add indicator columns to existing tables (idempotent)
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS rsi            NUMERIC(6,2);
