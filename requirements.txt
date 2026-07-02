@@ -3,7 +3,6 @@ uvicorn[standard]
 websockets
 httpx
 asyncpg
-python-multipart
 google-genai
 numpy
 TA-Lib
