@@ -23,7 +23,7 @@ from app.engine.entry_engine import scan_stock
 from app.engine.position_manager import can_enter
 from app.engine.trend_filter import compute_nifty_gates
 from app.engine.watchlist import fetch_active_watchlist
-from app.models import PositionStatus, TradingPhase
+from app.models import Position, PositionStatus, TradingPhase
 from app.services.gemini_filter import analyse_stocks
 from app.services.historical_data import (
     fetch_indicator_history,
@@ -151,6 +151,12 @@ class SchedulerService:
                             st.api_status = "Recovery failed — retrying in 60s"
                             await asyncio.sleep(60)
                             continue
+
+                    # Mid-session restart: rebuild today's positions and risk
+                    # state from the DB BEFORE the WS starts, so restored open
+                    # symbols get subscribed and SL/target monitoring resumes.
+                    if not st.traded_today and not st.positions:
+                        await self._restore_positions_from_db()
 
                     if not self._mkt._running:
                         st.api_status = "Recovery: loading historical data…"
@@ -412,8 +418,77 @@ class SchedulerService:
             except Exception as e:
                 print(f"DB save_position error ({sig.symbol}): {e}")
 
+    async def _restore_positions_from_db(self) -> None:
+        """
+        Restart recovery: rebuild today's positions, traded_today, daily P&L
+        and the closed-trade log from the DB, so the risk rules (no same-day
+        re-entry, daily loss limit, EOD stats) survive a crash. Open symbols
+        are put back into the watchlists so the WS re-subscribes them and the
+        tick-exit loop resumes SL/target monitoring.
+
+        Idempotent by guard: callers only invoke it on a fresh state
+        (no traded_today, no positions).
+        """
+        st = get_state()
+        try:
+            rows = await self._db.get_today_positions()
+        except Exception as e:
+            print(f"Recovery: could not reload today's positions: {e}")
+            return
+        if not rows:
+            return
+
+        def _f(v) -> float:   # asyncpg returns NUMERIC as Decimal — never mix
+            return float(v) if v is not None else 0.0   # Decimal into float math
+
+        for r in rows:
+            symbol = r["symbol"]
+            token  = str(r["token"])
+            status = (PositionStatus(r["status"])
+                      if r.get("status") in ("OPEN", "CLOSED") else PositionStatus.OPEN)
+            pos = Position(
+                symbol        = symbol,
+                token         = token,
+                entry_price   = _f(r.get("entry_price")),
+                entry_time    = str(r.get("entry_time") or ""),
+                quantity      = int(r.get("quantity") or 0),
+                stop_loss     = _f(r.get("stop_loss")),
+                target        = _f(r.get("target")),
+                sl_offset     = _f(r.get("sl_offset")),
+                target_offset = _f(r.get("target_offset")),
+                order_id      = str(r.get("order_id") or ""),
+                status        = status,
+                exit_price    = float(r["exit_price"]) if r.get("exit_price") is not None else None,
+                exit_time     = r.get("exit_time"),
+                pnl           = _f(r.get("pnl")),
+            )
+            st.traded_today.add(symbol)
+            if status == PositionStatus.CLOSED:
+                st.closed_positions.append(pos)
+                st.daily_pnl += pos.pnl
+            else:
+                st.positions[symbol] = pos
+                # Open symbols must be in the watchlists so the WS subscribes
+                # them (exits need st.ltp ticks) even if today's fresh Gemini
+                # screen no longer includes them.
+                st.active_watchlist.setdefault(symbol, token)
+                st.full_watchlist.setdefault(symbol, token)
+                st.token_to_name.setdefault(token, symbol)
+
+        print(
+            f"=== RECOVERY: restored {len(st.positions)} open / "
+            f"{len(st.closed_positions)} closed positions | "
+            f"daily P&L ₹{st.daily_pnl:+.2f} ==="
+        )
+
     async def _run_eod(self) -> None:
         st = get_state()
+
+        # Restart-after-close: adopt any of today's DB positions this process
+        # doesn't know about, so orphaned OPEN rows get squared off below and
+        # the day's stats are written from the real trades.
+        if not st.traded_today and not st.positions:
+            await self._restore_positions_from_db()
 
         # Square off anything still open at the last known price before the feed
         # stops, so every trade has a recorded exit and P&L.

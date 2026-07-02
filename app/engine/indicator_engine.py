@@ -57,6 +57,19 @@ def session_vwap_candles(candles: List[Candle]) -> float:
     return tot_pv / (3.0 * tot_v) if tot_v > 0 else 0.0
 
 
+def session_vwap_from_cumsums(cum_pv, cum_v, start: int, end: int) -> float:
+    """
+    O(1) session VWAP over bars [start..end] from prefix sums of (H+L+C)·V and
+    V (see SymbolSeries.index_days). Algebraically identical to
+    session_vwap_candles over the same slice — the backtest's fast path.
+    """
+    base_pv = cum_pv[start - 1] if start > 0 else 0.0
+    base_v  = cum_v[start - 1]  if start > 0 else 0.0
+    pv = cum_pv[end] - base_pv
+    v  = cum_v[end]  - base_v
+    return float(pv / (3.0 * v)) if v > 0 else 0.0
+
+
 # ── Bullish candlestick patterns (custom) ─────────────────────────────────────
 
 def _detect_bullish_pattern(
@@ -99,13 +112,30 @@ def compute_indicators(
     candles_5m: List[Candle],
     candles_1h: Optional[List[Candle]] = None,
     session_candles_5m: Optional[List[Candle]] = None,
+    *,
+    ohlcv_window: Optional[tuple] = None,
+    session_vwap: Optional[float] = None,
+    entry_short_circuit: bool = False,
 ) -> IndicatorResult:
     """
     Compute all entry-check indicators with TA-Lib.
 
     candles_5m          — 5-min bars (RSI/ADX/MACD/volume/pattern)
     session_candles_5m  — today's bars from 09:15 for VWAP; falls back to
-                          candles_5m if not provided
+                          candles_5m if not provided (ignored when session_vwap
+                          is given)
+    ohlcv_window        — optional precomputed (close, high, low, volume)
+                          float64 arrays mirroring candles_5m exactly. Skips
+                          the per-call array build — the backtest passes
+                          zero-copy views of SymbolSeries arrays here.
+    session_vwap        — optional precomputed session VWAP (the backtest's
+                          O(1) prefix-sum path).
+    entry_short_circuit — evaluate the cheap entry gates (support, pattern,
+                          VWAP, volume) first and return early when one fails,
+                          skipping the TA-Lib calls. The condition logic is
+                          identical either way — only evaluation is lazier —
+                          so live (False: full snapshot for the dashboard) and
+                          backtest (True) stay in parity.
     """
     ind = IndicatorResult()
     if not candles_5m or len(candles_5m) < 3:
@@ -114,17 +144,69 @@ def compute_indicators(
     # ── Slice isolation: only the tail needed for lookback enters the C calls.
     # TALIB_LOOKBACK bars is enough for RSI(14)/ADX(14)/MACD(26,9) to fully
     # converge while skipping the multi-day warmup history.
-    window = candles_5m[-_LOOKBACK:] if len(candles_5m) > _LOOKBACK else candles_5m
-
-    # np.fromiter builds each contiguous float64 array in one C-level pass —
-    # no intermediate tuple list and no non-contiguous column copies.
-    n      = len(window)
-    close  = np.fromiter((c.close  for c in window), np.float64, n)
-    high   = np.fromiter((c.high   for c in window), np.float64, n)
-    low    = np.fromiter((c.low    for c in window), np.float64, n)
-    volume = np.fromiter((c.volume for c in window), np.float64, n)
+    if ohlcv_window is not None:
+        close, high, low, volume = ohlcv_window
+        if close.size > _LOOKBACK:   # same defensive window as the list path
+            close  = close[-_LOOKBACK:]
+            high   = high[-_LOOKBACK:]
+            low    = low[-_LOOKBACK:]
+            volume = volume[-_LOOKBACK:]
+    else:
+        window = candles_5m[-_LOOKBACK:] if len(candles_5m) > _LOOKBACK else candles_5m
+        # np.fromiter builds each contiguous float64 array in one C-level pass —
+        # no intermediate tuple list and no non-contiguous column copies.
+        n      = len(window)
+        close  = np.fromiter((c.close  for c in window), np.float64, n)
+        high   = np.fromiter((c.high   for c in window), np.float64, n)
+        low    = np.fromiter((c.low    for c in window), np.float64, n)
+        volume = np.fromiter((c.volume for c in window), np.float64, n)
 
     ltp = float(close[-1])
+
+    # ── Cheap gates first (support / pattern / VWAP / volume) ─────────────────
+    # Ordered before the TA-Lib block so entry_short_circuit can reject most
+    # bars without paying for RSI/MACD/ADX. Values are identical to the old
+    # bottom-of-function placement — computation order doesn't affect them.
+
+    # Structural support: lowest low of the last SWING_LOW_BARS bars excluding
+    # the current one — taken from the already-built `low` array.
+    sl_win = low[-(cfg.SWING_LOW_BARS + 1):-1]
+    ind.support_level = float(sl_win.min()) if sl_win.size else 0.0
+    if ind.support_level > 0:
+        dist = (ltp - ind.support_level) / ind.support_level
+        ind.near_support = 0 <= dist <= cfg.SUPPORT_TOUCH_PCT
+
+    # Candlestick pattern
+    pat = _detect_bullish_pattern(
+        candles_5m[-1], candles_5m[-2],
+        candles_5m[-3] if len(candles_5m) >= 3 else None,
+    )
+    ind.candle_pattern  = pat
+    ind.bullish_pattern = pat is not None
+
+    # Session VWAP (full session bars, not the lookback slice)
+    if session_vwap is not None:
+        ind.vwap = session_vwap
+    else:
+        sess = session_candles_5m if session_candles_5m else candles_5m
+        if sess:
+            ind.vwap = session_vwap_candles(sess)
+    ind.price_above_vwap = ind.vwap > 0 and ltp > ind.vwap
+
+    # Volume surge
+    prev_vol = volume[:-1]
+    if prev_vol.size:
+        avg = (prev_vol[-cfg.VOLUME_MA_PERIOD:].mean()
+               if prev_vol.size >= cfg.VOLUME_MA_PERIOD else prev_vol.mean())
+        ind.avg_volume_20 = float(avg)
+        ind.volume_surge  = (ind.avg_volume_20 > 0
+                             and float(volume[-1]) > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
+
+    if entry_short_circuit and not (ind.near_support and ind.bullish_pattern
+                                    and ind.price_above_vwap and ind.volume_surge):
+        # A cheap gate already vetoes the entry — the RSI/MACD/ADX values can't
+        # change the (conjunctive) decision, so skip the TA-Lib calls entirely.
+        return ind
 
     # ── RSI (14) ────────────────────────────────────────────────────────────
     rsi_arr = talib.RSI(close, timeperiod=cfg.RSI_PERIOD)
@@ -185,37 +267,5 @@ def compute_indicators(
     ind.adx_ok   = (ind.adx is not None and ind.adx > cfg.ADX_THRESHOLD
                     and ind.plus_di is not None and ind.minus_di is not None
                     and ind.plus_di > ind.minus_di)
-
-    # ── Session VWAP (full session bars, not the lookback slice) ──────────────
-    sess = session_candles_5m if session_candles_5m else candles_5m
-    if sess:
-        ind.vwap = session_vwap_candles(sess)
-    ind.price_above_vwap = ind.vwap > 0 and ltp > ind.vwap
-
-    # ── Volume surge ──────────────────────────────────────────────────────────
-    prev_vol = volume[:-1]
-    if prev_vol.size:
-        avg = (prev_vol[-cfg.VOLUME_MA_PERIOD:].mean()
-               if prev_vol.size >= cfg.VOLUME_MA_PERIOD else prev_vol.mean())
-        ind.avg_volume_20 = float(avg)
-        ind.volume_surge  = (ind.avg_volume_20 > 0
-                             and float(volume[-1]) > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
-
-    # ── Structural support (swing low) ────────────────────────────────────────
-    # Lowest low of the last SWING_LOW_BARS bars excluding the current one —
-    # taken from the already-built `low` array (the window always covers it).
-    sl_win = low[-(cfg.SWING_LOW_BARS + 1):-1]
-    ind.support_level = float(sl_win.min()) if sl_win.size else 0.0
-    if ind.support_level > 0:
-        dist = (ltp - ind.support_level) / ind.support_level
-        ind.near_support = 0 <= dist <= cfg.SUPPORT_TOUCH_PCT
-
-    # ── Candlestick pattern ───────────────────────────────────────────────────
-    c     = candles_5m[-1]
-    prev  = candles_5m[-2]
-    prev2 = candles_5m[-3] if len(candles_5m) >= 3 else None
-    pat   = _detect_bullish_pattern(c, prev, prev2)
-    ind.candle_pattern  = pat
-    ind.bullish_pattern = pat is not None
 
     return ind

@@ -30,14 +30,17 @@ from app.backtest.fills import (
 )
 from app.backtest.metrics import compute_metrics
 from app.backtest.portfolio import BTPosition, Portfolio
-from app.engine.indicator_engine import compute_indicators
+from app.engine.indicator_engine import compute_indicators, session_vwap_from_cumsums
 from app.engine.position_manager import calc_quantity, can_enter
 from app.engine.trend_filter import check_trend
 from app.models import Candle
 
 _SCAN_START  = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"   # "09:45"
 _CUTOFF      = f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d}"           # "14:30"
-_LOOKBACK    = cfg.TALIB_LOOKBACK + 40   # +40 covers pattern lookback and swing_low bars
+# compute_indicators windows to TALIB_LOOKBACK internally; pattern (3 bars) and
+# swing-low (11 bars) lookbacks are subsets of it, so slicing exactly this many
+# bars is equivalent — no need for extra margin.
+_LOOKBACK    = cfg.TALIB_LOOKBACK
 
 
 def _scan_symbol(
@@ -72,13 +75,20 @@ def _scan_symbol(
     if not gate.all_clear:
         return None
 
-    lo       = max(0, gidx - _LOOKBACK + 1)
-    lookback = ss.series[lo : gidx + 1]
-    if len(lookback) < 30:
+    lo  = max(0, gidx - _LOOKBACK + 1)
+    end = gidx + 1
+    if end - lo < 30:
         return None
 
-    session = ss.series[day_start : gidx + 1]
-    ind     = compute_indicators(lookback, session_candles_5m=session)
+    # Zero-copy views of the precomputed SymbolSeries arrays + O(1) prefix-sum
+    # session VWAP; entry_short_circuit skips TA-Lib on cheap-gate rejections.
+    ind = compute_indicators(
+        ss.series[lo:end],
+        ohlcv_window=(ss.closes[lo:end], ss.highs[lo:end],
+                      ss.lows[lo:end],   ss.vols[lo:end]),
+        session_vwap=session_vwap_from_cumsums(ss.cum_pv, ss.cum_v, day_start, gidx),
+        entry_short_circuit=True,
+    )
 
     # depth_bullish always True in backtest — no live order-book data available.
     # Kept in the condition for structural parity with the live entry_engine.
@@ -145,9 +155,8 @@ def _simulate_day(
         return []
 
     port = Portfolio()
-    nifty_day_open = nifty.series[nifty.by_day[day][0]].open
-    cum_tpv = 0.0
-    cum_vol = 0.0
+    nifty_day_start = nifty.by_day[day][0]
+    nifty_day_open  = nifty.series[nifty_day_start].open
 
     # Hoist the per-day lookups out of the bar loop: each entry is
     # (ss, day_map, day_idxs, hour_open_day) for a symbol that trades today.
@@ -163,11 +172,12 @@ def _simulate_day(
         by_token[token] = entry
 
     for tm, ngidx in grid:
-        nbar = nifty.series[ngidx]
-        cum_tpv += ((nbar.high + nbar.low + nbar.close) / 3.0) * nbar.volume
-        cum_vol += nbar.volume
-        nifty_ltp  = nbar.close
-        nifty_vwap = (cum_tpv / cum_vol) if cum_vol > 0 else 0.0
+        nifty_ltp  = nifty.series[ngidx].close
+        # O(1) session VWAP from the precomputed prefix sums — same formula the
+        # per-stock scan uses, forward-in-time only (no look-ahead).
+        nifty_vwap = session_vwap_from_cumsums(
+            nifty.cum_pv, nifty.cum_v, nifty_day_start, ngidx
+        )
         nifty_daily_green = nifty_ltp > nifty_day_open
         # nifty_vwap==0 means NIFTY has no volume data — block entry (conservative)
         nifty_above_vwap  = nifty_vwap > 0.0 and nifty_ltp > nifty_vwap

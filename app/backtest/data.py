@@ -11,7 +11,9 @@ symbol's bars into a per-day index for the replay engine.
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+import numpy as np
 
 import app.config as cfg
 from app.engine.watchlist import fetch_active_watchlist
@@ -28,6 +30,17 @@ class SymbolSeries:
     at:        Dict[str, Dict[str, int]]    = field(default_factory=dict)  # date -> {"HH:MM": idx}
     hour_open: Dict[str, Dict[str, float]]  = field(default_factory=dict)  # date -> {HH: open}
 
+    # NumPy mirrors of `series`, built once by index_days(). The replay engine
+    # slices these as zero-copy views instead of rebuilding float64 arrays from
+    # Candle objects on every scan. cum_pv/cum_v are prefix sums that make the
+    # session VWAP an O(1) subtraction (see session_vwap_from_cumsums).
+    closes: Optional[np.ndarray] = None
+    highs:  Optional[np.ndarray] = None
+    lows:   Optional[np.ndarray] = None
+    vols:   Optional[np.ndarray] = None
+    cum_pv: Optional[np.ndarray] = None   # cumsum of (H+L+C)·V — VWAP numerator ×3
+    cum_v:  Optional[np.ndarray] = None   # cumsum of V
+
     def index_days(self) -> None:
         for i, c in enumerate(self.series):
             d  = c.start_time[:10]
@@ -36,6 +49,14 @@ class SymbolSeries:
             self.by_day.setdefault(d, []).append(i)
             self.at.setdefault(d, {})[tm] = i
             self.hour_open.setdefault(d, {}).setdefault(hr, self.series[i].open)
+
+        n = len(self.series)
+        self.closes = np.fromiter((c.close  for c in self.series), np.float64, n)
+        self.highs  = np.fromiter((c.high   for c in self.series), np.float64, n)
+        self.lows   = np.fromiter((c.low    for c in self.series), np.float64, n)
+        self.vols   = np.fromiter((c.volume for c in self.series), np.float64, n)
+        self.cum_pv = ((self.highs + self.lows + self.closes) * self.vols).cumsum()
+        self.cum_v  = self.vols.cumsum()
 
 
 def _sort_candles(candles: List[Candle]) -> List[Candle]:

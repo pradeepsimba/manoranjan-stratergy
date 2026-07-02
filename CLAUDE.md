@@ -45,10 +45,12 @@ Driven by `scheduler.SchedulerService._phase_driver` (IST wall clock):
    - `_tick_entries` — re-scan stocks that ticked since last cycle (`dirty_ticks`), on the **forming** 5m bar; fill those whose 7 signals align. Entries stop at 14:30 (CUTOFF); exits continue to 15:30.
    - `_full_scan_all` — at entry and every 5 min, scans the **entire** `full_watchlist` to populate `indicator_snapshot` (for the `/indicators` page). Only `active_watchlist` stocks are `tradeable` and can fire signals; `scan_stock(..., tradeable=False)` updates indicators but never returns a signal. Non-Gemini stocks get no WS ticks, so this 5-min scan is their only indicator source.
    - Heavy indicator math (`scan_stock`) runs in `_SCAN_POOL` (ThreadPoolExecutor); fills/exits/DB stay on the event loop.
-   - **Mid-session restart recovery:** if `active_watchlist` is empty on entering ACTIVE/CUTOFF, premarket + historical load run on the fly.
+   - **Mid-session restart recovery:** if `active_watchlist` is empty on entering ACTIVE/CUTOFF, premarket + historical load run on the fly (retrying every 60s if the watchlist fetch fails). Today's positions/`traded_today`/`daily_pnl`/closed trades are then restored from the DB (`_restore_positions_from_db`) *before* the WS starts, and restored open symbols are force-added to the watchlists so their SL/target monitoring resumes. `_run_eod` performs the same restore so a restart after 15:30 still squares off orphaned OPEN rows and writes correct stats.
 4. **15:30 CLOSED** — `_run_eod()` squares off survivors, writes `daily_stats`, resets all daily state, then sleeps to the next premarket.
 
 Strategy core (shared by live **and** backtest, keep it that way): `check_trend` → `compute_indicators` → entry conditions → `calc_quantity`.
+
+**Backtest fast path (same function, same math):** `compute_indicators` accepts keyword-only `ohlcv_window` (precomputed float64 array views that MUST mirror `candles_5m` — built once per symbol in `SymbolSeries.index_days`), `session_vwap` (O(1) prefix-sum VWAP via `session_vwap_from_cumsums`), and `entry_short_circuit=True` (evaluates the cheap gates — support/pattern/VWAP/volume — first and skips the TA-Lib calls when one already vetoes the conjunctive entry; the returned `IndicatorResult` is then partial, which is fine because the caller rejects it). Live always calls with defaults so the dashboard gets the full snapshot. Don't reimplement any condition outside `compute_indicators` to "optimize" the backtest — pass precomputed inputs in instead.
 
 **Entry conditions:** near_support, bullish_pattern, adx_ok, rsi_ok (>30 or rising 3 bars), macd_bullish_cross, volume_surge, price_above_vwap — **plus** `depth_bullish` (order-book buy-side ratio ≥ 0.4, i.e. not sell-skewed). Plus a 4-gate trend filter: stock daily-green, stock hourly-green, NIFTY daily-green, NIFTY above session-VWAP.
 
@@ -85,7 +87,7 @@ app/services/
   paper_trade.py             place_paper_order, check_tick_exit, force_close, _finalize
   snapshot.py                stub_entry / apply_depth — shared snapshot-entry helpers (STATE_UPDATE, INDICATOR_UPDATE, /api/indicators)
   database.py                asyncpg pool + schema + positions/scan_log/daily_stats/backtest tables
-app/backtest/                data.py, engine.py, portfolio.py, fills.py, metrics.py
+app/backtest/                data.py (SymbolSeries + per-symbol numpy mirrors/prefix sums), engine.py, portfolio.py, fills.py, metrics.py
 app/api/dashboard.py         REST + WS endpoints (/api/status, /api/indicators, /api/backtest[/{id}/trades|export.csv], /ws/dashboard, …)
 app/ws/dashboard_ws.py       browser WS broadcast manager
 static/                      index.html, indicators.html, js/dashboard.js, js/indicators.js, css/

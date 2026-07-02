@@ -91,6 +91,9 @@ class MarketDataService:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # Cancellation skips _run_ws's post-loop status update — set it here so
+        # the dashboard doesn't show "WS Connected" after the EOD shutdown.
+        self.state.ws_status = "WS Stopped"
 
     # ── WebSocket connection loops ─────────────────────────────────────────────
 
