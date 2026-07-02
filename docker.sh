@@ -5,12 +5,13 @@
 ACTION=$1
 
 if [ -z "$ACTION" ]; then
-    echo "Usage: bash docker.sh [build | deploy | stop | logs | restart]"
+    echo "Usage: bash docker.sh [build | deploy | stop | logs | restart | remove]"
     echo "  --build, build     Build the Docker images"
     echo "  --deploy, deploy   Start the services in the background"
     echo "  --stop, stop       Stop and remove the services"
     echo "  --logs, logs       Watch application logs"
     echo "  --restart, restart Restart the services"
+    echo "  --remove, remove   Stop services and remove containers, volumes, and images"
     exit 1
 fi
 
@@ -35,9 +36,13 @@ case "$ACTION" in
         echo "=== Restarting Docker services ==="
         docker compose restart
         ;;
+    remove|--remove|clean|--clean)
+        echo "=== Removing Docker services, volumes, and images ==="
+        docker compose down --volumes --rmi all --remove-orphans
+        ;;
     *)
         echo "Unknown action: $ACTION"
-        echo "Usage: bash docker.sh [build | deploy | stop | logs | restart]"
+        echo "Usage: bash docker.sh [build | deploy | stop | logs | restart | remove]"
         exit 1
         ;;
 esac
