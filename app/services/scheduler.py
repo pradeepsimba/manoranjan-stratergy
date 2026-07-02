@@ -101,6 +101,7 @@ class SchedulerService:
         self._tasks = [
             asyncio.create_task(self._phase_driver()),
             asyncio.create_task(self._push_dashboard_loop()),
+            asyncio.create_task(self._push_tick_updates_loop()),
         ]
 
     async def stop(self) -> None:
@@ -129,42 +130,33 @@ class SchedulerService:
                     await self._run_premarket()
                     await asyncio.sleep(_seconds_until(cfg.MARKET_OPEN_HOUR, cfg.MARKET_OPEN_MIN))
 
-                elif h < cfg.SCAN_START_HOUR or (h == cfg.SCAN_START_HOUR and m < cfg.SCAN_START_MIN):
-                    st.phase = TradingPhase.WAIT_ZONE
-                    if not st.active_watchlist:
-                        # Started during wait-zone without a prior premarket run.
-                        print("=== RECOVERY: restarted during WAIT_ZONE — running premarket first ===")
-                        st.api_status = "Recovery: fetching watchlist…"
-                        await self._run_premarket()
-                        st.phase = TradingPhase.WAIT_ZONE  # restore — premarket sets PRE_MARKET
-                    await self._run_wait_zone()
-                    await asyncio.sleep(_seconds_until(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN))
-
-                elif h < cfg.CUTOFF_HOUR or (h == cfg.CUTOFF_HOUR and m < cfg.CUTOFF_MIN):
-                    st.phase = TradingPhase.ACTIVE
-                    if not st.active_watchlist:
-                        # Mid-session restart: premarket and wait_zone were missed.
-                        # Run them now so the watchlist, candles, and WS are all set up.
-                        print("=== RECOVERY: restarted during ACTIVE — running premarket + load ===")
-                        st.api_status = "Recovery: fetching watchlist…"
-                        await self._run_premarket()
-                        st.phase = TradingPhase.ACTIVE   # restore — premarket sets PRE_MARKET
-                        st.api_status = "Recovery: loading historical data…"
-                        await self._run_wait_zone()
-                        st.phase = TradingPhase.ACTIVE   # restore — wait_zone sets WAIT_ZONE
-                    await self._run_active_phase()
-
                 elif h < cfg.SESSION_END_HOUR or (h == cfg.SESSION_END_HOUR and m < cfg.SESSION_END_MIN):
-                    st.phase = TradingPhase.CUTOFF
+                    if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
+                        st.phase = TradingPhase.CUTOFF
+                    elif _past(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN):
+                        st.phase = TradingPhase.ACTIVE
+                    else:
+                        st.phase = TradingPhase.WAIT_ZONE
+
                     if not st.active_watchlist:
-                        print("=== RECOVERY: restarted during CUTOFF — running premarket + load ===")
+                        phase_name = st.phase.value
+                        print(f"=== RECOVERY: restarted during {phase_name} — running premarket + load ===")
                         st.api_status = "Recovery: fetching watchlist…"
                         await self._run_premarket()
-                        st.phase = TradingPhase.CUTOFF   # restore — premarket sets PRE_MARKET
+                    
+                    if not self._mkt._running:
                         st.api_status = "Recovery: loading historical data…"
                         await self._run_wait_zone()
-                        st.phase = TradingPhase.CUTOFF   # restore — wait_zone sets WAIT_ZONE
-                    await asyncio.sleep(_seconds_until(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN))
+
+                    # Restore phase
+                    if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
+                        st.phase = TradingPhase.CUTOFF
+                    elif _past(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN):
+                        st.phase = TradingPhase.ACTIVE
+                    else:
+                        st.phase = TradingPhase.WAIT_ZONE
+
+                    await self._run_active_phase()
 
                 else:
                     st.phase = TradingPhase.CLOSED
@@ -236,6 +228,10 @@ class SchedulerService:
             await self._mkt.stop()
         self._mkt.start()
 
+        # Seed indicator_snapshot for ALL stocks immediately after loading history
+        loop = asyncio.get_running_loop()
+        asyncio.create_task(self._full_scan_all(loop))
+
     async def _run_active_phase(self) -> None:
         """
         Tick-wise engine. Runs from 09:45 until 15:30, every TICK_EVAL_INTERVAL_MS:
@@ -259,12 +255,15 @@ class SchedulerService:
 
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
             try:
-                in_cutoff = _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN)
-                st.phase  = TradingPhase.CUTOFF if in_cutoff else TradingPhase.ACTIVE
+                if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
+                    st.phase = TradingPhase.CUTOFF
+                elif _past(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN):
+                    st.phase = TradingPhase.ACTIVE
+                else:
+                    st.phase = TradingPhase.WAIT_ZONE
 
                 await self._tick_exits()
-                if not in_cutoff:
-                    await self._tick_entries(loop)
+                await self._tick_entries(loop)
 
                 # Refresh all stocks every 5 minutes (non-Gemini stocks only update here)
                 now_ts = loop.time()
@@ -360,17 +359,11 @@ class SchedulerService:
         results = await asyncio.gather(*tasks)
         signals = [sig for chunk_res in results for sig in chunk_res]
 
-        # Push indicator delta immediately so browsers update per-scan-cycle
-        # (~100 ms) rather than waiting up to 1 second for the full broadcast.
-        if self._ws.count() > 0:
-            snap_delta = {t2n[tok]: st.indicator_snapshot[t2n[tok]]
-                          for tok in dirty
-                          if tok in t2n and t2n[tok] in st.indicator_snapshot}
-            if snap_delta:
-                asyncio.create_task(self._ws.broadcast(
-                    json.dumps({"type": "INDICATOR_UPDATE",
-                                "indicatorSnapshot": snap_delta}, default=str)
-                ))
+        # Delta pushes are now handled globally in _push_tick_updates_loop
+
+        # Only check entries and place trades if we are in the ACTIVE phase!
+        if st.phase != TradingPhase.ACTIVE:
+            return
 
         # Only fill trades when capacity allows — scanning always runs so that
         # indicator_snapshot stays current even at max concurrent positions.
@@ -450,6 +443,7 @@ class SchedulerService:
         st.nifty_candles_5m.clear()
         st.nifty_candles_1d.clear()
         st.dirty_ticks.clear()
+        st.dirty_ticks_push.clear()
         st.token_to_name.clear()
         st.full_watchlist.clear()
         st.active_watchlist.clear()
@@ -550,16 +544,77 @@ class SchedulerService:
             "indicatorSnapshot": self._build_indicator_snapshot(st),
         }
 
+    async def _push_tick_updates_loop(self) -> None:
+        """Pushes real-time LTP delta updates to the UI every 100ms in all active/wait/cutoff phases."""
+        import json
+        st = get_state()
+        while True:
+            try:
+                if self._ws.count() > 0 and st.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
+                    dirty, st.dirty_ticks_push = st.dirty_ticks_push, set()
+                    if dirty:
+                        t2n = st.token_to_name
+                        snap_delta = {}
+                        for tok in dirty:
+                            if tok in t2n:
+                                sym = t2n[tok]
+                                live_ltp = round(st.ltp.get(sym, 0.0), 2)
+                                depth = st.depth.get(sym, {})
+                                if sym in st.indicator_snapshot:
+                                    entry = dict(st.indicator_snapshot[sym])
+                                else:
+                                    entry = {
+                                        "bar_time": "—",
+                                        "rsi": None, "adx": None, "plus_di": None, "minus_di": None,
+                                        "macd": None, "macd_signal": None, "macd_hist": None,
+                                        "support": None, "vwap": None, "above_vwap": None, "pattern": None,
+                                    }
+                                entry["ltp"] = live_ltp
+                                if depth:
+                                    entry["bid"] = round(depth["bid"], 2) if "bid" in depth else entry.get("bid")
+                                    entry["ask"] = round(depth["ask"], 2) if "ask" in depth else entry.get("ask")
+                                    entry["spread"] = depth.get("spread") if "spread" in depth else entry.get("spread")
+                                    entry["buy_qty"] = depth.get("buy_qty") if "buy_qty" in depth else entry.get("buy_qty")
+                                    entry["sell_qty"] = depth.get("sell_qty") if "sell_qty" in depth else entry.get("sell_qty")
+                                    entry["ratio"] = depth.get("ratio") if "ratio" in depth else entry.get("ratio")
+                                snap_delta[sym] = entry
+                        
+                        if snap_delta:
+                            await self._ws.broadcast(
+                                json.dumps({"type": "INDICATOR_UPDATE",
+                                            "indicatorSnapshot": snap_delta}, default=str)
+                            )
+            except Exception as e:
+                print(f"Tick delta push error: {e}")
+            await asyncio.sleep(0.1)
+
     @staticmethod
     def _build_indicator_snapshot(st) -> dict:
         """
-        Return indicator_snapshot extended with LTP-only stubs for every
-        full_watchlist stock that hasn't been scanned yet.  This ensures the
-        browser always receives all watchlist names — even before the first scan
-        cycle completes — so search works immediately after page load.
+        Return indicator_snapshot extended with LTP-only stubs and always updated with
+        the latest live LTP and order-book depth from st.ltp/st.depth, so prices/bids/asks update in real-time.
         """
-        snap = dict(st.indicator_snapshot)
+        snap = {}
         for sym in st.full_watchlist:
-            if sym not in snap:
-                snap[sym] = {"ltp": round(st.ltp.get(sym, 0.0), 2), "bar_time": "—"}
+            live_ltp = round(st.ltp.get(sym, 0.0), 2)
+            depth = st.depth.get(sym, {})
+            if sym in st.indicator_snapshot:
+                entry = dict(st.indicator_snapshot[sym])
+                entry["ltp"] = live_ltp if live_ltp > 0 else entry.get("ltp", 0.0)
+            else:
+                entry = {
+                    "ltp": live_ltp,
+                    "bar_time": "—",
+                    "rsi": None, "adx": None, "plus_di": None, "minus_di": None,
+                    "macd": None, "macd_signal": None, "macd_hist": None,
+                    "support": None, "vwap": None, "above_vwap": None, "pattern": None,
+                }
+            if depth:
+                entry["bid"] = round(depth["bid"], 2) if "bid" in depth else entry.get("bid")
+                entry["ask"] = round(depth["ask"], 2) if "ask" in depth else entry.get("ask")
+                entry["spread"] = depth.get("spread") if "spread" in depth else entry.get("spread")
+                entry["buy_qty"] = depth.get("buy_qty") if "buy_qty" in depth else entry.get("buy_qty")
+                entry["sell_qty"] = depth.get("sell_qty") if "sell_qty" in depth else entry.get("sell_qty")
+                entry["ratio"] = depth.get("ratio") if "ratio" in depth else entry.get("ratio")
+            snap[sym] = entry
         return snap

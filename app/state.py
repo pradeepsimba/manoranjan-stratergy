@@ -82,6 +82,7 @@ class AppState:
         # Tokens that received a tick since the last evaluation cycle. The WS
         # thread adds; the tick loop swaps it out and evaluates those stocks.
         self.dirty_ticks: Set[str] = set()
+        self.dirty_ticks_push: Set[str] = set()
 
         # Per-token locks: each symbol's candle list gets its own lock so WS
         # tick writes and ThreadPoolExecutor scan reads don't contend across

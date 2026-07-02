@@ -90,10 +90,24 @@ function connect() {
       // Merge fresher WS data; always force entry.symbol = the JSON key
       // so search never accidentally sees a token string instead of a name.
       Object.keys(snap).forEach(function(sym) {
-        var entry = Object.assign({}, snap[sym]);
-        entry.symbol = sym;
-        entry._normSymbol = normalise(sym);
-        rowsMap[sym] = entry;
+        if (!rowsMap[sym]) {
+          rowsMap[sym] = { symbol: sym, _normSymbol: normalise(sym) };
+        }
+        var target = rowsMap[sym];
+        var source = snap[sym];
+        Object.keys(source).forEach(function(key) {
+          if (source[key] !== null && source[key] !== undefined) {
+            target[key] = source[key];
+          } else if (target[key] === undefined) {
+            target[key] = null;
+          }
+        });
+        // Always copy core fields even if they are null in update
+        if ('ltp' in source) target.ltp = source.ltp;
+        if ('bar_time' in source && source.bar_time !== '—') target.bar_time = source.bar_time;
+        if ('spread' in source) target.spread = source.spread;
+        if ('bid' in source) target.bid = source.bid;
+        if ('ask' in source) target.ask = source.ask;
       });
       scheduleRender();   // coalesces into one paint frame even if ticks arrive faster
       _saveCache();

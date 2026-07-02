@@ -195,15 +195,17 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
     snapshot = dict(st.indicator_snapshot)
     
     for sym, tok in list(wl.items()):
+        live_ltp = round(st.ltp.get(sym, 0.0), 2)
+        depth = st.depth.get(sym, {})
         if sym in snapshot:
             entry = dict(snapshot[sym])
             entry["symbol"] = sym
+            entry["ltp"] = live_ltp if live_ltp > 0 else entry.get("ltp", 0.0)
         else:
             # Stub if background scanner hasn't processed this symbol yet
             c5 = list(st.candles_5m.get(tok, []))
-            ltp = st.ltp.get(sym, c5[-1].close if c5 else 0.0)
+            ltp = live_ltp if live_ltp > 0 else (c5[-1].close if c5 else 0.0)
             bar_t = c5[-1].start_time[11:16] if c5 else "—"
-            depth = st.depth.get(sym, {})
             entry = dict(
                 symbol=sym,
                 ltp=round(ltp, 2),
@@ -211,13 +213,14 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
                 rsi=None, adx=None, plus_di=None, minus_di=None,
                 macd=None, macd_signal=None, macd_hist=None,
                 support=None, vwap=None, above_vwap=None, pattern=None,
-                bid=round(depth["bid"], 2) if "bid" in depth else None,
-                ask=round(depth["ask"], 2) if "ask" in depth else None,
-                spread=depth.get("spread"),
-                buy_qty=depth.get("buy_qty"),
-                sell_qty=depth.get("sell_qty"),
-                ratio=depth.get("ratio"),
             )
+        if depth:
+            entry["bid"] = round(depth["bid"], 2) if "bid" in depth else entry.get("bid")
+            entry["ask"] = round(depth["ask"], 2) if "ask" in depth else entry.get("ask")
+            entry["spread"] = depth.get("spread") if "spread" in depth else entry.get("spread")
+            entry["buy_qty"] = depth.get("buy_qty") if "buy_qty" in depth else entry.get("buy_qty")
+            entry["sell_qty"] = depth.get("sell_qty") if "sell_qty" in depth else entry.get("sell_qty")
+            entry["ratio"] = depth.get("ratio") if "ratio" in depth else entry.get("ratio")
         out.append(entry)
 
     return sorted(out, key=lambda x: x["symbol"])

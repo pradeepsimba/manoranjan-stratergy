@@ -262,8 +262,9 @@ class MarketDataService:
         # Tick-wise engine: flag this stock for re-evaluation on the next loop
         # cycle. Only 5m ticks update the forming bar; 1h ticks must not enqueue
         # dirty_ticks or they trigger scans on stale 5m bars. Only while ACTIVE.
-        if interval == "5m" and symbol != cfg.NIFTY50_TOKEN and self.state.phase == TradingPhase.ACTIVE:
+        if interval == "5m" and symbol != cfg.NIFTY50_TOKEN and self.state.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
             self.state.dirty_ticks.add(symbol)
+            self.state.dirty_ticks_push.add(symbol)
 
     # ── Candle upsert helpers ─────────────────────────────────────────────────
 
