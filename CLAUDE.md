@@ -87,18 +87,33 @@ app/services/
 app/backtest/                data.py, engine.py, portfolio.py, fills.py, metrics.py
 app/api/dashboard.py         REST + WS endpoints (/api/status, /api/indicators, /api/backtest[/{id}/trades|export.csv], /ws/dashboard, …)
 app/ws/dashboard_ws.py       browser WS broadcast manager
-static/                      index.html, indicators.html, js/dashboard.js, css/
+static/                      index.html, indicators.html, js/dashboard.js, js/indicators.js, css/
+app/engine/watchlist.py      fetch_active_watchlist — client status → full_watchlist (normalises non-breaking spaces)
 ```
 
 Backtest is triggered from the dashboard: `POST /api/backtest {from_date, to_date, slippage_bps?, capital?}` runs in a background task and is polled via `GET /api/backtest/{id}`; results export at `…/export.csv`.
 
+## WebSocket broadcast types
+
+The `/ws/dashboard` endpoint broadcasts two distinct message shapes — **both pages connect to the same endpoint**:
+
+| `type` | Cadence | Payload |
+|--------|---------|---------|
+| `STATE_UPDATE` | 1 s | Full dashboard payload: `clock`, `phase`, `wsStatus`, `niftyLtp`, `positions`, `scanResults`, `geminiList`, `watchlist`, `indicatorSnapshot` |
+| `INDICATOR_UPDATE` | ~100 ms (per dirty tick) | Only `indicatorSnapshot` — all other fields absent |
+
+**Critical:** `dashboard.js` (main page) filters to `STATE_UPDATE` only — rendering on `INDICATOR_UPDATE` would blank every scalar field (nifty, clock, watchlist, etc.). `indicators.js` accepts both types and merges `indicatorSnapshot` into its local `rowsMap`.
+
 ## Gotchas & known limitations
 
+- **Mid-session recovery phase restoration:** `_run_premarket()` sets `st.phase = PRE_MARKET` and `_run_wait_zone()` sets `st.phase = WAIT_ZONE` as side-effects, even when called from mid-session recovery inside `_phase_driver`. After each recovery sub-call, explicitly restore `st.phase` to the correct running phase (ACTIVE/CUTOFF) or the dashboard will show the wrong state for minutes.
+- **`_build_indicator_snapshot` on `SchedulerService`:** the STATE_UPDATE payload's `indicatorSnapshot` comes from this static method, which fills in LTP stubs for `full_watchlist` stocks that haven't been scanned yet. If you add new fields to the snapshot, add them here too.
 - **Pure tick-wise on the forming bar** (by design): RSI/MACD/ADX/volume are recomputed on the *incomplete* 5m bar each cycle, so they jitter and signals can appear/vanish within a bar. Volume-surge naturally fires late in each bar.
 - **`GEMINI_MODEL`** — must be a real `google-genai` model id (currently `gemini-2.5-flash`). On any failure the screen returns `[]` and silently falls back to the (capped) full watchlist, so a bad id disables the AI filter without an error. Note: Google-Search grounding and a `response_schema` are **mutually exclusive** — `gemini_filter` uses grounding and parses the JSON array out of the text (`_find_json_array`); do not re-add `response_schema`.
 - **Daily-green gate** uses today's open = the open of today's first 5m bar (derived in `scan_stock` / `compute_nifty_gates`). The 1d series is no longer fetched or used; if you re-add it, remember it is not updated by the WS.
 - **Backtest hourly gate** buckets by clock-hour from 5m data, which may not match the server's real 1h candle boundaries — possible live/backtest parity drift.
 - **JSONB reads:** asyncpg returns `jsonb` columns as strings — decode with `_decode_jsonb` (see `database.py`) on any new read path.
+- **Frontend DOM diffing:** both `dashboard.js` and `indicators.js` maintain a `_rowEls` / `_posRowEls` cache (symbol → `<tr>`) and patch cells in-place via `_setCell(td, html, cls)` which no-ops when content is unchanged. Reorder uses `DocumentFragment` appended once (atomic). `scheduleRender()` + `requestAnimationFrame` coalesces rapid WS ticks into one paint. Do not replace this pattern with `tbody.innerHTML = ...` — it re-introduces flash.
 - **Secrets:** `.env` is gitignored; never put real keys in `config.py` defaults or `.env.example` (GitHub push-protection will block, and it has happened here).
 
 ## Conventions for edits

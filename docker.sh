@@ -26,7 +26,16 @@ case "$ACTION" in
         ;;
     stop|--stop|down|--down)
         echo "=== Stopping Docker services ==="
-        docker compose down
+        if ! docker compose down; then
+            echo ""
+            echo "⚠️  Error: Docker failed to stop the containers (Permission Denied)."
+            echo "This is commonly caused by AppArmor profiles blocking the Docker daemon on Ubuntu."
+            echo "Please try running the following command to resolve this:"
+            echo "  sudo aa-remove-unknown"
+            echo "Or restart the Docker service:"
+            echo "  sudo systemctl restart docker"
+            exit 1
+        fi
         ;;
     logs|--logs)
         echo "=== Streaming app logs (Ctrl+C to exit) ==="
@@ -38,7 +47,16 @@ case "$ACTION" in
         ;;
     remove|--remove|clean|--clean)
         echo "=== Removing Docker services, volumes, and images ==="
-        docker compose down --volumes --rmi all --remove-orphans
+        if ! docker compose down --volumes --rmi all --remove-orphans; then
+            echo ""
+            echo "⚠️  Error: Docker failed to remove the containers (Permission Denied)."
+            echo "This is commonly caused by AppArmor profiles blocking the Docker daemon on Ubuntu."
+            echo "Please try running the following command to resolve this:"
+            echo "  sudo aa-remove-unknown"
+            echo "Or restart the Docker service:"
+            echo "  sudo systemctl restart docker"
+            exit 1
+        fi
         ;;
     *)
         echo "Unknown action: $ACTION"
