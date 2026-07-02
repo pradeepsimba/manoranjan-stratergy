@@ -8,12 +8,13 @@ from typing import Any, Dict, List
 import csv
 import io
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 import app.config as cfg
 from app.backtest.engine import run_backtest
+from app.services.snapshot import apply_depth, stub_entry
 from app.state import get_state
 from app.ws.dashboard_ws import ws_manager
 
@@ -193,34 +194,22 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
 
     out: List[Dict[str, Any]] = []
     snapshot = dict(st.indicator_snapshot)
-    
+
     for sym, tok in list(wl.items()):
         live_ltp = round(st.ltp.get(sym, 0.0), 2)
-        depth = st.depth.get(sym, {})
         if sym in snapshot:
             entry = dict(snapshot[sym])
             entry["symbol"] = sym
             entry["ltp"] = live_ltp if live_ltp > 0 else entry.get("ltp", 0.0)
         else:
-            # Stub if background scanner hasn't processed this symbol yet
+            # Stub if background scanner hasn't processed this symbol yet —
+            # fall back to the last 5m candle for a price / bar time.
             c5 = list(st.candles_5m.get(tok, []))
-            ltp = live_ltp if live_ltp > 0 else (c5[-1].close if c5 else 0.0)
-            bar_t = c5[-1].start_time[11:16] if c5 else "—"
-            entry = dict(
-                symbol=sym,
-                ltp=round(ltp, 2),
-                bar_time=bar_t,
-                rsi=None, adx=None, plus_di=None, minus_di=None,
-                macd=None, macd_signal=None, macd_hist=None,
-                support=None, vwap=None, above_vwap=None, pattern=None,
-            )
-        if depth:
-            entry["bid"] = round(depth["bid"], 2) if "bid" in depth else entry.get("bid")
-            entry["ask"] = round(depth["ask"], 2) if "ask" in depth else entry.get("ask")
-            entry["spread"] = depth.get("spread") if "spread" in depth else entry.get("spread")
-            entry["buy_qty"] = depth.get("buy_qty") if "buy_qty" in depth else entry.get("buy_qty")
-            entry["sell_qty"] = depth.get("sell_qty") if "sell_qty" in depth else entry.get("sell_qty")
-            entry["ratio"] = depth.get("ratio") if "ratio" in depth else entry.get("ratio")
+            entry = stub_entry()
+            entry["symbol"]   = sym
+            entry["ltp"]      = round(live_ltp if live_ltp > 0 else (c5[-1].close if c5 else 0.0), 2)
+            entry["bar_time"] = c5[-1].start_time[11:16] if c5 else "—"
+        apply_depth(entry, st.depth.get(sym, {}))
         out.append(entry)
 
     return sorted(out, key=lambda x: x["symbol"])

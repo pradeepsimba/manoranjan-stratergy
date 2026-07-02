@@ -48,7 +48,7 @@ class StockInfo:
 
 # ── Indicators ────────────────────────────────────────────────────────────────
 
-@dataclass
+@dataclass(slots=True)   # built on every scan (dozens/sec across the pool)
 class IndicatorResult:
     # RSI
     rsi:                Optional[float] = None
@@ -88,7 +88,7 @@ class IndicatorResult:
     ema50: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)   # built on every gated scan, live and backtest
 class TrendGate:
     daily_green:       bool = False   # stock LTP > today's daily open
     hourly_green:      bool = False   # current 1H candle close > open
@@ -103,7 +103,7 @@ class TrendGate:
 
 # ── Trading ───────────────────────────────────────────────────────────────────
 
-@dataclass
+@dataclass(slots=True)
 class EntrySignal:
     symbol:         str
     token:          str
@@ -118,7 +118,7 @@ class EntrySignal:
     bar_time:       str             = ""   # "HH:MM" of the triggering 5m bar
 
 
-@dataclass
+@dataclass(slots=True)
 class Position:
     symbol:        str
     token:         str

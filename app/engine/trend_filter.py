@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from app.engine.indicator_engine import session_vwap_last
+from app.engine.indicator_engine import session_vwap_candles
 from app.models import Candle, TrendGate
 
 
@@ -26,12 +26,9 @@ def compute_nifty_gates(
 
     above_vwap = False
     if nifty_ltp > 0 and nifty_candles_5m:
-        vwap = session_vwap_last(
-            [c.high for c in nifty_candles_5m],
-            [c.low  for c in nifty_candles_5m],
-            [c.close for c in nifty_candles_5m],
-            [c.volume for c in nifty_candles_5m],
-        )
+        # Single pass over the session bars — this runs every 100ms tick cycle,
+        # so no per-call list/array allocations.
+        vwap = session_vwap_candles(nifty_candles_5m)
         # vwap==0 means NIFTY has no volume data — block entry (conservative)
         above_vwap = vwap > 0.0 and nifty_ltp > vwap
 

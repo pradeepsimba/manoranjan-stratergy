@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Set
 from app.backtest.fills import round_trip_costs
 
 
-@dataclass
+@dataclass(slots=True)   # built per gated scan across the whole replay
 class BTPosition:
     symbol:      str
     token:       str
@@ -34,7 +34,7 @@ class BTPosition:
     entry_support: Optional[float] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class BTTrade:
     symbol:      str
     token:       str

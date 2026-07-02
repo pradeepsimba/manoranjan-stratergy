@@ -43,7 +43,8 @@ _LOOKBACK    = cfg.TALIB_LOOKBACK + 40   # +40 covers pattern lookback and swing
 def _scan_symbol(
     ss:                SymbolSeries,
     gidx:              int,
-    day:               str,
+    day_start:         int,     # index of today's first bar in ss.series
+    hour_open_day:     Dict[str, float],   # today's {HH: open} map
     nifty_daily_green: bool,
     nifty_above_vwap:  bool,
     open_syms,
@@ -57,21 +58,14 @@ def _scan_symbol(
     if not ok:
         return None
 
-    day_idxs = ss.by_day.get(day)
-    if not day_idxs:
-        return None
-    day_start = day_idxs[0]
-    session   = ss.series[day_start : gidx + 1]
-
     cur = ss.series[gidx]
     ltp = cur.close
 
     # Trend gate FIRST (cheap) — daily open from today's first 5m bar, forming-hour
-    # candle synthesized from 5m data, with no look-ahead. The expensive lookback
-    # slice + indicators are built only once the gate clears.
+    # candle synthesized from 5m data, with no look-ahead. The expensive session/
+    # lookback slices + indicators are built only once the gate clears.
     day_open  = ss.series[day_start].open
-    cur_hour  = cur.start_time[11:13]
-    hour_open = ss.hour_open.get(day, {}).get(cur_hour, day_open)
+    hour_open = hour_open_day.get(cur.start_time[11:13], day_open)
     c1h = [Candle(start_time=cur.start_time, open=hour_open, close=ltp, high=cur.high, low=cur.low)]
 
     gate = check_trend(ltp, day_open, c1h, nifty_daily_green, nifty_above_vwap)
@@ -83,7 +77,8 @@ def _scan_symbol(
     if len(lookback) < 30:
         return None
 
-    ind = compute_indicators(lookback, session_candles_5m=session)
+    session = ss.series[day_start : gidx + 1]
+    ind     = compute_indicators(lookback, session_candles_5m=session)
 
     # depth_bullish always True in backtest — no live order-book data available.
     # Kept in the condition for structural parity with the live entry_engine.
@@ -154,6 +149,19 @@ def _simulate_day(
     cum_tpv = 0.0
     cum_vol = 0.0
 
+    # Hoist the per-day lookups out of the bar loop: each entry is
+    # (ss, day_map, day_idxs, hour_open_day) for a symbol that trades today.
+    # Saves ~75 bars × N symbols of repeated dict.get(day) work per day.
+    day_syms = []
+    by_token = {}
+    for token, ss in symbols.items():
+        day_map = ss.at.get(day)
+        if not day_map:
+            continue
+        entry = (ss, day_map, ss.by_day[day], ss.hour_open.get(day, {}))
+        day_syms.append(entry)
+        by_token[token] = entry
+
     for tm, ngidx in grid:
         nbar = nifty.series[ngidx]
         cum_tpv += ((nbar.high + nbar.low + nbar.close) / 3.0) * nbar.volume
@@ -166,10 +174,12 @@ def _simulate_day(
 
         # 1) Exits first — only for positions opened on an earlier bar.
         for sym in list(port.positions.keys()):
-            pos     = port.positions[sym]
-            ss      = symbols.get(pos.token)
-            day_map = ss.at.get(day) if ss else None
-            gidx    = day_map.get(tm) if day_map else None
+            pos = port.positions[sym]
+            ent = by_token.get(pos.token)
+            if ent is None:
+                continue
+            ss, day_map, _, _ = ent
+            gidx = day_map.get(tm)
             if gidx is None or gidx <= pos.entry_gidx:
                 continue
             _try_exit(port, pos, ss.series[gidx], slippage_bps)
@@ -182,13 +192,13 @@ def _simulate_day(
             if (len(open_syms) < cfg.MAX_CONCURRENT_POSITIONS
                     and dpnl > -cfg.DAILY_LOSS_LIMIT):
                 signals: List[BTPosition] = []
-                for token, ss in symbols.items():
-                    day_map = ss.at.get(day)
-                    gidx    = day_map.get(tm) if day_map else None
+                for ss, day_map, day_idxs, hour_open_day in day_syms:
+                    gidx = day_map.get(tm)
                     if gidx is None:
                         continue
                     sig = _scan_symbol(
-                        ss, gidx, day, nifty_daily_green, nifty_above_vwap,
+                        ss, gidx, day_idxs[0], hour_open_day,
+                        nifty_daily_green, nifty_above_vwap,
                         open_syms, traded, dpnl, slippage_bps, capital,
                     )
                     if sig:
@@ -203,12 +213,12 @@ def _simulate_day(
 
     # 3) EOD square-off any survivors at the day's last bar close.
     for sym in list(port.positions.keys()):
-        pos  = port.positions[sym]
-        ss   = symbols.get(pos.token)
-        idxs = ss.by_day.get(day, []) if ss else []
-        if not idxs:
+        pos = port.positions[sym]
+        ent = by_token.get(pos.token)
+        if ent is None:
             continue
-        last = ss.series[idxs[-1]]
+        ss, _, day_idxs, _ = ent
+        last = ss.series[day_idxs[-1]]
         port.close_position(sym, last.start_time,
                             square_off_fill(last.close, slippage_bps), "EOD")
 

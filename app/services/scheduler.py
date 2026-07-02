@@ -31,6 +31,7 @@ from app.services.historical_data import (
     fetch_today_candles,
 )
 from app.services.paper_trade import check_tick_exit, force_close, place_paper_order
+from app.services.snapshot import apply_depth, stub_entry
 from app.state import get_state
 
 if TYPE_CHECKING:
@@ -288,24 +289,40 @@ class SchedulerService:
         if not st.full_watchlist:
             return
         try:
-            with st._nifty_lock:
-                _nifty_ltp = st.nifty_ltp
-                _nifty_5m  = list(st.nifty_candles_5m)
-            nifty_gates = compute_nifty_gates(_nifty_ltp, _nifty_5m)
+            nifty_gates = self._nifty_gates_snapshot(st)
 
-            tradeable_set = set(st.active_watchlist.keys())
+            tradeable_set = set(st.active_watchlist)
             items = [(name, tok, name in tradeable_set)
                      for name, tok in st.full_watchlist.items()]
 
-            size   = max(1, (len(items) + cfg.SCAN_WORKERS - 1) // cfg.SCAN_WORKERS)
-            chunks = [items[i : i + size] for i in range(0, len(items), size)]
-            tasks  = [loop.run_in_executor(_SCAN_POOL, _scan_chunk, c, nifty_gates)
-                      for c in chunks]
-            await asyncio.gather(*tasks)
+            await self._scan_in_pool(loop, items, nifty_gates)
             # Returned signals are intentionally discarded — entries are handled
             # only by _tick_entries (which has the dirty-tick freshness guarantee).
         except Exception as e:
             print(f"Full scan error: {e}")
+
+    @staticmethod
+    def _nifty_gates_snapshot(st):
+        """Copy the shared NIFTY series under its lock, then compute the gates."""
+        with st._nifty_lock:
+            nifty_ltp = st.nifty_ltp
+            nifty_5m  = list(st.nifty_candles_5m)
+        return compute_nifty_gates(nifty_ltp, nifty_5m)
+
+    @staticmethod
+    async def _scan_in_pool(loop, items, nifty_gates) -> list:
+        """
+        Partition (symbol, token, tradeable) triples into ≤ SCAN_WORKERS chunks —
+        one pool task per worker instead of one per stock. Keeps full parallelism
+        while cutting event-loop dispatch overhead ~30×. Returns merged signals.
+        """
+        size   = max(1, (len(items) + cfg.SCAN_WORKERS - 1) // cfg.SCAN_WORKERS)
+        chunks = [items[i : i + size] for i in range(0, len(items), size)]
+        results = await asyncio.gather(*[
+            loop.run_in_executor(_SCAN_POOL, _scan_chunk, c, nifty_gates)
+            for c in chunks
+        ])
+        return [sig for chunk_res in results for sig in chunk_res]
 
     async def _tick_exits(self) -> None:
         """Tick-wise SL/target check against the live price for open positions."""
@@ -336,28 +353,21 @@ class SchedulerService:
         if not dirty:
             return
 
-        with st._nifty_lock:
-            _nifty_ltp = st.nifty_ltp
-            _nifty_5m  = list(st.nifty_candles_5m)
-        nifty_gates = compute_nifty_gates(_nifty_ltp, _nifty_5m)
+        nifty_gates = self._nifty_gates_snapshot(st)
 
         # Iterate the (small) dirty-token set directly — O(dirty), not O(watchlist).
         # token_to_name covers the FULL watchlist; tradeable_set is the Gemini subset.
-        tradeable_set = set(st.active_watchlist.keys())
+        tradeable_set = set(st.active_watchlist)
         t2n   = st.token_to_name
-        items = [(t2n[tok], tok, t2n[tok] in tradeable_set) for tok in dirty if tok in t2n]
+        items = []
+        for tok in dirty:
+            name = t2n.get(tok)
+            if name is not None:
+                items.append((name, tok, name in tradeable_set))
         if not items:
             return
 
-        # Partition into ≤ SCAN_WORKERS chunks → one pool task per worker instead
-        # of one per stock. Keeps full parallelism while cutting event-loop
-        # dispatch overhead ~30×.
-        size   = max(1, (len(items) + cfg.SCAN_WORKERS - 1) // cfg.SCAN_WORKERS)
-        chunks = [items[i : i + size] for i in range(0, len(items), size)]
-        tasks  = [loop.run_in_executor(_SCAN_POOL, _scan_chunk, c, nifty_gates)
-                  for c in chunks]
-        results = await asyncio.gather(*tasks)
-        signals = [sig for chunk_res in results for sig in chunk_res]
+        signals = await self._scan_in_pool(loop, items, nifty_gates)
 
         # Delta pushes are now handled globally in _push_tick_updates_loop
 
@@ -546,7 +556,6 @@ class SchedulerService:
 
     async def _push_tick_updates_loop(self) -> None:
         """Pushes real-time LTP delta updates to the UI every 100ms in all active/wait/cutoff phases."""
-        import json
         st = get_state()
         while True:
             try:
@@ -556,29 +565,15 @@ class SchedulerService:
                         t2n = st.token_to_name
                         snap_delta = {}
                         for tok in dirty:
-                            if tok in t2n:
-                                sym = t2n[tok]
-                                live_ltp = round(st.ltp.get(sym, 0.0), 2)
-                                depth = st.depth.get(sym, {})
-                                if sym in st.indicator_snapshot:
-                                    entry = dict(st.indicator_snapshot[sym])
-                                else:
-                                    entry = {
-                                        "bar_time": "—",
-                                        "rsi": None, "adx": None, "plus_di": None, "minus_di": None,
-                                        "macd": None, "macd_signal": None, "macd_hist": None,
-                                        "support": None, "vwap": None, "above_vwap": None, "pattern": None,
-                                    }
-                                entry["ltp"] = live_ltp
-                                if depth:
-                                    entry["bid"] = round(depth["bid"], 2) if "bid" in depth else entry.get("bid")
-                                    entry["ask"] = round(depth["ask"], 2) if "ask" in depth else entry.get("ask")
-                                    entry["spread"] = depth.get("spread") if "spread" in depth else entry.get("spread")
-                                    entry["buy_qty"] = depth.get("buy_qty") if "buy_qty" in depth else entry.get("buy_qty")
-                                    entry["sell_qty"] = depth.get("sell_qty") if "sell_qty" in depth else entry.get("sell_qty")
-                                    entry["ratio"] = depth.get("ratio") if "ratio" in depth else entry.get("ratio")
-                                snap_delta[sym] = entry
-                        
+                            sym = t2n.get(tok)
+                            if sym is None:
+                                continue
+                            snap = st.indicator_snapshot.get(sym)
+                            entry = dict(snap) if snap is not None else stub_entry()
+                            entry["ltp"] = round(st.ltp.get(sym, 0.0), 2)
+                            apply_depth(entry, st.depth.get(sym, {}))
+                            snap_delta[sym] = entry
+
                         if snap_delta:
                             await self._ws.broadcast(
                                 json.dumps({"type": "INDICATOR_UPDATE",
@@ -593,28 +588,18 @@ class SchedulerService:
         """
         Return indicator_snapshot extended with LTP-only stubs and always updated with
         the latest live LTP and order-book depth from st.ltp/st.depth, so prices/bids/asks update in real-time.
+        (Stub shape / depth merge live in app.services.snapshot — extend them there.)
         """
         snap = {}
         for sym in st.full_watchlist:
             live_ltp = round(st.ltp.get(sym, 0.0), 2)
-            depth = st.depth.get(sym, {})
-            if sym in st.indicator_snapshot:
-                entry = dict(st.indicator_snapshot[sym])
+            existing = st.indicator_snapshot.get(sym)
+            if existing is not None:
+                entry = dict(existing)
                 entry["ltp"] = live_ltp if live_ltp > 0 else entry.get("ltp", 0.0)
             else:
-                entry = {
-                    "ltp": live_ltp,
-                    "bar_time": "—",
-                    "rsi": None, "adx": None, "plus_di": None, "minus_di": None,
-                    "macd": None, "macd_signal": None, "macd_hist": None,
-                    "support": None, "vwap": None, "above_vwap": None, "pattern": None,
-                }
-            if depth:
-                entry["bid"] = round(depth["bid"], 2) if "bid" in depth else entry.get("bid")
-                entry["ask"] = round(depth["ask"], 2) if "ask" in depth else entry.get("ask")
-                entry["spread"] = depth.get("spread") if "spread" in depth else entry.get("spread")
-                entry["buy_qty"] = depth.get("buy_qty") if "buy_qty" in depth else entry.get("buy_qty")
-                entry["sell_qty"] = depth.get("sell_qty") if "sell_qty" in depth else entry.get("sell_qty")
-                entry["ratio"] = depth.get("ratio") if "ratio" in depth else entry.get("ratio")
+                entry = stub_entry()
+                entry["ltp"] = live_ltp
+            apply_depth(entry, st.depth.get(sym, {}))
             snap[sym] = entry
         return snap

@@ -28,11 +28,6 @@ _LOOKBACK = cfg.TALIB_LOOKBACK
 
 # ── Array helpers ─────────────────────────────────────────────────────────────
 
-def _f64(values) -> np.ndarray:
-    """Contiguous float64 array — the layout TA-Lib's C layer requires."""
-    return np.ascontiguousarray(values, dtype=np.float64)
-
-
 def _last(arr: Optional[np.ndarray], offset: int = -1) -> Optional[float]:
     """Final (or offset) value of a TA-Lib output array, or None if NaN/empty."""
     if arr is None or arr.size == 0:
@@ -44,27 +39,22 @@ def _last(arr: Optional[np.ndarray], offset: int = -1) -> Optional[float]:
     return None if np.isnan(v) else float(v)
 
 
-# ── Swing Low (structural support) ────────────────────────────────────────────
+# ── Session VWAP (TA-Lib has no session-anchored VWAP) ───────────────────────
 
-def swing_low(candles: List[Candle], bars: int = cfg.SWING_LOW_BARS) -> float:
-    if not candles:
-        return 0.0
-    window = candles[-bars:] if len(candles) >= bars else candles
-    return min(c.low for c in window)
-
-
-# ── Session VWAP (numpy; TA-Lib has no session-anchored VWAP) ─────────────────
-
-def session_vwap_last(highs, lows, closes, volumes) -> float:
-    h = _f64(highs); l = _f64(lows); c = _f64(closes); v = _f64(volumes)
-    if h.size == 0:
-        return 0.0
-    cum_vol = v.cumsum()
-    total   = cum_vol[-1]
-    if total <= 0:
-        return 0.0
-    tp = (h + l + c) / 3.0
-    return float((tp * v).cumsum()[-1] / total)
+def session_vwap_candles(candles: List[Candle]) -> float:
+    """
+    Session-anchored VWAP over the given bars in a single pass — only the final
+    value is needed, so no cumulative arrays are materialised. Shared by the
+    per-stock scan and the NIFTY gate so both use the exact same formula.
+    """
+    tot_v  = 0.0
+    tot_pv = 0.0
+    for c in candles:
+        v = c.volume
+        tot_v  += v
+        tot_pv += (c.high + c.low + c.close) * v
+    # typical price = (H+L+C)/3, factored out of the loop
+    return tot_pv / (3.0 * tot_v) if tot_v > 0 else 0.0
 
 
 # ── Bullish candlestick patterns (custom) ─────────────────────────────────────
@@ -126,11 +116,13 @@ def compute_indicators(
     # converge while skipping the multi-day warmup history.
     window = candles_5m[-_LOOKBACK:] if len(candles_5m) > _LOOKBACK else candles_5m
 
-    _m     = np.array([(c.close, c.high, c.low, c.volume) for c in window], dtype=np.float64)
-    close  = np.ascontiguousarray(_m[:, 0])
-    high   = np.ascontiguousarray(_m[:, 1])
-    low    = np.ascontiguousarray(_m[:, 2])
-    volume = np.ascontiguousarray(_m[:, 3])
+    # np.fromiter builds each contiguous float64 array in one C-level pass —
+    # no intermediate tuple list and no non-contiguous column copies.
+    n      = len(window)
+    close  = np.fromiter((c.close  for c in window), np.float64, n)
+    high   = np.fromiter((c.high   for c in window), np.float64, n)
+    low    = np.fromiter((c.low    for c in window), np.float64, n)
+    volume = np.fromiter((c.volume for c in window), np.float64, n)
 
     ltp = float(close[-1])
 
@@ -139,10 +131,13 @@ def compute_indicators(
     ind.rsi = _last(rsi_arr)
     if ind.rsi is not None:
         ind.rsi_above_30 = ind.rsi > cfg.RSI_OVERSOLD
-        tail = rsi_arr[~np.isnan(rsi_arr)][-(cfg.RSI_RISING_BARS + 1):]
         # Need RSI_RISING_BARS + 1 values to produce RSI_RISING_BARS diffs.
-        # Guard was previously RSI_RISING_BARS (off-by-one: only 2 diffs checked
-        # instead of 3 when tail had exactly 3 elements).
+        # NaNs only pad the warmup prefix, so the plain tail slice is valid in
+        # the common case; the full-array mask is paid only when the series is
+        # still inside the warmup window.
+        tail = rsi_arr[-(cfg.RSI_RISING_BARS + 1):]
+        if np.isnan(tail).any():
+            tail = rsi_arr[~np.isnan(rsi_arr)][-(cfg.RSI_RISING_BARS + 1):]
         ind.rsi_rising = (
             tail.size >= cfg.RSI_RISING_BARS + 1
             and bool(np.all(np.diff(tail) > 0))
@@ -165,14 +160,19 @@ def compute_indicators(
         # "Bullish cross" — MACD is above signal now AND was below signal within
         # the last MACD_CROSS_BARS bars.  A window wider than 1 lets the entry
         # fire on confirming bars after the cross, not only on the exact cross bar.
+        # NaNs only pad the warmup prefix — mask the full arrays only when the
+        # plain tail slice still contains warmup NaNs.
         lookback_n = cfg.MACD_CROSS_BARS + 1
-        valid   = ~np.isnan(macd) & ~np.isnan(macdsignal)
-        m_tail  = macd[valid][-lookback_n:]
-        s_tail  = macdsignal[valid][-lookback_n:]
-        n       = len(m_tail)   # same length — joint mask guarantees alignment
-        if n >= 2:
+        m_tail = macd[-lookback_n:]
+        s_tail = macdsignal[-lookback_n:]
+        if np.isnan(m_tail).any() or np.isnan(s_tail).any():
+            valid  = ~np.isnan(macd) & ~np.isnan(macdsignal)
+            m_tail = macd[valid][-lookback_n:]
+            s_tail = macdsignal[valid][-lookback_n:]
+        nt = len(m_tail)   # same length — joint warmup guarantees alignment
+        if nt >= 2:
             above_now    = m_tail[-1] > s_tail[-1]
-            was_below    = bool(np.any(m_tail[: n - 1] <= s_tail[: n - 1]))
+            was_below    = bool(np.any(m_tail[: nt - 1] <= s_tail[: nt - 1]))
             ind.macd_bullish_cross = above_now and was_below
 
     # ── ADX (14) + directional movement ──────────────────────────────────────
@@ -186,11 +186,10 @@ def compute_indicators(
                     and ind.plus_di is not None and ind.minus_di is not None
                     and ind.plus_di > ind.minus_di)
 
-    # ── Session VWAP (full session array, not the lookback slice) ─────────────
+    # ── Session VWAP (full session bars, not the lookback slice) ──────────────
     sess = session_candles_5m if session_candles_5m else candles_5m
     if sess:
-        _sm  = np.array([(c.high, c.low, c.close, c.volume) for c in sess], dtype=np.float64)
-        ind.vwap = session_vwap_last(_sm[:, 0], _sm[:, 1], _sm[:, 2], _sm[:, 3])
+        ind.vwap = session_vwap_candles(sess)
     ind.price_above_vwap = ind.vwap > 0 and ltp > ind.vwap
 
     # ── Volume surge ──────────────────────────────────────────────────────────
@@ -203,7 +202,10 @@ def compute_indicators(
                              and float(volume[-1]) > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
 
     # ── Structural support (swing low) ────────────────────────────────────────
-    ind.support_level = swing_low(candles_5m[:-1], cfg.SWING_LOW_BARS)
+    # Lowest low of the last SWING_LOW_BARS bars excluding the current one —
+    # taken from the already-built `low` array (the window always covers it).
+    sl_win = low[-(cfg.SWING_LOW_BARS + 1):-1]
+    ind.support_level = float(sl_win.min()) if sl_win.size else 0.0
     if ind.support_level > 0:
         dist = (ltp - ind.support_level) / ind.support_level
         ind.near_support = 0 <= dist <= cfg.SUPPORT_TOUCH_PCT

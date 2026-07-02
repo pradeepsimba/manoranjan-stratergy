@@ -74,7 +74,7 @@ app/state.py                 AppState singleton (candles, ltp, depth, positions,
 app/models.py                Candle (slots), Position, EntrySignal, IndicatorResult, TrendGate, enums
 app/engine/
   entry_engine.py            scan_stock — the per-stock decision (live)
-  indicator_engine.py        compute_indicators (TA-Lib), session_vwap_last, swing_low, patterns
+  indicator_engine.py        compute_indicators (TA-Lib), session_vwap_candles, patterns
   trend_filter.py            check_trend (pure), compute_nifty_gates
   position_manager.py        calc_quantity, can_enter (state injected, used by live + backtest)
 app/services/
@@ -83,6 +83,7 @@ app/services/
   historical_data.py         REST client (batched parallel fetch, persistent httpx)
   gemini_filter.py           analyse_stocks (google-genai, Search grounding; JSON array parsed from text)
   paper_trade.py             place_paper_order, check_tick_exit, force_close, _finalize
+  snapshot.py                stub_entry / apply_depth — shared snapshot-entry helpers (STATE_UPDATE, INDICATOR_UPDATE, /api/indicators)
   database.py                asyncpg pool + schema + positions/scan_log/daily_stats/backtest tables
 app/backtest/                data.py, engine.py, portfolio.py, fills.py, metrics.py
 app/api/dashboard.py         REST + WS endpoints (/api/status, /api/indicators, /api/backtest[/{id}/trades|export.csv], /ws/dashboard, …)
@@ -107,7 +108,7 @@ The `/ws/dashboard` endpoint broadcasts two distinct message shapes — **both p
 ## Gotchas & known limitations
 
 - **Mid-session recovery phase restoration:** `_run_premarket()` sets `st.phase = PRE_MARKET` and `_run_wait_zone()` sets `st.phase = WAIT_ZONE` as side-effects, even when called from mid-session recovery inside `_phase_driver`. After each recovery sub-call, explicitly restore `st.phase` to the correct running phase (ACTIVE/CUTOFF) or the dashboard will show the wrong state for minutes.
-- **`_build_indicator_snapshot` on `SchedulerService`:** the STATE_UPDATE payload's `indicatorSnapshot` comes from this static method, which fills in LTP stubs for `full_watchlist` stocks that haven't been scanned yet. If you add new fields to the snapshot, add them here too.
+- **`_build_indicator_snapshot` on `SchedulerService`:** the STATE_UPDATE payload's `indicatorSnapshot` comes from this static method, which fills in LTP stubs for `full_watchlist` stocks that haven't been scanned yet. The stub shape and order-book merge are shared helpers in `app/services/snapshot.py` (also used by the INDICATOR_UPDATE push and `/api/indicators`) — if you add new snapshot fields, extend `stub_entry`/`apply_depth` there.
 - **Pure tick-wise on the forming bar** (by design): RSI/MACD/ADX/volume are recomputed on the *incomplete* 5m bar each cycle, so they jitter and signals can appear/vanish within a bar. Volume-surge naturally fires late in each bar.
 - **`GEMINI_MODEL`** — must be a real `google-genai` model id (currently `gemini-2.5-flash`). On any failure the screen returns `[]` and silently falls back to the (capped) full watchlist, so a bad id disables the AI filter without an error. Note: Google-Search grounding and a `response_schema` are **mutually exclusive** — `gemini_filter` uses grounding and parses the JSON array out of the text (`_find_json_array`); do not re-add `response_schema`.
 - **Daily-green gate** uses today's open = the open of today's first 5m bar (derived in `scan_stock` / `compute_nifty_gates`). The 1d series is no longer fetched or used; if you re-add it, remember it is not updated by the WS.
