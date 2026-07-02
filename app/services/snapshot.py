@@ -23,12 +23,12 @@ def stub_entry() -> dict:
 def apply_depth(entry: dict, depth: dict) -> dict:
     """
     Overlay live order-book fields onto a snapshot entry. Keys missing from the
-    depth dict keep the entry's existing value (or become None so the key is
-    always present in the payload — the frontend expects it).
+    depth dict keep the entry's existing value (or become None) so the six depth
+    keys are ALWAYS present in the payload — the frontend relies on that, even
+    for a stock that has received no order-book snap yet (empty depth).
     """
-    if depth:
-        entry["bid"] = round(depth["bid"], 2) if "bid" in depth else entry.get("bid")
-        entry["ask"] = round(depth["ask"], 2) if "ask" in depth else entry.get("ask")
-        for k in ("spread", "buy_qty", "sell_qty", "ratio"):
-            entry[k] = depth[k] if k in depth else entry.get(k)
+    entry["bid"] = round(depth["bid"], 2) if "bid" in depth else entry.get("bid")
+    entry["ask"] = round(depth["ask"], 2) if "ask" in depth else entry.get("ask")
+    for k in ("spread", "buy_qty", "sell_qty", "ratio"):
+        entry[k] = depth[k] if k in depth else entry.get(k)
     return entry
