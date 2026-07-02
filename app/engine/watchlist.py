@@ -40,7 +40,9 @@ async def fetch_active_watchlist() -> Dict[str, str]:
     for entry in data:
         if not isinstance(entry, (list, tuple)) or len(entry) < 3:
             continue
-        stockname = str(entry[1]).strip()
+        # Normalise non-breaking spaces: Gemini echoes names back with regular
+        # spaces, so a raw \xa0 in the name would never map to a token again.
+        stockname = str(entry[1]).replace("\xa0", " ").strip()
         token     = str(entry[2]).strip()
         if not stockname or not token:
             continue

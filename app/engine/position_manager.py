@@ -25,12 +25,17 @@ def calc_quantity(
     raw_qty = cfg.RISK_PER_TRADE / sl_offset
     qty     = max(1, int(raw_qty))
 
-    # Effective capital check: 5× intraday leverage
+    target_offset = round(sl_offset * cfg.RR_RATIO, 2)
+
+    # Effective capital check: 5× intraday leverage. If even one share exceeds
+    # the leveraged capital, the setup is unaffordable — return qty 0 so the
+    # caller's `if qty == 0` guard rejects it (live and backtest both check).
     capital_needed = (entry_price * qty) / cfg.INTRADAY_LEVERAGE
     if capital_needed > capital:
-        qty = max(1, int((capital * cfg.INTRADAY_LEVERAGE) / entry_price))
+        qty = int((capital * cfg.INTRADAY_LEVERAGE) / entry_price)
+        if qty < 1:
+            return 0, sl_offset, target_offset
 
-    target_offset = round(sl_offset * cfg.RR_RATIO, 2)
     return qty, sl_offset, target_offset
 
 

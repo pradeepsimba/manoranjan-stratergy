@@ -7,7 +7,7 @@ and daily P&L summary.
 """
 
 import json
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -218,7 +218,8 @@ class DatabaseService:
         total_pnl: float,
         gemini_shortlist: List[str],
     ) -> None:
-        today = date.today()
+        # IST calendar date — the trading day, regardless of the host timezone.
+        today = datetime.now(_IST).date()
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """

@@ -144,7 +144,14 @@ class SchedulerService:
                         print(f"=== RECOVERY: restarted during {phase_name} — running premarket + load ===")
                         st.api_status = "Recovery: fetching watchlist…"
                         await self._run_premarket()
-                    
+                        if not st.active_watchlist:
+                            # Client-status fetch failed — retry in 60s instead
+                            # of entering the active loop watchlist-less, which
+                            # would idle the engine for the rest of the day.
+                            st.api_status = "Recovery failed — retrying in 60s"
+                            await asyncio.sleep(60)
+                            continue
+
                     if not self._mkt._running:
                         st.api_status = "Recovery: loading historical data…"
                         await self._run_wait_zone()
@@ -204,11 +211,16 @@ class SchedulerService:
                 for name, tok in full_watchlist.items()
                 if name.upper() in bullish_set
             }
-            # If nothing matched after mapping back, fall back to the full list
-            st.active_watchlist = filtered if filtered else full_watchlist
         else:
-            # Empty list → Gemini unavailable/failed → cap fallback so the WS
-            # subscription doesn't overflow the server's per-connection buffer.
+            filtered = {}
+
+        if filtered:
+            st.active_watchlist = filtered
+        else:
+            # Gemini unavailable/failed, or none of its names mapped back →
+            # fall back to the CAPPED head of the full list. An uncapped
+            # fallback would subscribe every stock and overflow the WS server's
+            # per-connection buffer (1009 close).
             items = list(full_watchlist.items())[:cfg.GEMINI_MAX_STOCKS]
             st.active_watchlist = dict(items)
 
@@ -427,15 +439,21 @@ class SchedulerService:
         total   = len(trades)
         winners = sum(1 for p in trades if p.pnl > 0)
 
-        try:
-            await self._db.upsert_daily_stats(
-                total_trades     = total,
-                winning_trades   = winners,
-                total_pnl        = st.daily_pnl,
-                gemini_shortlist = st.gemini_shortlist,
-            )
-        except Exception as e:
-            print(f"EOD stats error: {e}")
+        # Only persist stats when this process actually ran a session. On a
+        # restart after market close the state is fresh/empty — writing here
+        # would overwrite the day's real row with zeros (ON CONFLICT DO UPDATE).
+        if total > 0 or st.daily_pnl != 0.0 or st.gemini_shortlist:
+            try:
+                await self._db.upsert_daily_stats(
+                    total_trades     = total,
+                    winning_trades   = winners,
+                    total_pnl        = st.daily_pnl,
+                    gemini_shortlist = st.gemini_shortlist,
+                )
+            except Exception as e:
+                print(f"EOD stats error: {e}")
+        else:
+            print("=== EOD: no session state in this process — daily_stats write skipped ===")
 
         print(
             f"=== EOD: {total} trades | {winners} winners | "
@@ -445,6 +463,9 @@ class SchedulerService:
         st.positions.clear()
         st.closed_positions.clear()
         st.traded_today.clear()
+        st.gemini_shortlist.clear()   # stats are written; a stale list must not
+                                      # trigger tomorrow's write guard or linger
+                                      # on the overnight dashboard
         st.daily_pnl = 0.0
         st.ltp.clear()
         st.candles_5m.clear()

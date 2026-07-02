@@ -94,7 +94,8 @@ def _finalize(pos: Position, exit_price: float, label: str) -> Position:
 def check_tick_exit(symbol: str, ltp: float) -> Optional[Position]:
     """
     Tick-wise exit: close the position the instant the live price touches the
-    stop-loss or target. Filled at the level (the price has crossed it).
+    stop-loss or target. Filled at the actual tick price (which may be past the
+    level — captures gap-through risk, matching the backtest's gap handling).
     Returns the closed Position or None. SL takes precedence if both are within
     reach on the same tick.
     """
