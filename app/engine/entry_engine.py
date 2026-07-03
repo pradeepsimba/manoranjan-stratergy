@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 import app.config as cfg
+from app.engine.conditions import build_entry_checks, failed_entry_checks
 from app.engine.indicator_engine import compute_indicators
 from app.engine.position_manager import calc_quantity, can_enter
 from app.engine.trend_filter import check_trend
@@ -31,14 +32,16 @@ def scan_stock(
       - All indicator math runs on the snapshot, outside any lock.
       - Safe to run concurrently in a ThreadPoolExecutor for 500 stocks.
 
-    Multi-indicator alignment required (blueprint §5):
-      1. Near 10-bar structural support
+    Multi-indicator alignment required (blueprint §5) — every ENABLED condition
+    must pass (see app.engine.conditions; toggles are runtime settings):
+      1. Near structural support
       2. Bullish candlestick pattern (Hammer / Engulfing / Strong Close)
-      3. ADX(14) > 20  AND  +DI > -DI
-      4. RSI(14) > 30  OR  rising for 3 bars
+      3. ADX > threshold  AND  +DI > -DI
+      4. RSI > floor  OR  rising N bars
       5. MACD bullish line-over-signal crossover
-      6. Bar volume > 1.5× 20-bar average
+      6. Bar volume > multiplier × volume MA
       7. LTP strictly above session VWAP
+      8. Order-book depth not sell-skewed (live only)
     """
     st = get_state()
 
@@ -121,24 +124,9 @@ def scan_stock(
         st.record_scan(symbol, {"pass": False, "reason": reason})
         return None
 
-    # ── 8 entry conditions ────────────────────────────────────────────────────
-    # depth_bullish: buy-side depth ≥ 40% of total (not heavily sell-skewed).
-    # Defaults True when no snap data is available yet so it never blocks on
-    # missing data — it only fires when the order book is clearly bearish.
-    ratio = depth.get("ratio")
-    depth_bullish = (ratio >= 0.4) if ratio is not None else True
-    checks = {
-        "near_support":    ind.near_support,
-        "bullish_pattern": ind.bullish_pattern,
-        "adx_ok":          ind.adx_ok,
-        "rsi_ok":          ind.rsi_above_30 or ind.rsi_rising,
-        "macd_cross":      ind.macd_bullish_cross,
-        "volume_surge":    ind.volume_surge,
-        "above_vwap":      ind.price_above_vwap,
-        "depth_bullish":   depth_bullish,
-    }
-
-    failed = [k for k, v in checks.items() if not v]
+    # ── 8 entry conditions (shared with backtest; toggles are settings) ──────
+    checks = build_entry_checks(ind, depth.get("ratio"))
+    failed = failed_entry_checks(checks)
     if failed:
         st.record_scan(symbol, {
             "pass":   False,

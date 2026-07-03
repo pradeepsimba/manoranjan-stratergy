@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Container, Set
+from typing import Container, Optional, Set
 
 import app.config as cfg
 
@@ -8,18 +8,21 @@ import app.config as cfg
 def calc_quantity(
     entry_price: float,
     support:     float,
-    capital:     float = cfg.ACCOUNT_BALANCE,
+    capital:     Optional[float] = None,
 ) -> tuple[int, float, float]:
     """
     Compute trade quantity using the blueprint formula:
         Qty = RISK_PER_TRADE / (entry - support)
 
     `capital` overrides cfg.ACCOUNT_BALANCE so the backtest can be run with a
-    user-supplied starting balance without touching global config.
+    user-supplied starting balance without touching global config. (Resolved
+    at call time — a default-argument cfg read would freeze the dynamic value.)
 
     Returns (quantity, sl_offset, target_offset).
     Returns (0, ...) if the setup is invalid or capital is insufficient.
     """
+    if capital is None:
+        capital = cfg.ACCOUNT_BALANCE
     sl_offset = round(max(entry_price - support, cfg.MIN_SL_OFFSET), 2)
 
     raw_qty = cfg.RISK_PER_TRADE / sl_offset

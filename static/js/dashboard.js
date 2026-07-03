@@ -97,8 +97,13 @@ function render(d) {
   document.getElementById('stat-watch').textContent = (d.watchlist || []).length;
 
   renderPositions(positions, openCount);
-  renderGemini(d.geminiList || []);
+  renderWatchlist(d.watchlist || [], d.geminiList || []);
   renderScans(d.scanResults || []);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function renderPositions(positions, openCount) {
@@ -170,13 +175,76 @@ function renderPositions(positions, openCount) {
   }
 }
 
-function renderGemini(list) {
+function renderWatchlist(list, aiList) {
   document.getElementById('gemini-count').textContent = list.length;
-  const el  = document.getElementById('gemini-list');
+  const el = document.getElementById('gemini-list');
+  const ai = new Set(aiList);
   const html = !list.length
     ? '<span class="muted-text">Building at 09:00 IST…</span>'
-    : list.map(s => `<span class="stock-chip">${s}</span>`).join('');
+    : list.map(s => {
+        const sym = escHtml(s);
+        return `<span class="stock-chip removable ${ai.has(s) ? 'chip-ai' : ''}" data-sym="${sym}">` +
+               `${sym}<button class="chip-x" data-remove="${sym}" title="Remove from watchlist">×</button></span>`;
+      }).join('');
   if (el._h !== html) { el._h = html; el.innerHTML = html; }
+}
+
+// ── Runtime watchlist control ─────────────────────────────────────────────────
+
+// Chip × clicks — delegated so the diffed innerHTML needs no re-binding.
+document.getElementById('gemini-list').addEventListener('click', (e) => {
+  const sym = e.target.getAttribute && e.target.getAttribute('data-remove');
+  if (sym) wlRemove(sym);
+});
+
+let _universeLoaded = 0;
+function loadUniverse() {
+  // Refresh the add-symbol datalist at most every 60s.
+  if (Date.now() - _universeLoaded < 60_000) return;
+  _universeLoaded = Date.now();
+  fetch('/api/watchlist/full')
+    .then(r => r.json())
+    .then(rows => {
+      if (!Array.isArray(rows)) return;
+      document.getElementById('wl-options').innerHTML = rows
+        .filter(r => !r.active)
+        .map(r => `<option value="${escHtml(r.symbol)}"></option>`)
+        .join('');
+    })
+    .catch(() => { _universeLoaded = 0; });
+}
+
+function wlAdd() {
+  const input = document.getElementById('wl-input');
+  const sym = (input.value || '').trim();
+  if (!sym) return;
+  fetch('/api/watchlist/add', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ symbol: sym }),
+  })
+    .then(async r => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      input.value = '';
+      _universeLoaded = 0;   // datalist is stale now
+    })
+    .catch(e => alert('Add failed: ' + e.message));
+}
+
+function wlRemove(sym) {
+  if (!confirm(`Remove ${sym} from the tradeable watchlist?`)) return;
+  fetch('/api/watchlist/remove', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ symbol: sym }),
+  })
+    .then(async r => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      _universeLoaded = 0;
+    })
+    .catch(e => alert('Remove failed: ' + e.message));
 }
 
 function renderScans(scans) {
@@ -232,9 +300,24 @@ function runBacktest() {
   const from_date = document.getElementById('bt-from').value;
   const to_date   = document.getElementById('bt-to').value;
   const capital   = parseFloat(document.getElementById('bt-capital').value) || 40000;
+  const slipEl    = document.getElementById('bt-slip');
+  const slippage  = slipEl && slipEl.value !== '' ? parseFloat(slipEl.value) : null;
 
   if (!from_date || !to_date) { alert('Select both a from and to date.'); return; }
   if (capital < 1000) { alert('Capital must be at least ₹1,000.'); return; }
+
+  // Optional per-run strategy overrides (JSON) — live settings stay untouched.
+  let overrides = null;
+  const ovrRaw = (document.getElementById('bt-overrides')?.value || '').trim();
+  if (ovrRaw) {
+    try {
+      overrides = JSON.parse(ovrRaw);
+      if (typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error('not an object');
+    } catch (e) {
+      alert('Overrides must be a JSON object, e.g. {"RR_RATIO": 2.0}');
+      return;
+    }
+  }
 
   setBtStatus('running…', 'yellow');
   setRunBtn(true);
@@ -242,10 +325,14 @@ function runBacktest() {
   document.getElementById('bt-trades').innerHTML =
     '<tr><td colspan="14" class="empty-cell">Running…</td></tr>';
 
+  const body = { from_date, to_date, capital };
+  if (slippage !== null && !Number.isNaN(slippage)) body.slippage_bps = slippage;
+  if (overrides) body.overrides = overrides;
+
   fetch('/api/backtest', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ from_date, to_date, capital }),
+    body:    JSON.stringify(body),
   })
     .then(r => r.json())
     .then(d => {

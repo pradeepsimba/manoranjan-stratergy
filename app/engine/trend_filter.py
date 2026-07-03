@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+import app.config as cfg
 from app.engine.indicator_engine import session_vwap_candles
 from app.models import Candle, TrendGate
 
@@ -51,20 +52,22 @@ def check_trend(
     `day_open` is today's open, sourced from today's first 5m bar by the caller,
     so the daily gate never depends on a separate (never live-updated) 1d fetch.
 
-    Gates:
+    Gates (each individually toggleable at runtime — a DISABLED gate is
+    treated as green so it never blocks; shared by live and backtest):
       1. Daily Green       — stock LTP > today's open
       2. Hourly Green      — current 1H candle close > open
       3. NIFTY Daily Green — precomputed
       4. NIFTY Above VWAP  — precomputed
     """
     gate = TrendGate()
-    gate.nifty_daily_green = nifty_daily_green
-    gate.nifty_above_vwap  = nifty_above_vwap
+    gate.nifty_daily_green = nifty_daily_green or not cfg.GATE_NIFTY_DAILY
+    gate.nifty_above_vwap  = nifty_above_vwap  or not cfg.GATE_NIFTY_VWAP
 
-    if day_open > 0 and ltp > 0:
-        gate.daily_green = ltp > day_open
+    gate.daily_green = ((day_open > 0 and ltp > 0 and ltp > day_open)
+                        or not cfg.GATE_STOCK_DAILY)
 
-    if candles_1h:
-        gate.hourly_green = candles_1h[-1].close > candles_1h[-1].open
+    gate.hourly_green = ((bool(candles_1h)
+                          and candles_1h[-1].close > candles_1h[-1].open)
+                         or not cfg.GATE_STOCK_HOURLY)
 
     return gate

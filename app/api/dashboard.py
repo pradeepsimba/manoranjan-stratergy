@@ -7,12 +7,14 @@ from typing import Any, Dict, List
 
 import csv
 import io
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 import app.config as cfg
+import app.services.settings as settings
 from app.backtest.engine import run_backtest
 from app.services.snapshot import apply_depth, stub_entry
 from app.state import get_state
@@ -44,13 +46,95 @@ def status() -> Dict[str, Any]:
     }
 
 
+# ── Settings (runtime tunables) ───────────────────────────────────────────────
+
+class SettingsUpdate(BaseModel):
+    changes: Dict[str, Any]
+
+
+class SettingsReset(BaseModel):
+    keys: Optional[List[str]] = None   # None = reset everything
+
+
+@router.get("/api/settings")
+def get_settings() -> Dict[str, Any]:
+    return settings.describe()
+
+
+@router.put("/api/settings")
+async def update_settings(req: SettingsUpdate) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    if not req.changes:
+        raise HTTPException(400, "No changes supplied")
+    try:
+        return await settings.apply_and_persist(_db, req.changes)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/api/settings/reset")
+async def reset_settings(req: SettingsReset) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    try:
+        return await settings.reset(_db, req.keys)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # ── Watchlist ─────────────────────────────────────────────────────────────────
+
+class WatchlistOp(BaseModel):
+    symbol: str
+
 
 @router.get("/api/watchlist")
 def watchlist() -> List[Dict[str, str]]:
     st = get_state()
     return [{"symbol": sym, "token": tok}
             for sym, tok in st.active_watchlist.items()]
+
+
+@router.get("/api/watchlist/full")
+def watchlist_full() -> List[Dict[str, Any]]:
+    """Today's whole high-volume universe, flagged with tradeable/open state."""
+    st = get_state()
+    universe = dict(st.full_watchlist)
+    # Restored open positions can be active without being in today's universe.
+    for sym, tok in st.active_watchlist.items():
+        universe.setdefault(sym, tok)
+    return [{
+        "symbol": sym,
+        "token":  tok,
+        "active": sym in st.active_watchlist,
+        "open":   sym in st.positions,
+        "ai":     sym in st.gemini_shortlist,
+    } for sym, tok in sorted(universe.items())]
+
+
+@router.post("/api/watchlist/add")
+async def watchlist_add(req: WatchlistOp) -> Dict[str, Any]:
+    if _sched is None:
+        raise HTTPException(503, "Scheduler not ready")
+    try:
+        return await _sched.watchlist_add(req.symbol)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/api/watchlist/remove")
+async def watchlist_remove(req: WatchlistOp) -> Dict[str, Any]:
+    if _sched is None:
+        raise HTTPException(503, "Scheduler not ready")
+    try:
+        return await _sched.watchlist_remove(req.symbol)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
 
 
 # ── Positions ─────────────────────────────────────────────────────────────────
@@ -92,8 +176,13 @@ def get_prices() -> Dict[str, float]:
 class BacktestRequest(BaseModel):
     from_date:    date
     to_date:      date
-    slippage_bps: float = cfg.SLIPPAGE_BPS
-    capital:      float = cfg.ACCOUNT_BALANCE
+    # None = use the CURRENT dynamic settings (resolved at request time —
+    # a pydantic default would freeze the import-time value).
+    slippage_bps: Optional[float]          = None
+    capital:      Optional[float]          = None
+    # Per-run strategy overrides, {spec_key: value} — validated against the
+    # settings registry and scoped to this run's worker threads only.
+    overrides:    Optional[Dict[str, Any]] = None
 
 
 @router.post("/api/backtest")
@@ -102,16 +191,29 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         raise HTTPException(503, "Database not ready")
     if req.from_date > req.to_date:
         raise HTTPException(400, "from_date must be on or before to_date")
-    if req.capital <= 0:
+
+    try:
+        attr_overrides = settings.expand_changes(req.overrides or {}, bt_only=True)
+    except ValueError as e:
+        raise HTTPException(400, f"overrides: {e}")
+
+    slippage = req.slippage_bps if req.slippage_bps is not None else \
+        attr_overrides.get("SLIPPAGE_BPS", cfg.SLIPPAGE_BPS)
+    capital = req.capital if req.capital is not None else \
+        attr_overrides.get("ACCOUNT_BALANCE", cfg.ACCOUNT_BALANCE)
+    if capital <= 0:
         raise HTTPException(400, "capital must be greater than 0")
+    if slippage < 0:
+        raise HTTPException(400, "slippage_bps must be ≥ 0")
 
     run_id = uuid.uuid4().hex[:12]
     await _db.create_backtest_run(
         run_id, req.from_date, req.to_date,
-        {"slippage_bps": req.slippage_bps, "capital": req.capital},
+        {"slippage_bps": slippage, "capital": capital, "overrides": attr_overrides},
     )
     asyncio.create_task(
-        run_backtest(_db, run_id, req.from_date, req.to_date, req.slippage_bps, req.capital)
+        run_backtest(_db, run_id, req.from_date, req.to_date,
+                     slippage, capital, overrides=attr_overrides)
     )
     return {"run_id": run_id, "status": "running"}
 

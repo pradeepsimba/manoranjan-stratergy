@@ -30,17 +30,15 @@ from app.backtest.fills import (
 )
 from app.backtest.metrics import compute_metrics
 from app.backtest.portfolio import BTPosition, Portfolio
+from app.engine.conditions import build_entry_checks, failed_entry_checks
 from app.engine.indicator_engine import compute_indicators, session_vwap_from_cumsums
 from app.engine.position_manager import calc_quantity, can_enter
 from app.engine.trend_filter import check_trend
 from app.models import Candle
 
-_SCAN_START  = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"   # "09:45"
-_CUTOFF      = f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d}"           # "14:30"
-# compute_indicators windows to TALIB_LOOKBACK internally; pattern (3 bars) and
-# swing-low (11 bars) lookbacks are subsets of it, so slicing exactly this many
-# bars is equivalent — no need for extra margin.
-_LOOKBACK    = cfg.TALIB_LOOKBACK
+# Scan window / lookback are DYNAMIC settings (and per-run overridable), so
+# they are read from cfg at call time inside the day workers — a module-level
+# capture would freeze them at import.
 
 
 def _scan_symbol(
@@ -54,7 +52,7 @@ def _scan_symbol(
     traded,
     daily_pnl:         float,
     slippage_bps:      float,
-    capital:           float = cfg.ACCOUNT_BALANCE,
+    capital:           Optional[float] = None,
 ) -> Optional[BTPosition]:
     """Evaluate one symbol at bar `gidx`. Returns a ready BTPosition or None."""
     ok, _ = can_enter(ss.name, open_syms, traded, daily_pnl)
@@ -75,7 +73,7 @@ def _scan_symbol(
     if not gate.all_clear:
         return None
 
-    lo  = max(0, gidx - _LOOKBACK + 1)
+    lo  = max(0, gidx - cfg.TALIB_LOOKBACK + 1)
     end = gidx + 1
     if end - lo < 30:
         return None
@@ -93,12 +91,9 @@ def _scan_symbol(
         entry_short_circuit=True,
     )
 
-    # depth_bullish always True in backtest — no live order-book data available.
-    # Kept in the condition for structural parity with the live entry_engine.
-    depth_bullish = True
-    if not (ind.near_support and ind.bullish_pattern and ind.adx_ok
-            and (ind.rsi_above_30 or ind.rsi_rising) and ind.macd_bullish_cross
-            and ind.volume_surge and ind.price_above_vwap and depth_bullish):
+    # Same shared checks + runtime toggles as the live entry engine.
+    # depth_ratio=None → depth_bullish passes (no order book in history).
+    if failed_entry_checks(build_entry_checks(ind, None)):
         return None
 
     qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level, capital)
@@ -145,17 +140,37 @@ def _simulate_day(
     symbols:      Dict[str, SymbolSeries],
     nifty:        SymbolSeries,
     slippage_bps: float,
-    capital:      float = cfg.ACCOUNT_BALANCE,
+    capital:      Optional[float] = None,
+    overrides:    Optional[Dict]  = None,
 ) -> List:
     """
     Simulate ONE trading day with its own fresh portfolio. Days are fully
     independent (intraday strategy, EOD square-off, daily reset), which is what
     lets the caller run them in parallel. Returns that day's trades in close
     order.
+
+    `overrides` are the run's per-request settings; they are scoped to THIS
+    worker thread only (cfg.thread_overrides), so a concurrent live session
+    keeps reading the global runtime values.
     """
+    with cfg.thread_overrides(overrides or {}):
+        return _simulate_day_impl(day, symbols, nifty, slippage_bps, capital)
+
+
+def _simulate_day_impl(
+    day:          str,
+    symbols:      Dict[str, SymbolSeries],
+    nifty:        SymbolSeries,
+    slippage_bps: float,
+    capital:      Optional[float],
+) -> List:
     grid = sorted(nifty.at.get(day, {}).items())   # [(time, nifty_gidx), ...]
     if not grid:
         return []
+
+    # Dynamic scan window — read here (inside the thread-override scope).
+    scan_start = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"
+    cutoff     = f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d}"
 
     port = Portfolio()
     nifty_day_start = nifty.by_day[day][0]
@@ -200,7 +215,7 @@ def _simulate_day(
         # 2) Entries — only inside the scan window, before cutoff, and only when
         #    the portfolio can take a new position. Once 3 are open (or the loss
         #    limit is hit) the whole 500-symbol scan is skipped until a slot frees.
-        if _SCAN_START <= tm < _CUTOFF:
+        if scan_start <= tm < cutoff:
             open_syms, traded, dpnl = port.snapshot()
             if (len(open_syms) < cfg.MAX_CONCURRENT_POSITIONS
                     and dpnl > -cfg.DAILY_LOSS_LIMIT):
@@ -244,7 +259,8 @@ def simulate(
     from_d:       date,
     to_d:         date,
     slippage_bps: float,
-    capital:      float = cfg.ACCOUNT_BALANCE,
+    capital:      Optional[float] = None,
+    overrides:    Optional[Dict]  = None,
 ) -> Tuple[List, List, int]:
     """
     Run the full replay. Days are independent, so they execute in parallel across
@@ -261,7 +277,8 @@ def simulate(
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bt-day") as pool:
         # map preserves input order → results already in chronological day order
         per_day = list(pool.map(
-            lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital), days
+            lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital, overrides),
+            days,
         ))
 
     trades: List = []
@@ -280,17 +297,23 @@ def simulate(
 
 async def run_backtest(
     db, run_id: str, from_d: date, to_d: date,
-    slippage_bps: float, capital: float = cfg.ACCOUNT_BALANCE,
+    slippage_bps: float, capital: Optional[float] = None,
+    overrides: Optional[Dict] = None,
 ) -> None:
     """Orchestrate one backtest run: fetch → simulate (in a worker thread) → persist."""
     try:
-        universe, symbols, nifty = await load_backtest_data(from_d, to_d)
+        overrides = overrides or {}
+        # Warmup affects the FETCH (event loop) — resolve it from the run's
+        # overrides explicitly instead of thread-local config, which must never
+        # be set on the event loop.
+        warmup = int(overrides.get("BACKTEST_WARMUP_DAYS", cfg.BACKTEST_WARMUP_DAYS))
+        universe, symbols, nifty = await load_backtest_data(from_d, to_d, warmup_days=warmup)
         if not symbols or nifty is None:
             await db.fail_backtest_run(run_id, "No historical data or empty universe")
             return
 
         trades, equity, days = await asyncio.to_thread(
-            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital
+            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital, overrides
         )
 
         summary = compute_metrics(trades, equity, days)

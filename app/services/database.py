@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     net_pnl     NUMERIC(12,2),
     r_multiple  NUMERIC(8,3)
 );
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      JSONB,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
 CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
@@ -196,6 +202,39 @@ class DatabaseService:
                 """,
                 today, total_trades, winning_trades,
                 total_pnl, json.dumps(gemini_shortlist),
+            )
+
+    # ── App settings (runtime overrides + internal key-value state) ──────────
+
+    async def get_app_settings(self) -> Dict[str, Any]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("SELECT key, value FROM app_settings")
+        out: Dict[str, Any] = {}
+        for r in rows:
+            v = r["value"]
+            out[r["key"]] = json.loads(v) if isinstance(v, str) else v
+        return out
+
+    async def set_app_settings(self, changes: Dict[str, Any]) -> None:
+        if not changes:
+            return
+        rows = [(k, json.dumps(v)) for k, v in changes.items()]
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES ($1, $2::jsonb, NOW())
+                ON CONFLICT (key) DO UPDATE SET value=$2::jsonb, updated_at=NOW()
+                """,
+                rows,
+            )
+
+    async def delete_app_settings(self, keys: List[str]) -> None:
+        if not keys:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM app_settings WHERE key = ANY($1::text[])", list(keys)
             )
 
     # ── Backtest ──────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ from app.api.dashboard import router, set_services
 from app.services.database import DatabaseService
 from app.services.market_data import MarketDataService
 from app.services.scheduler import SchedulerService
+from app.services.settings import load_and_apply as load_settings
 from app.ws.dashboard_ws import ws_manager
 
 # ── Global service instances ──────────────────────────────────────────────────
@@ -24,6 +25,8 @@ mkt_service = MarketDataService()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db_service.init()
+    # Apply persisted runtime settings BEFORE the scheduler reads any timing.
+    await load_settings(db_service)
 
     scheduler = SchedulerService(
         db          = db_service,
@@ -58,6 +61,11 @@ def index() -> FileResponse:
 @app.get("/indicators")
 def indicators_page() -> FileResponse:
     return FileResponse("static/indicators.html")
+
+
+@app.get("/settings")
+def settings_page() -> FileResponse:
+    return FileResponse("static/settings.html")
 
 
 if __name__ == "__main__":

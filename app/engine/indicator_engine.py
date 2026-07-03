@@ -23,8 +23,6 @@ import talib
 import app.config as cfg
 from app.models import Candle, IndicatorResult
 
-_LOOKBACK = cfg.TALIB_LOOKBACK
-
 
 # ── Array helpers ─────────────────────────────────────────────────────────────
 
@@ -146,15 +144,16 @@ def compute_indicators(
     # ── Slice isolation: only the tail needed for lookback enters the C calls.
     # TALIB_LOOKBACK bars is enough for RSI(14)/ADX(14)/MACD(26,9) to fully
     # converge while skipping the multi-day warmup history.
+    lookback = cfg.TALIB_LOOKBACK   # dynamic setting — read per call
     if ohlcv_window is not None:
         close, high, low, volume = ohlcv_window
-        if close.size > _LOOKBACK:   # same defensive window as the list path
-            close  = close[-_LOOKBACK:]
-            high   = high[-_LOOKBACK:]
-            low    = low[-_LOOKBACK:]
-            volume = volume[-_LOOKBACK:]
+        if close.size > lookback:   # same defensive window as the list path
+            close  = close[-lookback:]
+            high   = high[-lookback:]
+            low    = low[-lookback:]
+            volume = volume[-lookback:]
     else:
-        window = candles_5m[-_LOOKBACK:] if len(candles_5m) > _LOOKBACK else candles_5m
+        window = candles_5m[-lookback:] if len(candles_5m) > lookback else candles_5m
         # np.fromiter builds each contiguous float64 array in one C-level pass —
         # no intermediate tuple list and no non-contiguous column copies.
         n      = len(window)
@@ -204,10 +203,14 @@ def compute_indicators(
         ind.volume_surge  = (ind.avg_volume_20 > 0
                              and float(volume[-1]) > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
 
-    if entry_short_circuit and not (ind.near_support and ind.bullish_pattern
-                                    and ind.price_above_vwap and ind.volume_surge):
-        # A cheap gate already vetoes the entry — the RSI/MACD/ADX values can't
-        # change the (conjunctive) decision, so skip the TA-Lib calls entirely.
+    if entry_short_circuit and (
+            (cfg.COND_NEAR_SUPPORT    and not ind.near_support)
+            or (cfg.COND_BULLISH_PATTERN and not ind.bullish_pattern)
+            or (cfg.COND_ABOVE_VWAP      and not ind.price_above_vwap)
+            or (cfg.COND_VOLUME_SURGE    and not ind.volume_surge)):
+        # An ENABLED cheap gate already vetoes the entry — the RSI/MACD/ADX
+        # values can't change the (conjunctive) decision, so skip the TA-Lib
+        # calls entirely. Disabled conditions auto-pass and must not veto here.
         return ind
 
     # ── RSI (14) ────────────────────────────────────────────────────────────

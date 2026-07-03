@@ -1,84 +1,197 @@
 from __future__ import annotations
 
-import os
+"""
+Configuration — static system settings plus the DYNAMIC tunables layer.
 
-# ── Custom Market Data Server ─────────────────────────────────────────────────
+Static values (endpoints, credentials, structural pool/buffer sizes) are plain
+module attributes and require a restart to change.
+
+Everything else lives in _DEFAULTS and is resolved through the module-level
+__getattr__ (PEP 562) with this precedence:
+
+    1. thread-local overrides  — a running backtest's per-run parameters,
+                                 active only inside its worker threads
+    2. runtime overrides       — dashboard Settings page, persisted in the
+                                 app_settings table and applied at startup
+    3. the hard default below
+
+`import app.config as cfg; cfg.RISK_PER_TRADE` therefore always returns the
+CURRENT value. Code must read cfg attributes at call time — never copy them
+into module-level constants or default-argument values, or they freeze at
+import and stop being dynamic.
+
+The editable registry (labels, types, bounds, grouping) lives in
+app/services/settings.py — add new tunables in BOTH places.
+"""
+
+import os
+import threading
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional
+
+# ── Static: custom market data server ────────────────────────────────────────
 API_HOST          = "35.234.219.141"
 API_URL_TEMPLATE  = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
 WS_URL            = f"ws://{API_HOST}:8083/historical-data"
 CLIENT_STATUS_URL = f"https://{API_HOST}:8000/api/clientstatus/"
 
-# ── Gemini AI pre-market filter ───────────────────────────────────────────────
-GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL      = "gemini-2.5-flash"
-GEMINI_MAX_STOCKS = 40   # cap on the bullish shortlist returned by the screen
-
-# ── PostgreSQL ────────────────────────────────────────────────────────────────
-POSTGRES_DSN = os.getenv(
+# ── Static: credentials / DSN ─────────────────────────────────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+POSTGRES_DSN   = os.getenv(
     "POSTGRES_DSN",
     "postgresql://postgres:password@localhost/trading_db",
 )
 
-# ── Timing (IST) ──────────────────────────────────────────────────────────────
-PREMARKET_HOUR   = 9;  PREMARKET_MIN   = 0    # Gemini filter runs here
-MARKET_OPEN_HOUR = 9;  MARKET_OPEN_MIN = 15   # Wait zone start
-SCAN_START_HOUR  = 9;  SCAN_START_MIN  = 45   # Active scanning starts
-CUTOFF_HOUR      = 14; CUTOFF_MIN      = 30   # No new entries after this
-SESSION_END_HOUR = 15; SESSION_END_MIN = 30   # Terminate session
+# ── Static: data intervals + NIFTY identity ───────────────────────────────────
+INTERVAL_5M   = "5m"
+INTERVAL_1H   = "1h"
+NIFTY50_TOKEN = "99926000"
+NIFTY50_NAME  = "NIFTY 50"
 
-# ── Risk & Capital ────────────────────────────────────────────────────────────
-RISK_PER_TRADE           = 500.0     # ₹500 fixed risk capital per setup
-ACCOUNT_BALANCE          = 40_000.0  # ₹40,000 base capital
-INTRADAY_LEVERAGE        = 5         # Standard NSE intraday equity leverage
-MAX_CONCURRENT_POSITIONS = 3         # Hard cap on simultaneous open positions
-DAILY_LOSS_LIMIT         = 2_000.0   # ₹2,000 daily drawdown ceiling
+# ── Static: structural sizes (pools/buffers built once — restart to change) ──
+HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
+SCAN_WORKERS      = 16    # ThreadPoolExecutor size for the parallel scan
+MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
 
-# ── Strategy parameters ───────────────────────────────────────────────────────
-ADX_PERIOD         = 14
-ADX_THRESHOLD      = 20.0
-RSI_PERIOD         = 14
-RSI_OVERSOLD       = 30
-RSI_RISING_BARS    = 3      # RSI must rise for this many consecutive bars
-SWING_LOW_BARS     = 10     # Lookback bars for structural support floor
-SUPPORT_TOUCH_PCT  = 0.015  # Price within 1.5% of support = "at support"
-MIN_SL_OFFSET      = 5.0    # Minimum SL distance in ₹ (prevents oversized qty on tiny stops)
-VOLUME_MA_PERIOD   = 20
-VOLUME_MULTIPLIER  = 1.5    # Bar volume must exceed 1.5× 20-bar avg
-RR_RATIO           = 1.5    # target_offset = sl_offset × 1.5
-MACD_CROSS_BARS    = 3      # Allow entry up to N bars after a bullish MACD cross
+# ── Dynamic tunables — hard defaults ──────────────────────────────────────────
+_DEFAULTS: Dict[str, Any] = {
+    # AI pre-market screen
+    "GEMINI_ENABLED":    True,
+    "GEMINI_MODEL":      "gemini-2.5-flash",
+    "GEMINI_MAX_STOCKS": 40,     # cap on the bullish shortlist / fallback list
 
-# Tail length fed to TA-Lib per scan. 120 bars lets RSI(14)/ADX(14)/MACD(26,9)
-# fully converge (Wilder smoothing) while skipping the multi-day warmup history.
-TALIB_LOOKBACK     = 120
+    # Timing (IST)
+    "PREMARKET_HOUR":   9,  "PREMARKET_MIN":   0,    # Gemini filter runs here
+    "MARKET_OPEN_HOUR": 9,  "MARKET_OPEN_MIN": 15,   # Wait zone start
+    "SCAN_START_HOUR":  9,  "SCAN_START_MIN":  45,   # Active scanning starts
+    "CUTOFF_HOUR":      14, "CUTOFF_MIN":      30,   # No new entries after this
+    "SESSION_END_HOUR": 15, "SESSION_END_MIN": 30,   # Terminate session
 
-# ── Data intervals supported by custom server ─────────────────────────────────
-INTERVAL_5M  = "5m"
-INTERVAL_1H  = "1h"
+    # Risk & capital
+    "RISK_PER_TRADE":           500.0,     # ₹ fixed risk capital per setup
+    "ACCOUNT_BALANCE":          40_000.0,  # ₹ base capital
+    "INTRADAY_LEVERAGE":        5,         # Standard NSE intraday equity leverage
+    "MAX_CONCURRENT_POSITIONS": 3,         # Hard cap on simultaneous open positions
+    "DAILY_LOSS_LIMIT":         2_000.0,   # ₹ daily drawdown ceiling
 
-# ── NIFTY 50 token on NSE ─────────────────────────────────────────────────────
-NIFTY50_TOKEN  = "99926000"
-NIFTY50_NAME   = "NIFTY 50"
+    # Strategy parameters
+    "ADX_PERIOD":        14,
+    "ADX_THRESHOLD":     20.0,
+    "RSI_PERIOD":        14,
+    "RSI_OVERSOLD":      30,
+    "RSI_RISING_BARS":   3,       # RSI must rise for this many consecutive bars
+    "SWING_LOW_BARS":    10,      # Lookback bars for structural support floor
+    "SUPPORT_TOUCH_PCT": 0.015,   # Price within 1.5% of support = "at support"
+    "MIN_SL_OFFSET":     5.0,     # Minimum SL distance in ₹
+    "VOLUME_MA_PERIOD":  20,
+    "VOLUME_MULTIPLIER": 1.5,     # Bar volume must exceed this × the volume MA
+    "RR_RATIO":          1.5,     # target_offset = sl_offset × RR_RATIO
+    "MACD_CROSS_BARS":   3,       # Allow entry up to N bars after a bullish cross
+    "DEPTH_MIN_RATIO":   0.4,     # Order-book buy-side ratio floor (live only)
+    # Tail length fed to TA-Lib per scan. 120 bars lets RSI(14)/ADX(14)/MACD(26,9)
+    # fully converge (Wilder smoothing) while skipping multi-day warmup history.
+    "TALIB_LOOKBACK":    120,
 
-# ── Performance ────────────────────────────────────────────────────────────────
-HIST_BATCH_SIZE    = 100   # max stocks per single historical API request
-SCAN_WORKERS       = 16    # ThreadPoolExecutor size for the parallel scan
-MAX_CANDLE_BUFFER  = 300   # per-symbol in-memory candle buffer (deque maxlen)
+    # Entry-condition toggles (all 8 required when enabled; disabled = auto-pass)
+    "COND_NEAR_SUPPORT":    True,
+    "COND_BULLISH_PATTERN": True,
+    "COND_ADX":             True,
+    "COND_RSI":             True,
+    "COND_MACD_CROSS":      True,
+    "COND_VOLUME_SURGE":    True,
+    "COND_ABOVE_VWAP":      True,
+    "COND_DEPTH":           True,
 
-# ── Tick-wise engine ─────────────────────────────────────────────────────────
-# Cadence of the tick-driven evaluation loop in ACTIVE. Signals are recomputed
-# for every stock that ticked since the previous cycle, on the forming bar; SL/
-# target are checked against the live price. 0 = run as fast as the loop allows.
-TICK_EVAL_INTERVAL_MS = 100
+    # Trend-gate toggles (disabled gate = treated as green)
+    "GATE_STOCK_DAILY":  True,
+    "GATE_STOCK_HOURLY": True,
+    "GATE_NIFTY_DAILY":  True,
+    "GATE_NIFTY_VWAP":   True,
 
-# ── Backtest ──────────────────────────────────────────────────────────────────
-BACKTEST_WARMUP_DAYS = 7      # extra calendar days fetched before the range for indicator warmup
-SLIPPAGE_BPS         = 2.0    # 0.02% slippage applied to entry and exit fills
+    # Tick-wise engine
+    "TICK_EVAL_INTERVAL_MS": 100,   # cadence of the ACTIVE evaluation loop
+    "FULL_SCAN_INTERVAL_S":  300,   # full-watchlist indicator refresh cadence
 
-# Realistic intraday-equity round-trip cost model (all rates as fractions of turnover)
-COST_BROKERAGE_PCT = 0.0003     # 0.03% per executed order
-COST_BROKERAGE_CAP = 20.0       # ₹20 cap per order
-COST_STT_SELL      = 0.00025    # 0.025% securities txn tax, sell side only
-COST_TXN_CHARGE    = 0.0000297  # NSE exchange transaction charge
-COST_GST           = 0.18       # 18% GST on (brokerage + txn charge)
-COST_STAMP_BUY     = 0.00003    # 0.003% stamp duty, buy side only
-COST_SEBI          = 0.000001   # SEBI turnover fee
+    # Backtest
+    "BACKTEST_WARMUP_DAYS": 7,      # extra calendar days fetched for warmup
+    "SLIPPAGE_BPS":         2.0,    # slippage applied to entry and exit fills
+
+    # Realistic intraday-equity round-trip cost model (fractions of turnover)
+    "COST_BROKERAGE_PCT": 0.0003,     # per executed order
+    "COST_BROKERAGE_CAP": 20.0,       # ₹ cap per order
+    "COST_STT_SELL":      0.00025,    # securities txn tax, sell side only
+    "COST_TXN_CHARGE":    0.0000297,  # NSE exchange transaction charge
+    "COST_GST":           0.18,       # GST on (brokerage + txn charge)
+    "COST_STAMP_BUY":     0.00003,    # stamp duty, buy side only
+    "COST_SEBI":          0.000001,   # SEBI turnover fee
+}
+
+_runtime_overrides: Dict[str, Any] = {}
+_thread_ctx = threading.local()
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 resolver for dynamic tunables (static attrs never reach here)."""
+    try:
+        default = _DEFAULTS[name]
+    except KeyError:
+        raise AttributeError(
+            f"module 'app.config' has no attribute {name!r}"
+        ) from None
+    local = getattr(_thread_ctx, "overrides", None)
+    if local is not None and name in local:
+        return local[name]
+    return _runtime_overrides.get(name, default)
+
+
+def __dir__() -> List[str]:
+    return sorted(list(globals().keys()) + list(_DEFAULTS.keys()))
+
+
+# ── Runtime-override management (Settings page / DB) ──────────────────────────
+
+def is_dynamic(name: str) -> bool:
+    return name in _DEFAULTS
+
+
+def dynamic_defaults() -> Dict[str, Any]:
+    return dict(_DEFAULTS)
+
+
+def runtime_overrides() -> Dict[str, Any]:
+    return dict(_runtime_overrides)
+
+
+def set_runtime_overrides(changes: Dict[str, Any]) -> None:
+    """Apply validated overrides globally (event-loop callers only)."""
+    unknown = set(changes) - set(_DEFAULTS)
+    if unknown:
+        raise KeyError(f"unknown config keys: {sorted(unknown)}")
+    _runtime_overrides.update(changes)
+
+
+def clear_runtime_overrides(keys: Optional[List[str]] = None) -> None:
+    if keys is None:
+        _runtime_overrides.clear()
+    else:
+        for k in keys:
+            _runtime_overrides.pop(k, None)
+
+
+# ── Per-thread overrides (backtest workers ONLY — never the event loop) ──────
+
+@contextmanager
+def thread_overrides(overrides: Dict[str, Any]) -> Iterator[None]:
+    """
+    Scope config overrides to the current thread. Used by backtest day-workers
+    so a run's parameters never leak into the live engine, whose scan-pool
+    threads and event loop keep reading the global runtime values.
+    """
+    prev = getattr(_thread_ctx, "overrides", None)
+    merged = dict(prev) if prev else {}
+    merged.update(overrides)
+    _thread_ctx.overrides = merged
+    try:
+        yield
+    finally:
+        _thread_ctx.overrides = prev

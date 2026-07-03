@@ -8,6 +8,8 @@ An **NSE equity intraday paper-trading** app (FastAPI). It screens stocks pre-ma
 
 Single process, single Uvicorn worker by design — all state lives in one in-process singleton (`AppState`).
 
+**Everything strategy-related is runtime-dynamic.** All tunables (risk, strategy params, entry-condition/trend-gate toggles, session timings, costs, Gemini screen, tick cadence) are editable live from the `/settings` page — no restart — persisted in the `app_settings` table and re-applied on startup. The tradeable watchlist is editable mid-session from the dashboard. Backtests accept per-run strategy overrides that never touch live values. See "Dynamic settings layer" below.
+
 ## Run
 
 ```bash
@@ -58,6 +60,18 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 
 **Risk guards (`can_enter`):** max 3 concurrent open positions, no same-day re-entry, ₹2000 daily loss limit, ₹500 risk/trade.
 
+## Dynamic settings layer
+
+- `app/config.py` holds **static** system values (endpoints, DSN, pool/buffer sizes) as plain attributes, and **dynamic** tunables in `_DEFAULTS`, resolved via module `__getattr__` with precedence: *thread-local overrides (backtest run) → runtime overrides (Settings page / DB) → default*. `cfg.X` therefore always returns the current value.
+- **Never copy a dynamic `cfg.X` into a module-level constant or default-argument value** — it freezes at import and silently stops being dynamic. Use `None` defaults resolved inside the function (see `calc_quantity`, backtest engine).
+- **Adding a tunable = two places:** a default in `config._DEFAULTS` **and** a SPEC entry in `app/services/settings.py` (label/type/bounds/group/`bt` flag). Time-of-day settings are virtual `"HH:MM"` SPEC keys expanded to their `*_HOUR`/`*_MIN` config pairs.
+- `cfg.thread_overrides(...)` may only be entered in **backtest worker threads** (`_simulate_day`), never on the event loop — live scan-pool threads must keep reading global values. Warmup days is passed explicitly into `load_backtest_data` for the same reason.
+- Entry-condition toggles live in `app/engine/conditions.py` (`build_entry_checks`/`failed_entry_checks`) — shared by live and backtest; a disabled condition auto-passes. Trend-gate toggles are applied inside `check_trend` (disabled gate = forced green). The `entry_short_circuit` veto in `compute_indicators` also respects the cheap-gate toggles — keep those two in sync.
+- Session timings are dynamic: the phase driver sleeps in **≤30s chunks** (`_sleep_toward`) and re-evaluates; premarket/EOD are deduplicated per date via `self._premarket_date` / `self._eod_date` — do not remove these guards or premarket (Gemini calls) and EOD (stats overwrite) re-run every 30s.
+- Manual watchlist edits (`POST /api/watchlist/add|remove`) mutate `active_watchlist`, restart the market-data WS (subscription filters are rebuilt on connect), and persist day-scoped under the `_WATCHLIST_OVERRIDES` key in `app_settings`; `_run_premarket` re-applies them after recovery/restart. Removal is refused (409) while the symbol has an open position.
+- Backtest per-run overrides: `POST /api/backtest {overrides: {SPEC_KEY: value}}`, validated with `expand_changes(bt_only=True)` (only `bt: True` SPEC entries), recorded in `backtest_runs.params`, applied via `cfg.thread_overrides` inside each day worker.
+- Settings API: `GET /api/settings` (grouped describe), `PUT /api/settings {changes}` (validate → apply → persist; a value equal to its default deletes the override row), `POST /api/settings/reset {keys?}`.
+
 ## Hard conventions — get these wrong and it breaks
 
 - **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today`, `depth` (order-book snap) are keyed by **SYMBOL NAME**. `full_watchlist` (all high-volume) and `active_watchlist` (Gemini-tradeable subset) are both `{name: token}`; `token_to_name` (all tokens → name) is the reverse bridge the tick loop iterates. Always map correctly.
@@ -72,14 +86,15 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 ## Layout
 
 ```
-main.py                      FastAPI app + lifespan (DB init → scheduler.start); serves / and /indicators
-app/config.py                ALL tunables (timing, risk, strategy params, costs, intervals)
+main.py                      FastAPI app + lifespan (DB init → settings load → scheduler.start); serves /, /indicators, /settings
+app/config.py                static system config + dynamic tunables (defaults, runtime overrides, thread-local backtest overrides)
 app/state.py                 AppState singleton (candles, ltp, depth, positions, full/active watchlist, token_to_name, indicator_snapshot, locks, dirty_ticks)
 app/models.py                Candle (slots), Position, EntrySignal, IndicatorResult, TrendGate, enums
 app/engine/
   entry_engine.py            scan_stock — the per-stock decision (live)
+  conditions.py              build_entry_checks / failed_entry_checks — 8 conditions + runtime toggles (shared live + backtest)
   indicator_engine.py        compute_indicators (TA-Lib), session_vwap_candles, patterns
-  trend_filter.py            check_trend (pure), compute_nifty_gates
+  trend_filter.py            check_trend (gate toggles applied here), compute_nifty_gates
   position_manager.py        calc_quantity, can_enter (state injected, used by live + backtest)
 app/services/
   scheduler.py               phase driver + tick-wise engine + EOD + dashboard payload
@@ -87,16 +102,17 @@ app/services/
   historical_data.py         REST client (batched parallel fetch, persistent httpx; JSON decode + Candle build run via asyncio.to_thread — keep them off the event loop)
   gemini_filter.py           analyse_stocks (google-genai, Search grounding; JSON array parsed from text)
   paper_trade.py             place_paper_order, check_tick_exit, force_close, _finalize
+  settings.py                SPEC registry (labels/types/bounds/groups/bt flag), validation, override persistence
   snapshot.py                stub_entry / apply_depth — shared snapshot-entry helpers (STATE_UPDATE, INDICATOR_UPDATE, /api/indicators)
-  database.py                asyncpg pool + schema + positions/daily_stats/backtest tables
+  database.py                asyncpg pool + schema + positions/daily_stats/backtest/app_settings tables
 app/backtest/                data.py (SymbolSeries + per-symbol numpy mirrors/prefix sums), engine.py, portfolio.py, fills.py, metrics.py
 app/api/dashboard.py         REST + WS endpoints (/api/status, /api/indicators, /api/backtest[/{id}/trades|export.csv], /ws/dashboard, …)
 app/ws/dashboard_ws.py       browser WS broadcast manager
-static/                      index.html, indicators.html, js/dashboard.js, js/indicators.js, css/
+static/                      index.html, indicators.html, settings.html, js/dashboard.js, js/indicators.js, js/settings.js, css/
 app/engine/watchlist.py      fetch_active_watchlist — client status → full_watchlist (normalises non-breaking spaces)
 ```
 
-Backtest is triggered from the dashboard: `POST /api/backtest {from_date, to_date, slippage_bps?, capital?}` runs in a background task and is polled via `GET /api/backtest/{id}`; results export at `…/export.csv`.
+Backtest is triggered from the dashboard: `POST /api/backtest {from_date, to_date, slippage_bps?, capital?, overrides?}` runs in a background task and is polled via `GET /api/backtest/{id}`; results export at `…/export.csv`.
 
 ## WebSocket broadcast types
 

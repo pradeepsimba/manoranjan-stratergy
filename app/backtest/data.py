@@ -64,18 +64,24 @@ def _sort_candles(candles: List[Candle]) -> List[Candle]:
     return sorted(candles, key=lambda c: c.start_time)
 
 
-async def load_backtest_data(from_d: date, to_d: date):
+async def load_backtest_data(from_d: date, to_d: date,
+                             warmup_days: Optional[int] = None):
     """
     Returns (universe, symbols, nifty) where:
       universe — {name: token} from client status
       symbols  — {token: SymbolSeries}
       nifty    — SymbolSeries for NIFTY 50
+
+    warmup_days lets a backtest run override the fetch padding without
+    touching thread-local config on the event loop.
     """
     universe = await fetch_active_watchlist()           # {name: token}
     if not universe:
         return {}, {}, None
 
-    fetch_from = (from_d - timedelta(days=cfg.BACKTEST_WARMUP_DAYS)).isoformat()
+    if warmup_days is None:
+        warmup_days = cfg.BACKTEST_WARMUP_DAYS
+    fetch_from = (from_d - timedelta(days=warmup_days)).isoformat()
     fetch_to   = (to_d + timedelta(days=1)).isoformat()
 
     stocks = [{"stockname": n, "stock_symbol": t} for n, t in universe.items()]

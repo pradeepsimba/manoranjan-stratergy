@@ -15,7 +15,7 @@ import json
 from collections import deque as _deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 from zoneinfo import ZoneInfo
 
 import app.config as cfg
@@ -31,6 +31,7 @@ from app.services.historical_data import (
     fetch_today_candles,
 )
 from app.services.paper_trade import check_tick_exit, force_close, place_paper_order
+from app.services.settings import WATCHLIST_OVERRIDES_KEY
 from app.services.snapshot import apply_depth, stub_entry
 from app.state import get_state
 
@@ -66,6 +67,16 @@ def _past(hour: int, minute: int) -> bool:
     return now.hour > hour or (now.hour == hour and now.minute >= minute)
 
 
+async def _sleep_toward(hour: int, minute: int) -> None:
+    """
+    Sleep TOWARD hour:minute in ≤30s chunks instead of one long sleep. The
+    phase driver re-evaluates its branch conditions every wake-up, so runtime
+    changes to the session timings take effect within seconds — a single long
+    sleep would pin the old schedule until it expired.
+    """
+    await asyncio.sleep(min(_seconds_until(hour, minute), 30.0))
+
+
 def _scan_chunk(items, nifty_gates):
     """
     Scan a chunk of (symbol, token, tradeable) triples in one worker thread and
@@ -97,6 +108,10 @@ class SchedulerService:
         self._mkt   = market_data
         self._ws    = ws_manager
         self._tasks: List[asyncio.Task] = []
+        # Once-per-day guards: the phase driver now wakes every ≤30s (so timing
+        # settings are dynamic), so premarket/EOD must self-deduplicate by date.
+        self._premarket_date: str | None = None
+        self._eod_date:       str | None = None
 
     async def start(self) -> None:
         self._tasks = [
@@ -121,15 +136,20 @@ class SchedulerService:
                     await asyncio.sleep(3600)
                     continue
 
-                h, m = now.hour, now.minute
+                h, m  = now.hour, now.minute
+                today = now.strftime("%Y-%m-%d")
 
                 if h < cfg.PREMARKET_HOUR or (h == cfg.PREMARKET_HOUR and m < cfg.PREMARKET_MIN):
                     st.phase = TradingPhase.PRE_MARKET
-                    await asyncio.sleep(_seconds_until(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN))
+                    await _sleep_toward(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN)
 
                 elif h < cfg.MARKET_OPEN_HOUR or (h == cfg.MARKET_OPEN_HOUR and m < cfg.MARKET_OPEN_MIN):
-                    await self._run_premarket()
-                    await asyncio.sleep(_seconds_until(cfg.MARKET_OPEN_HOUR, cfg.MARKET_OPEN_MIN))
+                    # Run once per day (retrying every wake-up until the
+                    # watchlist fetch succeeds) — the chunked sleep would
+                    # otherwise re-run the Gemini screen every 30s.
+                    if self._premarket_date != today:
+                        await self._run_premarket()
+                    await _sleep_toward(cfg.MARKET_OPEN_HOUR, cfg.MARKET_OPEN_MIN)
 
                 elif h < cfg.SESSION_END_HOUR or (h == cfg.SESSION_END_HOUR and m < cfg.SESSION_END_MIN):
                     if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
@@ -174,10 +194,12 @@ class SchedulerService:
 
                 else:
                     st.phase = TradingPhase.CLOSED
-                    await self._run_eod()
-                    # Sleep until next premarket so the loop doesn't spin (which
-                    # would re-run EOD and overwrite the day's stats with zeros).
-                    await asyncio.sleep(_seconds_until(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN))
+                    # Once per date — the ≤30s wake-ups must not re-run EOD,
+                    # which would overwrite the day's stats with zeros.
+                    if self._eod_date != today:
+                        await self._run_eod()
+                        self._eod_date = today
+                    await _sleep_toward(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN)
             except asyncio.CancelledError:
                 raise   # let shutdown cancel cleanly
             except Exception as e:
@@ -206,9 +228,14 @@ class SchedulerService:
         st.token_to_name  = {tok: name for name, tok in full_watchlist.items()}
 
         # Step 2: grounded Gemini screen — names (not raw tokens) go to the AI,
-        # which returns a clean JSON array of BULLISH symbols.
-        print(f"=== PRE-MARKET: Gemini grounded screen of {len(full_watchlist)} stocks ===")
-        bullish = await analyse_stocks(list(full_watchlist.keys()))
+        # which returns a clean JSON array of BULLISH symbols. Skippable at
+        # runtime; [] triggers the same capped full-list fallback as a failure.
+        if cfg.GEMINI_ENABLED:
+            print(f"=== PRE-MARKET: Gemini grounded screen of {len(full_watchlist)} stocks ===")
+            bullish = await analyse_stocks(list(full_watchlist.keys()))
+        else:
+            print("=== PRE-MARKET: Gemini screen disabled — capped full-list fallback ===")
+            bullish = []
 
         if bullish:
             bullish_set = {s.upper() for s in bullish}
@@ -231,6 +258,12 @@ class SchedulerService:
             st.active_watchlist = dict(items)
 
         st.gemini_shortlist = list(st.active_watchlist.keys())
+
+        # Re-apply today's manual watchlist edits (dashboard add/remove) so
+        # they survive a restart / recovery re-run of premarket.
+        await self._apply_watchlist_overrides()
+
+        self._premarket_date = _now().strftime("%Y-%m-%d")
         print(
             f"=== PRE-MARKET done: {len(st.active_watchlist)} tradeable / "
             f"{len(st.full_watchlist)} total stocks ==="
@@ -264,9 +297,8 @@ class SchedulerService:
         fills/exits/DB stay on the event-loop thread.
         """
         print("=== ACTIVE: tick-wise engine open ===")
-        st       = get_state()
-        loop     = asyncio.get_running_loop()
-        interval = max(0.0, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)
+        st   = get_state()
+        loop = asyncio.get_running_loop()
 
         # Seed indicator_snapshot for ALL stocks immediately on entry.
         asyncio.create_task(self._full_scan_all(loop))
@@ -284,16 +316,17 @@ class SchedulerService:
                 await self._tick_exits()
                 await self._tick_entries(loop)
 
-                # Refresh all stocks every 5 minutes (non-Gemini stocks only update here)
+                # Refresh all stocks periodically (non-Gemini stocks only update here)
                 now_ts = loop.time()
-                if now_ts - last_full_scan >= 300:
+                if now_ts - last_full_scan >= cfg.FULL_SCAN_INTERVAL_S:
                     asyncio.create_task(self._full_scan_all(loop))
                     last_full_scan = now_ts
             except Exception as e:
                 # Never let one bad cycle kill the engine for the rest of the day.
                 print(f"Tick loop error: {e}")
 
-            await asyncio.sleep(interval)
+            # Read per cycle — the interval is a runtime setting.
+            await asyncio.sleep(max(0.0, cfg.TICK_EVAL_INTERVAL_MS / 1000.0))
 
     async def _full_scan_all(self, loop) -> None:
         """
@@ -480,6 +513,101 @@ class SchedulerService:
             f"{len(st.closed_positions)} closed positions | "
             f"daily P&L ₹{st.daily_pnl:+.2f} ==="
         )
+
+    # ── Runtime watchlist control (dashboard add/remove) ─────────────────────
+
+    async def _load_watchlist_overrides(self) -> dict:
+        """Today's manual watchlist edits from the DB, or {} if none/stale."""
+        try:
+            stored = await self._db.get_app_settings()
+        except Exception as e:
+            print(f"Watchlist overrides load failed: {e}")
+            return {}
+        ov = stored.get(WATCHLIST_OVERRIDES_KEY) or {}
+        if not isinstance(ov, dict) or ov.get("date") != _now().strftime("%Y-%m-%d"):
+            return {}
+        return ov
+
+    async def _apply_watchlist_overrides(self) -> None:
+        """Re-apply today's persisted manual add/removes onto the fresh lists."""
+        st = get_state()
+        ov = await self._load_watchlist_overrides()
+        if not ov:
+            return
+        for sym, tok in (ov.get("add") or {}).items():
+            st.active_watchlist.setdefault(sym, tok)
+            st.full_watchlist.setdefault(sym, tok)
+            st.token_to_name.setdefault(tok, sym)
+        for sym in ov.get("remove") or []:
+            if sym not in st.positions:   # never drop monitoring of an open trade
+                st.active_watchlist.pop(sym, None)
+        print(f"Watchlist overrides applied: +{len(ov.get('add') or {})} "
+              f"/ -{len(ov.get('remove') or [])}")
+
+    async def _persist_watchlist_change(self, *, add: Optional[tuple] = None,
+                                        remove: Optional[str] = None) -> None:
+        """Record a manual edit (day-scoped) so it survives a restart."""
+        ov = await self._load_watchlist_overrides()
+        adds    = dict(ov.get("add") or {})
+        removes = set(ov.get("remove") or [])
+        if add is not None:
+            sym, tok = add
+            adds[sym] = tok
+            removes.discard(sym)
+        if remove is not None:
+            adds.pop(remove, None)
+            removes.add(remove)
+        try:
+            await self._db.set_app_settings({WATCHLIST_OVERRIDES_KEY: {
+                "date":   _now().strftime("%Y-%m-%d"),
+                "add":    adds,
+                "remove": sorted(removes),
+            }})
+        except Exception as e:
+            print(f"Watchlist overrides persist failed: {e}")
+
+    async def watchlist_add(self, symbol: str) -> dict:
+        """
+        Make a symbol tradeable mid-session. It must be in today's high-volume
+        universe (full_watchlist) — the market-data server can only stream
+        those tokens. Restarts the WS connections so it gets subscribed.
+        """
+        st  = get_state()
+        sym = symbol.replace("\xa0", " ").strip()
+        if not sym:
+            raise ValueError("Empty symbol")
+        match = next((n for n in st.full_watchlist if n.upper() == sym.upper()), None)
+        if match is None:
+            raise LookupError(
+                f"'{sym}' is not in today's high-volume universe"
+                + ("" if st.full_watchlist else " (universe not loaded yet — before premarket)")
+            )
+        if match in st.active_watchlist:
+            return {"symbol": match, "changed": False}
+
+        tok = st.full_watchlist[match]
+        st.active_watchlist[match] = tok
+        st.token_to_name.setdefault(tok, match)
+        await self._persist_watchlist_change(add=(match, tok))
+        await self._mkt.restart()
+        print(f"Watchlist: manually added {match}")
+        return {"symbol": match, "changed": True}
+
+    async def watchlist_remove(self, symbol: str) -> dict:
+        """Stop trading a symbol. Refused while it has an open position."""
+        st  = get_state()
+        sym = symbol.replace("\xa0", " ").strip()
+        match = next((n for n in st.active_watchlist if n.upper() == sym.upper()), None)
+        if match is None:
+            raise LookupError(f"'{sym}' is not in the active watchlist")
+        if match in st.positions:
+            raise RuntimeError(f"{match} has an open position — close it first")
+
+        st.active_watchlist.pop(match, None)
+        await self._persist_watchlist_change(remove=match)
+        await self._mkt.restart()
+        print(f"Watchlist: manually removed {match}")
+        return {"symbol": match, "changed": True}
 
     async def _run_eod(self) -> None:
         st = get_state()

@@ -12,6 +12,38 @@
       document.documentElement.setAttribute('data-theme', t);
     })();
   </script>
+  <style>
+    /* Watchlist runtime controls */
+    .wl-controls { display: flex; gap: 8px; margin-bottom: 10px; }
+    .wl-controls .field-input { flex: 1; min-width: 0; }
+    .wl-add-btn {
+      background: var(--prime); color: var(--on-prime); border: none;
+      border-radius: var(--r-sm); font-size: 12px; font-weight: 700;
+      padding: 0 16px; cursor: pointer;
+    }
+    .wl-add-btn:hover { background: #62c5ff; }
+    .stock-chip.removable { padding-right: 4px; }
+    .chip-x {
+      background: none; border: none; color: inherit; opacity: .55;
+      cursor: pointer; font-size: 12px; padding: 0 4px; line-height: 1;
+    }
+    .chip-x:hover { opacity: 1; color: var(--neg); }
+    .chip-ai::before { content: '✦ '; opacity: .8; }
+    .wl-hint { font-size: 10px; color: var(--txt-3); margin-top: 6px; }
+
+    /* Backtest per-run overrides */
+    .bt-adv { margin: 8px 0 4px; }
+    .bt-adv summary {
+      font-size: 11px; color: var(--txt-2); cursor: pointer; user-select: none;
+    }
+    .bt-adv[open] summary { color: var(--prime); }
+    .bt-ovr {
+      width: 100%; margin-top: 6px; font-family: monospace; font-size: 11px;
+      resize: vertical; text-align: left;
+    }
+    .bt-adv-hint { font-size: 10px; color: var(--txt-3); margin-top: 4px; }
+    .bt-adv-hint a { color: var(--prime); }
+  </style>
 </head>
 <body>
 
@@ -41,6 +73,7 @@
   </div>
 
   <a href="/indicators" class="btn-indicators" title="Live Indicators">📈 Indicators</a>
+  <a href="/settings" class="btn-indicators" title="Runtime Settings">⚙ Settings</a>
 
   <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" aria-label="Toggle theme">
     <!-- Sun: shown in dark mode to switch to light -->
@@ -126,11 +159,21 @@
 
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">AI Watchlist</span>
+        <span class="panel-title">Tradeable Watchlist</span>
         <span id="gemini-count" class="badge gray">0</span>
       </div>
-      <div class="panel-body chip-cloud" id="gemini-list">
-        <span class="muted-text">Building at 09:00 IST…</span>
+      <div class="panel-body">
+        <div class="wl-controls">
+          <input class="field-input" id="wl-input" list="wl-options"
+                 placeholder="Add symbol from today's universe…"
+                 onfocus="loadUniverse()" onkeydown="if(event.key==='Enter')wlAdd()">
+          <datalist id="wl-options"></datalist>
+          <button class="wl-add-btn" onclick="wlAdd()">Add</button>
+        </div>
+        <div class="chip-cloud" id="gemini-list">
+          <span class="muted-text">Building at 09:00 IST…</span>
+        </div>
+        <div class="wl-hint">✦ = picked by the AI screen · × removes a stock (blocked while it has an open position)</div>
       </div>
     </div>
 
@@ -165,8 +208,23 @@
             <input class="field-input" id="bt-capital" type="number"
               min="1000" step="1000" value="40000" style="width:110px">
           </div>
+          <div class="field">
+            <label class="field-label" for="bt-slip">Slippage bps</label>
+            <input class="field-input" id="bt-slip" type="number"
+              min="0" step="0.5" value="2" style="width:90px">
+          </div>
           <button class="btn-run" onclick="runBacktest()">Run</button>
         </div>
+        <details class="bt-adv">
+          <summary>Strategy overrides for this run (optional)</summary>
+          <textarea id="bt-overrides" class="field-input bt-ovr" rows="3"
+            placeholder='{"RR_RATIO": 2.0, "ADX_THRESHOLD": 25, "COND_MACD_CROSS": false}'></textarea>
+          <div class="bt-adv-hint">
+            JSON of setting keys → values, applied to this run only (live trading is untouched).
+            Keys are the same as on the <a href="/settings">Settings page</a> — strategy, risk,
+            conditions, gates, costs, scan window.
+          </div>
+        </details>
         <div id="bt-summary"></div>
         <div class="tbl-wrap bt-tbl">
           <table>

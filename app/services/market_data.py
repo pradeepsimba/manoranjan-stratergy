@@ -95,6 +95,17 @@ class MarketDataService:
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
 
+    async def restart(self) -> None:
+        """
+        Tear down and reopen all three connections so the subscription filters
+        are rebuilt from the CURRENT watchlists — used after runtime watchlist
+        add/remove. No-op unless already running.
+        """
+        if not self._running:
+            return
+        await self.stop()
+        self.start()
+
     # ── WebSocket connection loops ─────────────────────────────────────────────
 
     async def _connect_loop(
