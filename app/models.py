@@ -35,15 +35,6 @@ class Candle:            # cuts per-instance memory ~40% and speeds attribute ac
 
     def is_bullish(self) -> bool: return self.close > self.open
     def is_bearish(self) -> bool: return self.close < self.open
-    def body(self)       -> float: return abs(self.close - self.open)
-    def candle_range(self) -> float: return self.high - self.low
-
-
-@dataclass
-class StockInfo:
-    symbol: str
-    token:  str
-    name:   str = ""
 
 
 # ── Indicators ────────────────────────────────────────────────────────────────
@@ -82,10 +73,6 @@ class IndicatorResult:
     # Candlestick
     candle_pattern:  Optional[str] = None
     bullish_pattern: bool          = False
-
-    # EMA (informational)
-    ema20: float = 0.0
-    ema50: float = 0.0
 
 
 @dataclass(slots=True)   # built on every gated scan, live and backtest

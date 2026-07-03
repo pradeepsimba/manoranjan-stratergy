@@ -82,8 +82,11 @@ def _scan_symbol(
 
     # Zero-copy views of the precomputed SymbolSeries arrays + O(1) prefix-sum
     # session VWAP; entry_short_circuit skips TA-Lib on cheap-gate rejections.
+    # With ohlcv_window supplied, candles_5m only feeds the 3-bar pattern check
+    # (see compute_indicators), so slice just those bars instead of the full
+    # lookback window — O(1) instead of O(TALIB_LOOKBACK) per scan.
     ind = compute_indicators(
-        ss.series[lo:end],
+        ss.series[end - 3 : end],
         ohlcv_window=(ss.closes[lo:end], ss.highs[lo:end],
                       ss.lows[lo:end],   ss.vols[lo:end]),
         session_vwap=session_vwap_from_cumsums(ss.cum_pv, ss.cum_v, day_start, gidx),

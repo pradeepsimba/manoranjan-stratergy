@@ -9,6 +9,7 @@ warmup days so indicators are valid from the first bar — and organizes each
 symbol's bars into a per-day index for the replay engine.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Dict, List, Optional
@@ -78,7 +79,14 @@ async def load_backtest_data(from_d: date, to_d: date):
     fetch_to   = (to_d + timedelta(days=1)).isoformat()
 
     stocks = [{"stockname": n, "stock_symbol": t} for n, t in universe.items()]
-    raw    = await _fetch_all(stocks, [cfg.INTERVAL_5M], fetch_from, fetch_to)
+    # Universe and NIFTY fetches are independent — run them concurrently.
+    raw, nifty_raw = await asyncio.gather(
+        _fetch_all(stocks, [cfg.INTERVAL_5M], fetch_from, fetch_to),
+        _fetch_all(
+            [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}],
+            [cfg.INTERVAL_5M], fetch_from, fetch_to,
+        ),
+    )
 
     symbols: Dict[str, SymbolSeries] = {}
     name_by_token = {t: n for n, t in universe.items()}
@@ -91,10 +99,6 @@ async def load_backtest_data(from_d: date, to_d: date):
         symbols[token] = ss
 
     # NIFTY index
-    nifty_raw = await _fetch_all(
-        [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}],
-        [cfg.INTERVAL_5M], fetch_from, fetch_to,
-    )
     nifty = None
     nframes = nifty_raw.get(cfg.NIFTY50_TOKEN, {})
     nbars   = _sort_candles(nframes.get(cfg.INTERVAL_5M, []))

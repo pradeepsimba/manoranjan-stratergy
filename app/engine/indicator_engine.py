@@ -110,7 +110,6 @@ def _detect_bullish_pattern(
 
 def compute_indicators(
     candles_5m: List[Candle],
-    candles_1h: Optional[List[Candle]] = None,
     session_candles_5m: Optional[List[Candle]] = None,
     *,
     ohlcv_window: Optional[tuple] = None,
@@ -125,9 +124,12 @@ def compute_indicators(
                           candles_5m if not provided (ignored when session_vwap
                           is given)
     ohlcv_window        — optional precomputed (close, high, low, volume)
-                          float64 arrays mirroring candles_5m exactly. Skips
-                          the per-call array build — the backtest passes
-                          zero-copy views of SymbolSeries arrays here.
+                          float64 arrays ending on the same bar as candles_5m.
+                          Skips the per-call array build — the backtest passes
+                          zero-copy views of SymbolSeries arrays here. When
+                          given, candles_5m is consulted ONLY for the 3-bar
+                          pattern check, so passing just the final 3 bars is
+                          sufficient (and what the backtest does).
     session_vwap        — optional precomputed session VWAP (the backtest's
                           O(1) prefix-sum path).
     entry_short_circuit — evaluate the cheap entry gates (support, pattern,

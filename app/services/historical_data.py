@@ -75,7 +75,10 @@ async def _fetch(
         client = await _http()
         resp   = await client.post(url, json=payload)
         resp.raise_for_status()          # treat 4xx/5xx as an error, not as candle data
-        data   = resp.json()
+        # Long ranges decode to tens of MB of candles — run the JSON decode in
+        # a worker thread so the event loop (dashboard WS, tick loop) never
+        # stalls behind a big fetch.
+        data   = await asyncio.to_thread(resp.json)
         get_state().api_status = "API OK"
     except Exception as e:
         get_state().api_status = f"API Error: {e}"
@@ -87,6 +90,11 @@ async def _fetch(
         print(f"Historical fetch: expected a list, got {type(data).__name__}: {data!r:.200}")
         return {}
 
+    # Candle construction is pure CPU over the decoded payload — also off-loop.
+    return await asyncio.to_thread(_build_result, data, intervals)
+
+
+def _build_result(data: list, intervals: List[str]) -> Dict[str, Dict[str, List[Candle]]]:
     result: Dict[str, Dict[str, List[Candle]]] = {}
     for node in data:
         if not isinstance(node, dict):
@@ -140,7 +148,7 @@ async def fetch_today_candles(
     intervals: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, List[Candle]]]:
     if intervals is None:
-        intervals = [cfg.INTERVAL_5M, cfg.INTERVAL_1H, cfg.INTERVAL_1D]
+        intervals = [cfg.INTERVAL_5M, cfg.INTERVAL_1H]
     stocks = [{"stockname": sym, "stock_symbol": tok}
               for sym, tok in watchlist.items()]
     if not stocks:
@@ -149,12 +157,12 @@ async def fetch_today_candles(
     return await _fetch_all(stocks, intervals, from_date, to_date)
 
 
-async def fetch_nifty_candles() -> Tuple[List[Candle], List[Candle]]:
+async def fetch_nifty_candles() -> List[Candle]:
+    """Today's NIFTY 5m session bars (daily gate + session VWAP)."""
     stocks           = [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}]
     today_d, today_t = _today_range()
     today_data       = await _fetch(stocks, [cfg.INTERVAL_5M], today_d, today_t)
-    today_5m         = today_data.get(cfg.NIFTY50_TOKEN, {}).get(cfg.INTERVAL_5M, [])
-    return [], today_5m
+    return today_data.get(cfg.NIFTY50_TOKEN, {}).get(cfg.INTERVAL_5M, [])
 
 
 async def fetch_indicator_history(

@@ -72,7 +72,7 @@ def scan_stock(
     # trend gate would block entry) so the live indicators page receives tick-level
     # updates for every scanned stock, not just potential entries.
     session_5m = candles_5m[i:]
-    ind        = compute_indicators(candles_5m, candles_1h, session_candles_5m=session_5m)
+    ind        = compute_indicators(candles_5m, session_candles_5m=session_5m)
     _hist      = (round(ind.macd_line - ind.macd_signal_line, 4)
                   if ind.macd_line is not None and ind.macd_signal_line is not None else None)
     st.indicator_snapshot[symbol] = {

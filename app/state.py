@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import threading
-from datetime import date
 from typing import Dict, List, Optional, Set
 
-from app.models import Candle, EntrySignal, Position, TradingPhase
+from app.models import Candle, Position, TradingPhase
 
 
 class AppState:
@@ -12,23 +11,25 @@ class AppState:
     _creation_lock = threading.Lock()
 
     def __new__(cls) -> "AppState":
-        with cls._creation_lock:
-            if cls._instance is None:
-                obj = super().__new__(cls)
-                obj._init()
-                cls._instance = obj
-        return cls._instance
+        # Double-checked locking: get_state() runs in every scan worker on every
+        # tick, so the steady-state path must not serialize threads on a lock.
+        inst = cls._instance
+        if inst is None:
+            with cls._creation_lock:
+                inst = cls._instance
+                if inst is None:
+                    inst = super().__new__(cls)
+                    inst._init()
+                    cls._instance = inst
+        return inst
 
     def _init(self) -> None:
         # ── Session ───────────────────────────────────────────────────────────
-        self.phase:        TradingPhase   = TradingPhase.PRE_MARKET
-        self.trading_date: Optional[date] = None
-        self.ws_status:    str            = "—"
-        self.api_status:   str            = "—"
+        self.phase:      TradingPhase = TradingPhase.PRE_MARKET
+        self.ws_status:  str          = "—"
+        self.api_status: str          = "—"
 
         # ── Universe & Watchlist ──────────────────────────────────────────────
-        # Full NSE universe loaded from instrument master: list of StockInfo dicts
-        self.full_universe:    List[dict]     = []
         # Gemini AI shortlist: list of trading symbols e.g. ["RELIANCE", "TCS"]
         self.gemini_shortlist: List[str]      = []
         # Active watchlist (Gemini AI-selected): {symbol: token} — trading subset
@@ -42,11 +43,9 @@ class AppState:
         # ── Candle stores (symbol → list[Candle], capped at 300 bars) ─────────
         self.candles_5m: Dict[str, List[Candle]] = {}
         self.candles_1h: Dict[str, List[Candle]] = {}
-        self.candles_1d: Dict[str, List[Candle]] = {}
 
-        # NIFTY 50 candle series for index trend gate
-        self.nifty_candles_1d: List[Candle] = []
-        self.nifty_candles_5m: List[Candle] = []   # 5m bars for session VWAP
+        # NIFTY 50 session 5m bars — index trend gate + session VWAP
+        self.nifty_candles_5m: List[Candle] = []
 
         # ── Live prices ───────────────────────────────────────────────────────
         self.ltp:       Dict[str, float] = {}   # symbol → latest LTP
@@ -68,10 +67,9 @@ class AppState:
         # Written by scan worker threads, read by the event loop (dashboard /
         # API), so all access goes through the lock below to avoid a
         # "dict changed size during iteration" race.
-        self.last_scan_results: Dict[str, dict]   = {}
-        self._scan_results_lock: threading.Lock   = threading.Lock()
-        self.pending_signals:   List[EntrySignal] = []
-        self.last_5m_bar_time:  Optional[str]     = None   # "HH:MM" of last scanned bar
+        self.last_scan_results: Dict[str, dict] = {}
+        self._scan_results_lock: threading.Lock = threading.Lock()
+        self.last_5m_bar_time:  Optional[str]   = None   # "HH:MM" of last scanned bar
 
         # Per-symbol indicator snapshot — written by scan workers on every tick,
         # read by the event loop for the WebSocket broadcast. GIL-protected dict
@@ -107,6 +105,10 @@ class AppState:
     def record_scan(self, symbol: str, result: dict) -> None:
         """Worker-thread write of a per-stock scan diagnostic."""
         with self._scan_results_lock:
+            # Pop-then-insert so dict order == recency: re-assigning an existing
+            # key keeps its old position, which would freeze the dashboard's
+            # [-N:] "most recent scans" slice on the first-inserted symbols.
+            self.last_scan_results.pop(symbol, None)
             self.last_scan_results[symbol] = result
 
     def scan_snapshot(self) -> list:

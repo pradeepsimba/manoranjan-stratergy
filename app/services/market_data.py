@@ -233,16 +233,12 @@ class MarketDataService:
             with self.state._nifty_lock:
                 if interval == "5m":
                     self._upsert_list(self.state.nifty_candles_5m, candle)
-                elif interval == "1d":
-                    self._upsert_list(self.state.nifty_candles_1d, candle)
         else:
             with self.state.candle_lock(symbol):
                 if interval == "5m":
                     self._upsert(self.state.candles_5m, symbol, candle)
                 elif interval == "1h":
                     self._upsert(self.state.candles_1h, symbol, candle)
-                elif interval == "1d":
-                    self._upsert(self.state.candles_1d, symbol, candle)
 
         if interval == "5m":
             self.state.last_5m_bar_time = candle.start_time[11:16]
@@ -277,16 +273,23 @@ class MarketDataService:
         if lst is None:
             store[symbol] = _deque([candle], maxlen=_MAX_CANDLES)
             return
-        if lst[-1].start_time == candle.start_time:
+        last = lst[-1].start_time
+        if last == candle.start_time:
             lst[-1] = candle          # update in-progress bar
-        else:
+        elif candle.start_time > last:   # ISO strings — lexicographic == chronological
             lst.append(candle)        # deque(maxlen) auto-evicts from left — O(1)
+        # else: stale out-of-order bar (e.g. reconnect replay) — appending it
+        # would break the chronological order every scan relies on; drop it.
 
     @staticmethod
     def _upsert_list(lst: list, candle: Candle) -> None:
-        if lst and lst[-1].start_time == candle.start_time:
+        if not lst:
+            lst.append(candle)
+            return
+        last = lst[-1].start_time
+        if last == candle.start_time:
             lst[-1] = candle
-        else:
+        elif candle.start_time > last:
             lst.append(candle)
             if len(lst) > _MAX_CANDLES:
                 lst.pop(0)

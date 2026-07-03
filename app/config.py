@@ -54,7 +54,6 @@ TALIB_LOOKBACK     = 120
 # ── Data intervals supported by custom server ─────────────────────────────────
 INTERVAL_5M  = "5m"
 INTERVAL_1H  = "1h"
-INTERVAL_1D  = "1d"
 
 # ── NIFTY 50 token on NSE ─────────────────────────────────────────────────────
 NIFTY50_TOKEN  = "99926000"

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An **NSE equity intraday paper-trading** app (FastAPI). It screens stocks pre-market with Gemini, streams live 5-minute data over WebSocket, evaluates a 7-signal long-only strategy **tick-by-tick**, simulates fills (no real broker), and persists everything to PostgreSQL. It also has a **backtest** engine that replays the identical strategy on historical data.
+An **NSE equity intraday paper-trading** app (FastAPI). It screens stocks pre-market with Gemini, streams live 5-minute data over WebSocket, evaluates a multi-signal long-only strategy **tick-by-tick** (8 conditions live, 7 in backtest — see parity caveat below), simulates fills (no real broker), and persists everything to PostgreSQL. It also has a **backtest** engine that replays the identical strategy on historical data.
 
 Single process, single Uvicorn worker by design — all state lives in one in-process singleton (`AppState`).
 
@@ -23,7 +23,7 @@ python main.py                # serves http://0.0.0.0:8080
 
 - Dashboard: `http://localhost:8080` (live status, positions, scans, backtest runner).
 - `TA-Lib` (the Python pkg) needs the **native C library** present at build time — the Dockerfile compiles it; for a local venv install it on the host first (`brew install ta-lib`, or build from source).
-- There is **no test suite**. Validate changes by `python3 -m py_compile` across the tree and by reading the flow.
+- There is **no test suite**. Validate changes with `python -m compileall -q app main.py` and by reading the flow.
 
 ## External dependencies (not in this repo)
 
@@ -39,10 +39,10 @@ python main.py                # serves http://0.0.0.0:8080
 Driven by `scheduler.SchedulerService._phase_driver` (IST wall clock):
 
 1. **09:00 PRE_MARKET** — `fetch_active_watchlist()` (client status) → `full_watchlist = {name: token}` (ALL high-volume stocks). `analyse_stocks()` (Gemini) returns bullish names → `active_watchlist` = the **tradeable** subset. Empty/failed Gemini ⇒ fall back to the first `GEMINI_MAX_STOCKS` of the full list (capped so the WS subscription can't overflow the server buffer).
-2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h + NIFTY), then `market_data.start()` opens the WS — subscribed to the **active** (tradeable) subset only.
+2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h + NIFTY, fetched concurrently via `asyncio.gather`), then `market_data.start()` opens the WS — subscribed to the **active** (tradeable) subset only.
 3. **09:45–15:30 ACTIVE** — `_run_active_phase()` is a **tick-wise loop** every `TICK_EVAL_INTERVAL_MS` (default 100ms):
    - `_tick_exits` — every open position's live price vs SL/target.
-   - `_tick_entries` — re-scan stocks that ticked since last cycle (`dirty_ticks`), on the **forming** 5m bar; fill those whose 7 signals align. Entries stop at 14:30 (CUTOFF); exits continue to 15:30.
+   - `_tick_entries` — re-scan stocks that ticked since last cycle (`dirty_ticks`), on the **forming** 5m bar; fill those whose signals all align. Entries stop at 14:30 (CUTOFF); exits continue to 15:30.
    - `_full_scan_all` — at entry and every 5 min, scans the **entire** `full_watchlist` to populate `indicator_snapshot` (for the `/indicators` page). Only `active_watchlist` stocks are `tradeable` and can fire signals; `scan_stock(..., tradeable=False)` updates indicators but never returns a signal. Non-Gemini stocks get no WS ticks, so this 5-min scan is their only indicator source.
    - Heavy indicator math (`scan_stock`) runs in `_SCAN_POOL` (ThreadPoolExecutor); fills/exits/DB stay on the event loop.
    - **Mid-session restart recovery:** if `active_watchlist` is empty on entering ACTIVE/CUTOFF, premarket + historical load run on the fly (retrying every 60s if the watchlist fetch fails). Today's positions/`traded_today`/`daily_pnl`/closed trades are then restored from the DB (`_restore_positions_from_db`) *before* the WS starts, and restored open symbols are force-added to the watchlists so their SL/target monitoring resumes. `_run_eod` performs the same restore so a restart after 15:30 still squares off orphaned OPEN rows and writes correct stats.
@@ -50,7 +50,7 @@ Driven by `scheduler.SchedulerService._phase_driver` (IST wall clock):
 
 Strategy core (shared by live **and** backtest, keep it that way): `check_trend` → `compute_indicators` → entry conditions → `calc_quantity`.
 
-**Backtest fast path (same function, same math):** `compute_indicators` accepts keyword-only `ohlcv_window` (precomputed float64 array views that MUST mirror `candles_5m` — built once per symbol in `SymbolSeries.index_days`), `session_vwap` (O(1) prefix-sum VWAP via `session_vwap_from_cumsums`), and `entry_short_circuit=True` (evaluates the cheap gates — support/pattern/VWAP/volume — first and skips the TA-Lib calls when one already vetoes the conjunctive entry; the returned `IndicatorResult` is then partial, which is fine because the caller rejects it). Live always calls with defaults so the dashboard gets the full snapshot. Don't reimplement any condition outside `compute_indicators` to "optimize" the backtest — pass precomputed inputs in instead.
+**Backtest fast path (same function, same math):** `compute_indicators` accepts keyword-only `ohlcv_window` (precomputed float64 array views that MUST end on the same bar as `candles_5m` — built once per symbol in `SymbolSeries.index_days`; when given, `candles_5m` only feeds the 3-bar pattern check, so the backtest passes just the last 3 bars), `session_vwap` (O(1) prefix-sum VWAP via `session_vwap_from_cumsums`), and `entry_short_circuit=True` (evaluates the cheap gates — support/pattern/VWAP/volume — first and skips the TA-Lib calls when one already vetoes the conjunctive entry; the returned `IndicatorResult` is then partial, which is fine because the caller rejects it). Live always calls with defaults so the dashboard gets the full snapshot. Don't reimplement any condition outside `compute_indicators` to "optimize" the backtest — pass precomputed inputs in instead.
 
 **Entry conditions:** near_support, bullish_pattern, adx_ok, rsi_ok (>30 or rising 3 bars), macd_bullish_cross, volume_surge, price_above_vwap — **plus** `depth_bullish` (order-book buy-side ratio ≥ 0.4, i.e. not sell-skewed). Plus a 4-gate trend filter: stock daily-green, stock hourly-green, NIFTY daily-green, NIFTY above session-VWAP.
 
@@ -63,6 +63,8 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 - **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today`, `depth` (order-book snap) are keyed by **SYMBOL NAME**. `full_watchlist` (all high-volume) and `active_watchlist` (Gemini-tradeable subset) are both `{name: token}`; `token_to_name` (all tokens → name) is the reverse bridge the tick loop iterates. Always map correctly.
 - **`positions` holds OPEN trades only.** Closing moves a position to `closed_positions` (in `paper_trade._finalize`). `len(positions)` is therefore a true *concurrent* count — do not reintroduce closed positions into it.
 - **Locking:** candle lists are mutated by the WS thread and read by pool workers — every shared-candle access goes through `st.candle_lock(token)`; NIFTY lists through `st._nifty_lock`. Positions/`daily_pnl`/`dirty_ticks` are mutated only on the event-loop thread (no lock needed); pool workers only *read* them.
+- **Candle lists are strictly chronological.** `market_data._upsert/_upsert_list` update the in-progress bar on an equal `start_time`, append on a newer one, and **drop** stale out-of-order bars (reconnect replays) — the day-suffix walk in `scan_stock` and the pattern checks depend on this ordering; don't remove the guard.
+- **`last_scan_results` order == recency.** `record_scan` pops-then-reinserts so the dashboard's `scan_snapshot()[-N:]` slices really are the N most recent scans; a plain key re-assignment would freeze them on first-inserted symbols.
 - **TA-Lib inputs:** pass raw NumPy `float64` arrays (built from candle slices), never DataFrames or `.ta` chains, into worker threads. Only the minimum lookback tail (`TALIB_LOOKBACK`) is materialized; session VWAP is the exception and uses today's bars.
 - **Session VWAP = today only.** `compute_indicators` must receive today's bars as `session_candles_5m` (live derives this in `scan_stock`); passing the multi-day buffer computes a wrong multi-day VWAP.
 - **No look-ahead in backtest:** at bar `t` an entry uses only bars `[..t]` and fills at `close[t]`; a position opened at `t` exits only on bars `> t`. Days are independent (fresh portfolio, EOD square-off) and run in parallel; trades merge in day order.
@@ -82,11 +84,11 @@ app/engine/
 app/services/
   scheduler.py               phase driver + tick-wise engine + EOD + dashboard payload
   market_data.py             WebSocket client; _process_tick updates candles/ltp/depth(snap)/dirty_ticks
-  historical_data.py         REST client (batched parallel fetch, persistent httpx)
+  historical_data.py         REST client (batched parallel fetch, persistent httpx; JSON decode + Candle build run via asyncio.to_thread — keep them off the event loop)
   gemini_filter.py           analyse_stocks (google-genai, Search grounding; JSON array parsed from text)
   paper_trade.py             place_paper_order, check_tick_exit, force_close, _finalize
   snapshot.py                stub_entry / apply_depth — shared snapshot-entry helpers (STATE_UPDATE, INDICATOR_UPDATE, /api/indicators)
-  database.py                asyncpg pool + schema + positions/scan_log/daily_stats/backtest tables
+  database.py                asyncpg pool + schema + positions/daily_stats/backtest tables
 app/backtest/                data.py (SymbolSeries + per-symbol numpy mirrors/prefix sums), engine.py, portfolio.py, fills.py, metrics.py
 app/api/dashboard.py         REST + WS endpoints (/api/status, /api/indicators, /api/backtest[/{id}/trades|export.csv], /ws/dashboard, …)
 app/ws/dashboard_ws.py       browser WS broadcast manager
@@ -116,6 +118,8 @@ The `/ws/dashboard` endpoint broadcasts two distinct message shapes — **both p
 - **Daily-green gate** uses today's open = the open of today's first 5m bar (derived in `scan_stock` / `compute_nifty_gates`). The 1d series is no longer fetched or used; if you re-add it, remember it is not updated by the WS.
 - **Backtest hourly gate** buckets by clock-hour from 5m data, which may not match the server's real 1h candle boundaries — possible live/backtest parity drift.
 - **JSONB reads:** asyncpg returns `jsonb` columns as strings — decode with `_decode_jsonb` (see `database.py`) on any new read path.
+- **Position rows are day-scoped in SQL:** `update_position_exit` and `get_today_positions` both filter on `(created_at AT TIME ZONE 'Asia/Kolkata')::date` (backed by an expression index). Keep new position queries on that same expression — a rolling `NOW() - INTERVAL` window can touch the previous day's orphaned rows.
+- **`calc_quantity` floors at 1 share** even when a single share risks more than `RISK_PER_TRADE` (stops wider than ₹500 on very high-priced stocks). Deliberate "always tradeable" choice — changing it alters live behavior and all backtest results.
 - **Frontend DOM diffing:** both `dashboard.js` and `indicators.js` maintain a `_rowEls` / `_posRowEls` cache (symbol → `<tr>`) and patch cells in-place via `_setCell(td, html, cls)` which no-ops when content is unchanged. Reorder uses `DocumentFragment` appended once (atomic). `scheduleRender()` + `requestAnimationFrame` coalesces rapid WS ticks into one paint. Do not replace this pattern with `tbody.innerHTML = ...` — it re-introduces flash.
 - **Secrets:** `.env` is gitignored; never put real keys in `config.py` defaults or `.env.example` (GitHub push-protection will block, and it has happened here).
 

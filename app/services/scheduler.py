@@ -545,9 +545,7 @@ class SchedulerService:
         st.ltp.clear()
         st.candles_5m.clear()
         st.candles_1h.clear()
-        st.candles_1d.clear()
         st.nifty_candles_5m.clear()
-        st.nifty_candles_1d.clear()
         st.dirty_ticks.clear()
         st.dirty_ticks_push.clear()
         st.token_to_name.clear()
@@ -565,15 +563,19 @@ class SchedulerService:
             # needed because the indicators page shows ALL stocks, not just the
             # Gemini-selected subset.
             wl = st.full_watchlist if st.full_watchlist else st.active_watchlist
-            hist = await fetch_indicator_history(
-                wl, cfg.INTERVAL_5M, days_back=5
+            # The three fetches are independent — run them concurrently so the
+            # 09:15 load takes one round-trip's wall clock instead of three.
+            # (Only 1H is needed for today — the daily gate derives today's open
+            # from the 5m session, so the never-live-updated 1d series is no
+            # longer fetched.)
+            hist, today, nifty_5m = await asyncio.gather(
+                fetch_indicator_history(wl, cfg.INTERVAL_5M, days_back=5),
+                fetch_today_candles(wl, [cfg.INTERVAL_1H]),
+                fetch_nifty_candles(),
             )
             for token_key, candles in hist.items():
                 st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
 
-            # Only 1H is needed now — the daily gate derives today's open from the
-            # 5m session, so the (never-live-updated) 1d series is no longer fetched.
-            today = await fetch_today_candles(wl, [cfg.INTERVAL_1H])
             for token_key, frames in today.items():
                 st.candles_1h[token_key] = _deque(
                     frames.get(cfg.INTERVAL_1H, []), maxlen=cfg.MAX_CANDLE_BUFFER
@@ -581,8 +583,6 @@ class SchedulerService:
 
             # Replace (not extend) so a re-run of the loader can't accumulate
             # duplicate NIFTY bars, which would skew the index VWAP / daily-open.
-            nifty_1d, nifty_5m = await fetch_nifty_candles()
-            st.nifty_candles_1d.clear(); st.nifty_candles_1d.extend(nifty_1d)
             st.nifty_candles_5m.clear(); st.nifty_candles_5m.extend(nifty_5m)
 
             st.api_status = "API OK"
@@ -666,7 +666,12 @@ class SchedulerService:
                                 continue
                             snap = st.indicator_snapshot.get(sym)
                             entry = dict(snap) if snap is not None else stub_entry()
-                            entry["ltp"] = round(st.ltp.get(sym, 0.0), 2)
+                            # Keep the snapshot's last known price when no live
+                            # LTP exists (tick with unparseable LTP) — same
+                            # guard as _build_indicator_snapshot, so the UI
+                            # never sees a real price replaced by 0.
+                            live_ltp = round(st.ltp.get(sym, 0.0), 2)
+                            entry["ltp"] = live_ltp if live_ltp > 0 else entry.get("ltp", 0.0)
                             apply_depth(entry, st.depth.get(sym, {}))
                             snap_delta[sym] = entry
 

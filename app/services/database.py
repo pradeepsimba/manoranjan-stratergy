@@ -47,16 +47,6 @@ CREATE TABLE IF NOT EXISTS positions (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS scan_log (
-    id          SERIAL PRIMARY KEY,
-    logged_at   TIMESTAMPTZ DEFAULT NOW(),
-    symbol      VARCHAR(20),
-    bar_time    VARCHAR(10),
-    action      VARCHAR(20),
-    reason      TEXT,
-    indicators  JSONB
-);
-
 CREATE TABLE IF NOT EXISTS daily_stats (
     id               SERIAL PRIMARY KEY,
     stat_date        DATE UNIQUE,
@@ -100,7 +90,6 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
 CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
-CREATE INDEX IF NOT EXISTS idx_scan_log_logged_at ON scan_log(logged_at);
 
 -- Add indicator columns to existing tables (idempotent)
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS rsi            NUMERIC(6,2);
@@ -153,15 +142,20 @@ class DatabaseService:
 
     async def update_position_exit(self, symbol: str, exit_price: float,
                                    exit_time: str, pnl: float) -> None:
+        # Scope to TODAY's row (IST calendar date, matching get_today_positions
+        # and the expression index). A rolling NOW()-1day window would also
+        # close yesterday's orphaned OPEN row for the same symbol with today's
+        # exit price — the UPDATE has no row limit.
+        today = datetime.now(_IST).date()
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE positions
                 SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3
                 WHERE symbol=$4 AND status='OPEN'
-                AND created_at > NOW() - INTERVAL '1 day'
+                AND (created_at AT TIME ZONE 'Asia/Kolkata')::date = $5
                 """,
-                exit_price, exit_time, pnl, symbol,
+                exit_price, exit_time, pnl, symbol, today,
             )
 
     async def get_today_positions(self) -> List[Dict[str, Any]]:
@@ -178,36 +172,6 @@ class DatabaseService:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM positions ORDER BY id DESC LIMIT 500")
         return [dict(r) for r in rows]
-
-    # ── Scan log ──────────────────────────────────────────────────────────────
-
-    async def log_scan(self, symbol: str, bar_time: str,
-                       action: str, reason: str,
-                       indicators: Optional[Dict] = None) -> None:
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO scan_log (symbol, bar_time, action, reason, indicators) "
-                "VALUES ($1,$2,$3,$4,$5)",
-                symbol, bar_time, action, reason,
-                json.dumps(indicators) if indicators else None,
-            )
-
-    # ── Batch scan log ────────────────────────────────────────────────────────
-
-    async def batch_log_scans(self, entries: list) -> None:
-        """
-        Insert all per-stock scan results for one bar in a single executemany.
-        Replaces 500 individual log_scan calls with one DB round-trip.
-        entries: list of (symbol, bar_time, action, reason, indicators_json_or_None)
-        """
-        if not entries:
-            return
-        async with self._pool.acquire() as conn:
-            await conn.executemany(
-                "INSERT INTO scan_log (symbol, bar_time, action, reason, indicators) "
-                "VALUES ($1, $2, $3, $4, $5::jsonb)",
-                entries,
-            )
 
     # ── Daily stats ───────────────────────────────────────────────────────────
 
