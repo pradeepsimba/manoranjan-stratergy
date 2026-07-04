@@ -4,6 +4,10 @@
 var rowsMap  = {};
 var sortKey  = 'symbol';
 var sortAsc  = true;
+// Timeframe viewer: 'live' = the WS-driven 5m stream; any other value shows an
+// on-demand snapshot fetched for that timeframe (polled, no live WS merges).
+var viewTF   = 'live';
+var tfPoll   = null;
 var ws       = null;
 var reconnectTimer = null;
 // DOM node cache — one <tr> per symbol, updated in-place (no blink)
@@ -43,6 +47,7 @@ var _cacheTimer = null;
 
 function _writeCacheNow() {
   _cacheTimer = null;
+  if (viewTF !== 'live') return;   // never cache a timeframe view as the live seed
   try {
     localStorage.setItem(_CACHE_DATE_KEY, _TODAY_IST);
     localStorage.setItem(_CACHE_ROWS_KEY, JSON.stringify(rowsMap));
@@ -106,10 +111,13 @@ function connect() {
       // carries indicatorSnapshot only every 10th push, so gating these behind
       // snapshot presence would freeze them between snapshots outside market
       // hours (when no ~100ms INDICATOR_UPDATE deltas flow).
+      updateMarketBadge();
+      // While viewing a non-live timeframe, ignore live 5m WS updates (clock
+      // still shows the poll timestamp set by loadTF).
+      if (viewTF !== 'live') return;
       var now = new Date();
       document.getElementById('updated-txt').textContent =
         'Live · ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      updateMarketBadge();
       var snap = d.indicatorSnapshot;
       if (!snap || typeof snap !== 'object') return;
       // Merge fresher WS data; always force entry.symbol = the JSON key
@@ -154,9 +162,14 @@ function connect() {
 // REST seed — retries every 30 s until the server returns data.
 // Covers mid-session restarts where full_watchlist isn't ready yet.
 function loadInitial() {
+  // The live REST seed must never repopulate rowsMap while a non-live
+  // timeframe is being viewed — a pending retry firing mid-view would splice
+  // live 5m rows into the TF snapshot. switchTF('live') re-invokes this.
+  if (viewTF !== 'live') return;
   fetch('/api/indicators')
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (viewTF !== 'live') return;   // user switched away during the fetch
       if (!Array.isArray(data) || !data.length) {
         // Server still initialising (recovery in progress) — retry later
         setTimeout(loadInitial, 30000);
@@ -241,11 +254,15 @@ function _setCell(td, html, cls) {
   if (td._c !== cls)  { td._c = cls;  td.className  = cls;  }
 }
 
+var _COL_LABELS = ['Symbol','LTP ₹','Bar','RSI','ADX','+DI','−DI','MACD Hist',
+                   'Support ₹','VWAP ₹','VWAP Pos','Pattern','Bid ₹','Ask ₹','Spread','B/S Ratio'];
+
 function _createTR() {
   var tr = document.createElement('tr');
   for (var i = 0; i < 16; i++) {
     var td = document.createElement('td');
     td._h = null; td._c = null;
+    td.setAttribute('data-label', _COL_LABELS[i]);   // drives mobile card layout
     tr.appendChild(td);
   }
   return tr;
@@ -260,13 +277,34 @@ function _updateTR(tr, r) {
   var histTxt = r.macd_hist != null ? (r.macd_hist >= 0 ? '+' : '') + r.macd_hist.toFixed(4) : '—';
   var vposCls = r.above_vwap == null ? 'muted' : r.above_vwap ? 'pos-num' : 'neg-num';
   var vposTxt = r.above_vwap == null ? '—'     : r.above_vwap ? '▲ Above' : '▼ Below';
-  var ratioTxt = r.ratio != null ? (r.ratio * 100).toFixed(1) + '%' : '—';
   var ratioCls = r.ratio == null ? 'muted' : r.ratio >= 0.5 ? 'pos-num' : r.ratio >= 0.4 ? 'rsi-mid' : 'neg-num';
 
-  _setCell(c[0],  r.symbol,                                                        'col-sym');
+  // RSI 0–100 gauge + value; color by oversold/overbought zone.
+  var rsiHtml;
+  if (r.rsi == null) {
+    rsiHtml = '<span class="muted">—</span>';
+  } else {
+    var rc = r.rsi < 30 ? 'var(--neg)' : r.rsi > 70 ? 'var(--pos)' : 'var(--prime)';
+    rsiHtml = '<span class="meter-cell"><span class="meter">' +
+      '<span class="meter-fill" style="width:' + Math.max(0, Math.min(100, r.rsi)) + '%;background:' + rc + '"></span>' +
+      '</span><span class="meter-num ' + rsiCls + '">' + r.rsi.toFixed(1) + '</span></span>';
+  }
+  // Buy/sell depth as a dual bar + percent.
+  var ratioHtml;
+  if (r.ratio == null) {
+    ratioHtml = '<span class="muted">—</span>';
+  } else {
+    var bp = Math.max(0, Math.min(100, r.ratio * 100));
+    ratioHtml = '<span class="meter-cell"><span class="dbar">' +
+      '<span class="buy" style="width:' + bp + '%"></span>' +
+      '<span class="sell" style="width:' + (100 - bp) + '%"></span></span>' +
+      '<span class="meter-num ' + ratioCls + '">' + bp.toFixed(0) + '%</span></span>';
+  }
+
+  _setCell(c[0],  r.symbol,                                                        'col-sym card-title');
   _setCell(c[1],  fmtINR(r.ltp),                                                   'ta-r');
   _setCell(c[2],  r.bar_time || '<span class="muted">—</span>',                    '');
-  _setCell(c[3],  r.rsi      != null ? r.rsi.toFixed(1)      : '—',               rsiCls  + ' ta-r');
+  _setCell(c[3],  rsiHtml,                                                          'ta-r');
   _setCell(c[4],  r.adx      != null ? r.adx.toFixed(1)      : '—',               adxCls  + ' ta-r');
   _setCell(c[5],  r.plus_di  != null ? r.plus_di.toFixed(1)  : '<span class="muted">—</span>', 'pos-num ta-r');
   _setCell(c[6],  r.minus_di != null ? r.minus_di.toFixed(1) : '<span class="muted">—</span>', 'neg-num ta-r');
@@ -278,7 +316,7 @@ function _updateTR(tr, r) {
   _setCell(c[12], fmtINR(r.bid),                                                   'ta-r');
   _setCell(c[13], fmtINR(r.ask),                                                   'ta-r');
   _setCell(c[14], r.spread != null ? r.spread.toFixed(2) : '—',                   'ta-r muted');
-  _setCell(c[15], ratioTxt,                                                         ratioCls + ' ta-r');
+  _setCell(c[15], ratioHtml,                                                        'ta-r');
 }
 
 // ── scheduleRender — coalesce multiple rapid WS ticks into one paint frame ────
@@ -408,7 +446,75 @@ function renderTable() {
 
 // (toggleTheme lives in the shared /js/util.js)
 
+// ── Timeframe viewer ───────────────────────────────────────────────────────────
+function _resetTable(msg) {
+  rowsMap = {};
+  _rowEls = {};
+  var tbody = document.getElementById('ind-tbody');
+  if (tbody) tbody.innerHTML = '<tr class="empty-row"><td colspan="16">' + msg + '</td></tr>';
+}
+
+function switchTF(tf) {
+  viewTF = tf;
+  clearInterval(tfPoll); tfPoll = null;
+  var toolbar = document.querySelector('.ind-toolbar');
+  if (tf === 'live') {
+    if (toolbar) toolbar.classList.remove('viewing-tf');
+    _resetTable('Loading live data…');
+    document.getElementById('updated-txt').textContent = 'Live — waiting for next tick…';
+    loadInitial();               // WS merges resume automatically once flowing
+  } else {
+    if (toolbar) toolbar.classList.add('viewing-tf');
+    _resetTable('Loading ' + tf + '…');
+    document.getElementById('updated-txt').textContent = tf + ' · loading…';
+    loadTF(tf);
+    tfPoll = setInterval(function () { loadTF(tf); }, 30000);
+  }
+}
+
+// On-demand snapshot for a non-live timeframe (computed server-side from fresh
+// history). Replaces rowsMap wholesale; the DOM diff reuses rows by symbol.
+function loadTF(tf) {
+  fetch('/api/indicators/tf/' + encodeURIComponent(tf))
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (viewTF !== tf) return;             // user switched away mid-fetch
+      if (!Array.isArray(data)) return;
+      var next = {};
+      data.forEach(function (item) {
+        if (item && typeof item === 'object' && item.symbol) {
+          item._normSymbol = normalise(item.symbol);
+          next[item.symbol] = item;
+        }
+      });
+      rowsMap = next;
+      scheduleFullRender();
+      document.getElementById('updated-txt').textContent =
+        tf + ' · ' + new Date().toLocaleTimeString('en-IN',
+          { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    })
+    .catch(function () {
+      if (viewTF === tf) document.getElementById('updated-txt').textContent = tf + ' · fetch failed — retrying…';
+    });
+}
+
+function _populateTFs() {
+  fetch('/api/timeframes')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var sel = document.getElementById('tf-select');
+      if (!sel || !Array.isArray(d.timeframes)) return;
+      d.timeframes.forEach(function (tf) {
+        var o = document.createElement('option');
+        o.value = tf; o.textContent = tf;
+        sel.appendChild(o);
+      });
+    })
+    .catch(function () { /* dropdown keeps just the live option */ });
+}
+
 // ── Init — cache first (instant), then REST seed, then live WS ───────────────
+_populateTFs();
 _loadCache();
 loadInitial();
 connect();

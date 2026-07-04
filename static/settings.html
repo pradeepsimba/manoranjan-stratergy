@@ -118,8 +118,22 @@
     .toast.ok  { background: var(--pos-bg); color: var(--pos); border: 1px solid var(--pos-edge); }
     .toast.err { background: var(--neg-bg); color: var(--neg); border: 1px solid var(--neg-edge); }
 
-    .hdr-actions { display: flex; gap: 10px; align-items: center; }
+    .hdr-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .grp-badge { font-size: 10px; }
+    .set-search { width: 180px; }
+    .panel.filtered-out { display: none; }
+    .set-row.filtered-out { display: none; }
+    .no-results {
+      grid-column: 1 / -1; text-align: center; color: var(--txt-3);
+      padding: 30px; font-size: 13px;
+    }
+
+    @media (max-width: 640px) {
+      .app-bar { height: auto; flex-wrap: wrap; padding: 8px 12px; }
+      .hdr-actions { width: 100%; }
+      .set-search { flex: 1; width: auto; }
+      .settings-wrap { grid-template-columns: 1fr; padding: 0 12px 90px; }
+    }
   </style>
 </head>
 <body>
@@ -137,9 +151,14 @@
   </div>
 
   <div class="hdr-actions">
-    <button class="btn-mini" onclick="resetAll()" title="Reset every setting to its default">Reset all to defaults</button>
-    <a href="/" class="btn-indicators" style="text-decoration:none">← Dashboard</a>
-    <a href="/indicators" class="btn-indicators" style="text-decoration:none">📈 Indicators</a>
+    <input class="field-input set-search" id="set-search" type="text"
+           placeholder="Filter settings…" oninput="filterSettings(this.value)">
+    <button class="btn-mini" onclick="resetAll()" title="Reset every setting to its default">Reset all</button>
+    <nav class="nav-seg" aria-label="Pages">
+      <a href="/">Dashboard</a>
+      <a href="/indicators">Indicators</a>
+      <a href="/settings" class="active">Settings</a>
+    </nav>
     <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
       <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>

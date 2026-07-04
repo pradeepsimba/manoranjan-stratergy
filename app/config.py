@@ -48,6 +48,21 @@ INTERVAL_1H   = "1h"
 NIFTY50_TOKEN = "99926000"
 NIFTY50_NAME  = "NIFTY 50"
 
+# Supported timeframes (server-dependent; order = UI display order). Used by the
+# indicators-page viewer and as the choice set for strategy/backtest timeframe.
+TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"]
+
+# Approximate minutes per bar — for warmup-day math and bucketing. 1d uses the
+# NSE session length (~375 min) so a "day" of lookback still spans real bars.
+TIMEFRAME_MINUTES = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "4h": 240, "1d": 375,
+}
+
+
+def is_timeframe(tf: str) -> bool:
+    return tf in TIMEFRAMES
+
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
 HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
 SCAN_WORKERS      = 16    # ThreadPoolExecutor size for the parallel scan
@@ -113,6 +128,7 @@ _DEFAULTS: Dict[str, Any] = {
     "FULL_SCAN_INTERVAL_S":  300,   # full-watchlist indicator refresh cadence
 
     # Backtest
+    "BACKTEST_TIMEFRAME":   "5m",   # bar interval the replay steps through
     "BACKTEST_WARMUP_DAYS": 7,      # extra calendar days fetched for warmup
     "SLIPPAGE_BPS":         2.0,    # slippage applied to entry and exit fills
 

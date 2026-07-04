@@ -43,6 +43,16 @@
     }
     .bt-adv-hint { font-size: 10px; color: var(--txt-3); margin-top: 4px; }
     .bt-adv-hint a { color: var(--prime); }
+
+    /* Backtest visualization: equity curve + outcome breakdown */
+    .bt-viz {
+      display: grid;
+      grid-template-columns: 1.7fr 1fr;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .bt-viz-oc { display: flex; flex-direction: column; justify-content: center; }
+    @media (max-width: 640px) { .bt-viz { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -72,8 +82,11 @@
     <div class="clock-sub">IST</div>
   </div>
 
-  <a href="/indicators" class="btn-indicators" title="Live Indicators">📈 Indicators</a>
-  <a href="/settings" class="btn-indicators" title="Runtime Settings">⚙ Settings</a>
+  <nav class="nav-seg" aria-label="Pages">
+    <a href="/" class="active">Dashboard</a>
+    <a href="/indicators">Indicators</a>
+    <a href="/settings">Settings</a>
+  </nav>
 
   <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" aria-label="Toggle theme">
     <!-- Sun: shown in dark mode to switch to light -->
@@ -122,7 +135,7 @@
         <span id="pos-count" class="badge gray">0</span>
       </div>
       <div class="tbl-wrap">
-        <table>
+        <table class="cardify">
           <thead><tr>
             <th>Symbol</th><th>Status</th><th>Entry</th><th>Time</th>
             <th>Qty</th><th>SL</th><th>Target</th><th>LTP</th><th>P&amp;L ₹</th>
@@ -213,6 +226,10 @@
             <input class="field-input" id="bt-slip" type="number"
               min="0" step="0.5" value="2" style="width:90px">
           </div>
+          <div class="field">
+            <label class="field-label" for="bt-tf">Timeframe</label>
+            <select class="field-input" id="bt-tf" style="width:90px"></select>
+          </div>
           <button class="btn-run" onclick="runBacktest()">Run</button>
         </div>
         <details class="bt-adv">
@@ -226,6 +243,16 @@
           </div>
         </details>
         <div id="bt-summary"></div>
+        <div id="bt-viz" class="bt-viz" style="display:none">
+          <div class="bt-viz-eq">
+            <div class="chart-title">Equity Curve <span class="cnum" id="bt-eq-net">—</span></div>
+            <div id="bt-equity"></div>
+          </div>
+          <div class="bt-viz-oc">
+            <div class="chart-title">Outcomes</div>
+            <div id="bt-outcomes"></div>
+          </div>
+        </div>
         <div class="tbl-wrap bt-tbl">
           <table>
             <thead><tr>

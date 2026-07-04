@@ -44,6 +44,10 @@
       width: 200px;
     }
     .ind-search:focus { border-color: var(--prime); }
+    .tf-label { font-size: 10px; font-weight: 700; text-transform: uppercase;
+                letter-spacing: .08em; color: var(--txt-2); }
+    .tf-select { cursor: pointer; }
+    .ind-toolbar.viewing-tf { box-shadow: inset 0 -2px 0 var(--accent-2); }
 
     .ind-meta {
       margin-left: auto;
@@ -144,6 +148,16 @@
     }
 
     tbody td { vertical-align: middle; }
+
+    /* On phones the fixed-height flex column clips once the app bar wraps —
+       let the page scroll naturally and render rows as cards. */
+    @media (max-width: 640px) {
+      body { overflow: auto; height: auto; min-height: 100vh; }
+      .ind-wrap { overflow: visible; padding: 0 12px 16px; }
+      .ind-toolbar, .sum-strip { padding-left: 12px; padding-right: 12px; }
+      .ind-search { width: 100%; }
+      .meter, .dbar { width: 80px; }
+    }
   </style>
 </head>
 <body>
@@ -163,8 +177,11 @@
 
   <div style="display:flex;gap:10px;align-items:center">
     <span id="mkt-badge" class="badge gray">—</span>
-    <a href="/" class="btn-irefresh" style="text-decoration:none">← Dashboard</a>
-    <a href="/settings" class="btn-irefresh" style="text-decoration:none">⚙ Settings</a>
+    <nav class="nav-seg" aria-label="Pages">
+      <a href="/">Dashboard</a>
+      <a href="/indicators" class="active">Indicators</a>
+      <a href="/settings">Settings</a>
+    </nav>
     <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
       <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
@@ -182,6 +199,10 @@
 <!-- ── Toolbar ──────────────────────────────────────────────────────────────── -->
 <div class="ind-toolbar">
   <input class="ind-search" id="search" type="text" placeholder="Search symbol…" oninput="renderTable()">
+  <label class="tf-label" for="tf-select">Timeframe</label>
+  <select class="ind-search tf-select" id="tf-select" onchange="switchTF(this.value)" style="width:auto">
+    <option value="live">5m · live</option>
+  </select>
   <div class="ind-meta">
     <span id="updated-txt">Loading…</span>
   </div>
@@ -199,7 +220,7 @@
 
 <!-- ── Table ────────────────────────────────────────────────────────────────── -->
 <div class="ind-wrap">
-  <table>
+  <table class="cardify">
     <thead>
       <tr id="thead-row">
         <th data-key="symbol">Symbol</th>

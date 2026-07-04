@@ -64,40 +64,58 @@ def _sort_candles(candles: List[Candle]) -> List[Candle]:
     return sorted(candles, key=lambda c: c.start_time)
 
 
+def warmup_calendar_days(timeframe: str, configured: int) -> int:
+    """
+    Enough calendar days before the range for indicators to converge at the
+    chosen timeframe. TALIB_LOOKBACK bars at `timeframe` minutes → trading days
+    (÷ ~375 session min) → calendar days (× 7/5 for weekends), floored at the
+    configured warmup so intraday TFs keep today's ≥7-day default.
+    """
+    import math
+    mins  = cfg.TIMEFRAME_MINUTES.get(timeframe, 5)
+    bars  = cfg.TALIB_LOOKBACK
+    tdays = math.ceil(bars * mins / 375.0)
+    cdays = math.ceil(tdays * 7.0 / 5.0) + 3
+    return max(configured, cdays)
+
+
 async def load_backtest_data(from_d: date, to_d: date,
-                             warmup_days: Optional[int] = None):
+                             warmup_days: Optional[int] = None,
+                             timeframe: Optional[str] = None):
     """
     Returns (universe, symbols, nifty) where:
       universe — {name: token} from client status
       symbols  — {token: SymbolSeries}
       nifty    — SymbolSeries for NIFTY 50
 
-    warmup_days lets a backtest run override the fetch padding without
-    touching thread-local config on the event loop.
+    warmup_days / timeframe let a backtest run override the fetch padding and
+    bar interval without touching thread-local config on the event loop.
     """
     universe = await fetch_active_watchlist()           # {name: token}
     if not universe:
         return {}, {}, None
 
+    tf = timeframe or cfg.BACKTEST_TIMEFRAME
     if warmup_days is None:
         warmup_days = cfg.BACKTEST_WARMUP_DAYS
+    warmup_days = warmup_calendar_days(tf, warmup_days)
     fetch_from = (from_d - timedelta(days=warmup_days)).isoformat()
     fetch_to   = (to_d + timedelta(days=1)).isoformat()
 
     stocks = [{"stockname": n, "stock_symbol": t} for n, t in universe.items()]
     # Universe and NIFTY fetches are independent — run them concurrently.
     raw, nifty_raw = await asyncio.gather(
-        _fetch_all(stocks, [cfg.INTERVAL_5M], fetch_from, fetch_to),
+        _fetch_all(stocks, [tf], fetch_from, fetch_to),
         _fetch_all(
             [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}],
-            [cfg.INTERVAL_5M], fetch_from, fetch_to,
+            [tf], fetch_from, fetch_to,
         ),
     )
 
     symbols: Dict[str, SymbolSeries] = {}
     name_by_token = {t: n for n, t in universe.items()}
     for token, frames in raw.items():
-        bars = _sort_candles(frames.get(cfg.INTERVAL_5M, []))
+        bars = _sort_candles(frames.get(tf, []))
         if not bars:
             continue
         ss = SymbolSeries(token=token, name=name_by_token.get(token, token), series=bars)
@@ -107,7 +125,7 @@ async def load_backtest_data(from_d: date, to_d: date,
     # NIFTY index
     nifty = None
     nframes = nifty_raw.get(cfg.NIFTY50_TOKEN, {})
-    nbars   = _sort_candles(nframes.get(cfg.INTERVAL_5M, []))
+    nbars   = _sort_candles(nframes.get(tf, []))
     if nbars:
         nifty = SymbolSeries(token=cfg.NIFTY50_TOKEN, name=cfg.NIFTY50_NAME, series=nbars)
         nifty.index_days()

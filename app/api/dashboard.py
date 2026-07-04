@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
-from datetime import date
-from typing import Any, Dict, List
-
 import csv
 import io
-from typing import Optional
+import math
+import uuid
+from datetime import date
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket
 from fastapi.responses import Response
@@ -16,6 +15,7 @@ from pydantic import BaseModel
 import app.config as cfg
 import app.services.settings as settings
 from app.backtest.engine import run_backtest
+from app.services.historical_data import fetch_indicator_history
 from app.services.snapshot import apply_depth, stub_entry
 from app.state import get_state
 from app.ws.dashboard_ws import ws_manager
@@ -180,6 +180,8 @@ class BacktestRequest(BaseModel):
     # a pydantic default would freeze the import-time value).
     slippage_bps: Optional[float]          = None
     capital:      Optional[float]          = None
+    # Bar interval to replay; None → the BACKTEST_TIMEFRAME setting.
+    timeframe:    Optional[str]            = None
     # Per-run strategy overrides, {spec_key: value} — validated against the
     # settings registry and scoped to this run's worker threads only.
     overrides:    Optional[Dict[str, Any]] = None
@@ -204,21 +206,25 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         attr_overrides.get("SLIPPAGE_BPS", cfg.SLIPPAGE_BPS)
     capital = req.capital if req.capital is not None else \
         attr_overrides.get("ACCOUNT_BALANCE", cfg.ACCOUNT_BALANCE)
+    timeframe = req.timeframe or attr_overrides.get("BACKTEST_TIMEFRAME") or cfg.BACKTEST_TIMEFRAME
     if capital <= 0:
         raise HTTPException(400, "capital must be greater than 0")
     if slippage < 0:
         raise HTTPException(400, "slippage_bps must be ≥ 0")
+    if not cfg.is_timeframe(timeframe):
+        raise HTTPException(400, f"timeframe must be one of {cfg.TIMEFRAMES}")
 
     run_id = uuid.uuid4().hex[:12]
     await _db.create_backtest_run(
         run_id, req.from_date, req.to_date,
-        {"slippage_bps": slippage, "capital": capital, "overrides": attr_overrides},
+        {"slippage_bps": slippage, "capital": capital,
+         "timeframe": timeframe, "overrides": attr_overrides},
     )
     asyncio.create_task(
         run_backtest(_db, run_id, req.from_date, req.to_date,
-                     slippage, capital, overrides=attr_overrides)
+                     slippage, capital, overrides=attr_overrides, timeframe=timeframe)
     )
-    return {"run_id": run_id, "status": "running"}
+    return {"run_id": run_id, "status": "running", "timeframe": timeframe}
 
 
 @router.get("/api/backtest/{run_id}")
@@ -318,6 +324,78 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
         out.append(entry)
 
     return sorted(out, key=lambda x: x["symbol"])
+
+
+# ── Live indicators on ANY timeframe (on-demand viewer) ───────────────────────
+# Fetches recent candles at `timeframe` for the whole watchlist and computes the
+# SAME indicators as the live path — but from freshly-fetched history, never
+# touching live state or the WS engine. Heavier than the live snapshot (one REST
+# batch + a TA-Lib pass), so it is polled on demand by the indicators page, not
+# streamed.
+
+def _tf_indicator_rows(watchlist: Dict[str, str],
+                       hist: Dict[str, list]) -> List[Dict[str, Any]]:
+    from app.engine.indicator_engine import compute_indicators   # numpy/TA-Lib
+    out: List[Dict[str, Any]] = []
+    for sym, tok in watchlist.items():
+        candles = hist.get(tok) or []
+        entry = stub_entry()
+        apply_depth(entry, {})          # add bid/ask/… keys as None (no live book)
+        entry["symbol"] = sym
+        if len(candles) < 3:
+            entry["ltp"]      = round(candles[-1].close, 2) if candles else 0.0
+            entry["bar_time"] = candles[-1].start_time[11:16] if candles else "—"
+            out.append(entry)
+            continue
+        # today's session suffix (chronological) → correct session VWAP per TF
+        today = candles[-1].start_time[:10]
+        i = len(candles)
+        while i > 0 and candles[i - 1].start_time[:10] == today:
+            i -= 1
+        ind = compute_indicators(candles, session_candles_5m=candles[i:])
+        macd_hist = (round(ind.macd_line - ind.macd_signal_line, 4)
+                     if ind.macd_line is not None and ind.macd_signal_line is not None else None)
+        entry.update({
+            "ltp":         round(candles[-1].close, 2),
+            "bar_time":    candles[-1].start_time[11:16],
+            "rsi":         round(ind.rsi, 1)              if ind.rsi is not None else None,
+            "adx":         round(ind.adx, 1)             if ind.adx is not None else None,
+            "plus_di":     round(ind.plus_di, 1)         if ind.plus_di is not None else None,
+            "minus_di":    round(ind.minus_di, 1)        if ind.minus_di is not None else None,
+            "macd":        round(ind.macd_line, 4)       if ind.macd_line is not None else None,
+            "macd_signal": round(ind.macd_signal_line, 4) if ind.macd_signal_line is not None else None,
+            "macd_hist":   macd_hist,
+            "support":     round(ind.support_level, 2)   if ind.support_level else None,
+            "vwap":        round(ind.vwap, 2)            if ind.vwap else None,
+            "above_vwap":  ind.price_above_vwap,
+            "pattern":     ind.candle_pattern,
+        })
+        out.append(entry)
+    return sorted(out, key=lambda x: x["symbol"])
+
+
+@router.get("/api/indicators/tf/{timeframe}")
+async def indicators_by_timeframe(timeframe: str) -> List[Dict[str, Any]]:
+    if not cfg.is_timeframe(timeframe):
+        raise HTTPException(400, f"timeframe must be one of {cfg.TIMEFRAMES}")
+    st = get_state()
+    wl = dict(st.full_watchlist if st.full_watchlist else st.active_watchlist)
+    if not wl:
+        return []
+    # Enough calendar days for TALIB_LOOKBACK bars to converge at this TF.
+    mins      = cfg.TIMEFRAME_MINUTES.get(timeframe, 5)
+    days_back = max(5, math.ceil(cfg.TALIB_LOOKBACK * mins / 375.0 * 7.0 / 5.0) + 2)
+    hist = await fetch_indicator_history(wl, timeframe, days_back=days_back)
+    # TA-Lib pass off the event loop.
+    return await asyncio.to_thread(_tf_indicator_rows, wl, hist)
+
+
+# ── Timeframes (choice set for the UI) ────────────────────────────────────────
+
+@router.get("/api/timeframes")
+def timeframes() -> Dict[str, Any]:
+    return {"timeframes": cfg.TIMEFRAMES,
+            "backtest_default": cfg.BACKTEST_TIMEFRAME}
 
 
 # ── Dashboard WebSocket ───────────────────────────────────────────────────────

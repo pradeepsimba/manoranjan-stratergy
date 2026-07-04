@@ -38,6 +38,11 @@ function controlHtml(s) {
   if (s.type === 'str') {
     return `<input class="field-input wide" type="text" data-key="${key}" value="${escHtml(s.value)}">`;
   }
+  if (s.type === 'choice') {
+    const opts = (s.choices || []).map(c =>
+      `<option value="${escHtml(c)}"${c === s.value ? ' selected' : ''}>${escHtml(c)}</option>`).join('');
+    return `<select class="field-input" data-key="${key}">${opts}</select>`;
+  }
   const step = s.step != null ? s.step : (s.type === 'int' ? 1 : 'any');
   const min  = s.min  != null ? `min="${s.min}"` : '';
   const max  = s.max  != null ? `max="${s.max}"` : '';
@@ -80,12 +85,47 @@ function render() {
   });
 
   wrap.querySelectorAll('[data-key]').forEach(el => {
-    el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', onEdit);
+    const evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
+    el.addEventListener(evt, onEdit);
   });
   wrap.querySelectorAll('[data-reset]').forEach(el => {
     el.addEventListener('click', () => resetKeys([el.getAttribute('data-reset')]));
   });
   updateSaveBar();
+  applyFilter();   // re-apply the active text filter to the freshly built panels
+}
+
+// ── Live filter ────────────────────────────────────────────────────────────────
+let _filter = '';
+
+function filterSettings(q) { _filter = (q || '').trim().toLowerCase(); applyFilter(); }
+
+function applyFilter() {
+  const q = _filter;
+  let anyVisible = false;
+  wrap.querySelectorAll('.panel').forEach(panel => {
+    let shown = 0;
+    panel.querySelectorAll('.set-row').forEach(row => {
+      const hay = (row.textContent + ' ' + (row.getAttribute('data-row') || '')).toLowerCase();
+      const hit = !q || hay.indexOf(q) !== -1;
+      row.classList.toggle('filtered-out', !hit);
+      if (hit) shown++;
+    });
+    panel.classList.toggle('filtered-out', shown === 0);
+    if (shown > 0) anyVisible = true;
+  });
+  let nr = document.getElementById('no-results');
+  if (q && !anyVisible) {
+    if (!nr) {
+      nr = document.createElement('div');
+      nr.id = 'no-results'; nr.className = 'no-results';
+      wrap.appendChild(nr);
+    }
+    nr.textContent = 'No settings match “' + q + '”';
+    nr.style.display = '';
+  } else if (nr) {
+    nr.style.display = 'none';
+  }
 }
 
 // ── Edit tracking ──────────────────────────────────────────────────────────────
@@ -99,7 +139,7 @@ function findSetting(key) {
 
 function readControl(el, setting) {
   if (setting.type === 'bool') return el.checked;
-  if (setting.type === 'time' || setting.type === 'str') return el.value;
+  if (setting.type === 'time' || setting.type === 'str' || setting.type === 'choice') return el.value;
   const n = parseFloat(el.value);
   return Number.isNaN(n) ? null : n;
 }

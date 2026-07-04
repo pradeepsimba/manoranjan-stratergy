@@ -29,10 +29,11 @@ WATCHLIST_OVERRIDES_KEY = "_WATCHLIST_OVERRIDES"
 def _s(key: str, label: str, type_: str, group: str, *,
        min_: Optional[float] = None, max_: Optional[float] = None,
        step: Optional[float] = None, help_: str = "", bt: bool = True,
-       parts: Optional[tuple] = None) -> Dict[str, Any]:
+       parts: Optional[tuple] = None,
+       choices: Optional[list] = None) -> Dict[str, Any]:
     return {"key": key, "label": label, "type": type_, "group": group,
             "min": min_, "max": max_, "step": step, "help": help_,
-            "bt": bt, "parts": parts}
+            "bt": bt, "parts": parts, "choices": choices}
 
 
 SPEC: List[Dict[str, Any]] = [
@@ -117,6 +118,8 @@ SPEC: List[Dict[str, Any]] = [
        min_=30, max_=3600, bt=False),
 
     # ── Backtest & costs ──────────────────────────────────────────────────────
+    _s("BACKTEST_TIMEFRAME", "Backtest timeframe", "choice", "Backtest & Costs",
+       choices=cfg.TIMEFRAMES, help_="Bar interval a backtest replays (per-run overridable on the form)."),
     _s("BACKTEST_WARMUP_DAYS", "Backtest warmup days", "int", "Backtest & Costs",
        min_=3, max_=30),
     _s("SLIPPAGE_BPS", "Slippage (bps)", "float", "Backtest & Costs", min_=0, max_=100, step=0.5),
@@ -186,6 +189,12 @@ def _coerce(spec: Dict[str, Any], raw: Any) -> Any:
         if not isinstance(raw, str) or not raw.strip():
             raise ValueError(f"{key}: expected a non-empty string")
         return raw.strip()
+
+    if typ == "choice":
+        val = raw.strip() if isinstance(raw, str) else raw
+        if val not in (spec["choices"] or []):
+            raise ValueError(f"{key}: must be one of {spec['choices']}")
+        return val
 
     if typ == "time":
         if not isinstance(raw, str) or not _TIME_RE.match(raw.strip()):
@@ -301,6 +310,7 @@ def describe() -> Dict[str, Any]:
             "min":        spec["min"],
             "max":        spec["max"],
             "step":       spec["step"],
+            "choices":    spec["choices"],
             "bt":         spec["bt"],
             "value":      value,
             "default":    default,

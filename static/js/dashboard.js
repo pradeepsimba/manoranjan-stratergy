@@ -138,7 +138,7 @@ function renderPositions(positions, openCount) {
     const pnlCls = p.livePnl > 0 ? 'pnl-pos' : p.livePnl < 0 ? 'pnl-neg' : '';
     const stCls  = p.status === 'OPEN' ? 'badge green' : 'badge gray';
     const cells  = tr.children;
-    _setCell(cells[0], p.symbol,                                               '');
+    _setCell(cells[0], p.symbol,                                               'card-title');
     _setCell(cells[1], `<span class="${stCls}">${p.status}</span>`,            '');
     _setCell(cells[2], fmt2(p.entry),                                          '');
     _setCell(cells[3], (p.entryTime || '').substring(11, 19),                  '');
@@ -147,6 +147,11 @@ function renderPositions(positions, openCount) {
     _setCell(cells[6], fmt2(p.target),                                         '');
     _setCell(cells[7], fmt2(p.ltp),                                            '');
     _setCell(cells[8], (p.livePnl >= 0 ? '+' : '') + fmt2(p.livePnl),         pnlCls);
+    // data-label drives the mobile card layout (table.cardify td::before)
+    const LBL = ['Symbol','Status','Entry','Time','Qty','SL','Target','LTP','P&L ₹'];
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].getAttribute('data-label') !== LBL[i]) cells[i].setAttribute('data-label', LBL[i]);
+    }
   });
 
   // Step 2: remove rows for positions that left
@@ -225,8 +230,9 @@ function wlAdd() {
       if (!r.ok) throw new Error(d.detail || r.statusText);
       input.value = '';
       _universeLoaded = 0;   // datalist is stale now
+      toast(d.changed === false ? `${d.symbol} already tradeable` : `Added ${d.symbol}`, 'ok');
     })
-    .catch(e => alert('Add failed: ' + e.message));
+    .catch(e => toast('Add failed: ' + e.message, 'err'));
 }
 
 function wlRemove(sym) {
@@ -240,8 +246,9 @@ function wlRemove(sym) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || r.statusText);
       _universeLoaded = 0;
+      toast(`Removed ${d.symbol}`, 'ok');
     })
-    .catch(e => alert('Remove failed: ' + e.message));
+    .catch(e => toast('Remove failed: ' + e.message, 'err'));
 }
 
 function renderScans(scans) {
@@ -300,8 +307,8 @@ function runBacktest() {
   const slipEl    = document.getElementById('bt-slip');
   const slippage  = slipEl && slipEl.value !== '' ? parseFloat(slipEl.value) : null;
 
-  if (!from_date || !to_date) { alert('Select both a from and to date.'); return; }
-  if (capital < 1000) { alert('Capital must be at least ₹1,000.'); return; }
+  if (!from_date || !to_date) { toast('Select both a from and to date.', 'warn'); return; }
+  if (capital < 1000) { toast('Capital must be at least ₹1,000.', 'warn'); return; }
 
   // Optional per-run strategy overrides (JSON) — live settings stay untouched.
   let overrides = null;
@@ -311,7 +318,7 @@ function runBacktest() {
       overrides = JSON.parse(ovrRaw);
       if (typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error('not an object');
     } catch (e) {
-      alert('Overrides must be a JSON object, e.g. {"RR_RATIO": 2.0}');
+      toast('Overrides must be a JSON object, e.g. {"RR_RATIO": 2.0}', 'err');
       return;
     }
   }
@@ -319,11 +326,16 @@ function runBacktest() {
   setBtStatus('running…', 'yellow');
   setRunBtn(true);
   document.getElementById('bt-summary').innerHTML = '';
+  document.getElementById('bt-viz').style.display = 'none';
   document.getElementById('bt-trades').innerHTML =
     '<tr><td colspan="14" class="empty-cell">Running…</td></tr>';
 
+  const tfEl = document.getElementById('bt-tf');
+  const timeframe = tfEl && tfEl.value ? tfEl.value : null;
+
   const body = { from_date, to_date, capital };
   if (slippage !== null && !Number.isNaN(slippage)) body.slippage_bps = slippage;
+  if (timeframe) body.timeframe = timeframe;
   if (overrides) body.overrides = overrides;
 
   fetch('/api/backtest', {
@@ -357,10 +369,12 @@ function pollBacktest(runId) {
 
       if (run.status === 'error') {
         setBtStatus('failed', 'red');
+        document.getElementById('bt-viz').style.display = 'none';
         document.getElementById('bt-summary').innerHTML =
           `<p class="pnl-neg" style="padding:8px 0;font-size:12px">${run.error || 'Backtest failed'}</p>`;
         document.getElementById('bt-trades').innerHTML =
           '<tr><td colspan="14" class="empty-cell">—</td></tr>';
+        toast('Backtest failed: ' + (run.error || 'unknown error'), 'err');
         return;
       }
       setBtStatus('done', 'green');
@@ -384,22 +398,55 @@ function setRunBtn(running) {
 
 function renderBacktestSummary(s) {
   const pf = s.profit_factor != null ? s.profit_factor : '—';
+  const net = s.net_pnl ?? 0;
   const cells = [
-    ['Trades',        s.total_trades ?? 0],
-    ['Win rate',      ((s.win_rate ?? 0) * 100).toFixed(1) + '%'],
-    ['Net P&L',       '₹' + fmt2(s.net_pnl ?? 0)],
-    ['Profit factor', pf],
-    ['Max DD',        '₹' + fmt2(s.max_drawdown ?? 0)],
-    ['Avg R',         s.avg_r_multiple ?? 0],
-    ['Costs',         '₹' + fmt2(s.total_costs ?? 0)],
-    ['Days',          s.days_traded ?? 0],
+    ['Trades',        s.total_trades ?? 0, ''],
+    ['Win rate',      ((s.win_rate ?? 0) * 100).toFixed(1) + '%', ''],
+    ['Net P&L',       '₹' + fmt2(net), net > 0 ? 'pnl-pos' : net < 0 ? 'pnl-neg' : ''],
+    ['Profit factor', pf, ''],
+    ['Max DD',        '₹' + fmt2(s.max_drawdown ?? 0), 'pnl-neg'],
+    ['Avg R',         s.avg_r_multiple ?? 0, ''],
+    ['Costs',         '₹' + fmt2(s.total_costs ?? 0), ''],
+    ['Days',          s.days_traded ?? 0, ''],
   ];
   document.getElementById('bt-summary').innerHTML =
     '<div class="bt-grid">' +
-    cells.map(([l, v]) =>
-      `<div class="bt-cell"><div class="bt-cell-label">${l}</div><div class="bt-cell-val">${v}</div></div>`
+    cells.map(([l, v, cls]) =>
+      `<div class="bt-cell"><div class="bt-cell-label">${l}</div><div class="bt-cell-val ${cls}">${v}</div></div>`
     ).join('') +
     '</div>';
+  renderBacktestViz(s);
+}
+
+// Equity curve (single series) + outcome breakdown. Uses the equity_curve and
+// win/loss counts the metrics endpoint already returns — no extra fetch.
+function renderBacktestViz(s) {
+  const viz = document.getElementById('bt-viz');
+  const curve = Array.isArray(s.equity_curve) ? s.equity_curve : [];
+  const trades = s.total_trades ?? 0;
+  if (!trades) { viz.style.display = 'none'; return; }
+  viz.style.display = '';
+
+  // Equity curve: prepend a 0 start so the line begins at flat, x = trade index.
+  const pts = [[ '', 0 ]].concat(curve.map((row, i) =>
+    [ (row[0] || '').toString().substring(0, 10) + ' · #' + (i + 1), Number(row[1]) ]));
+  const net = s.net_pnl ?? 0;
+  const netEl = document.getElementById('bt-eq-net');
+  netEl.textContent = (net >= 0 ? '+₹' : '−₹') + fmt2(Math.abs(net));
+  netEl.className = 'cnum ' + (net > 0 ? 'pnl-pos' : net < 0 ? 'pnl-neg' : '');
+  lineChart(document.getElementById('bt-equity'), pts, {
+    fmt:  v => (v >= 0 ? '+₹' : '−₹') + fmt2(Math.abs(v)),
+    yfmt: v => (Math.abs(v) >= 1000 ? (v / 1000).toFixed(0) + 'k' : Math.round(v)),
+  });
+
+  const wins   = s.winning_trades ?? 0;
+  const losses = s.losing_trades ?? 0;
+  const flat   = Math.max(0, trades - wins - losses);
+  outcomeBars(document.getElementById('bt-outcomes'), [
+    { label: 'Wins',   value: wins,   kind: 'win'  },
+    { label: 'Losses', value: losses, kind: 'loss' },
+    { label: 'Flat',   value: flat,   kind: 'flat' },
+  ]);
 }
 
 function renderBacktestTrades(trades) {
@@ -522,6 +569,18 @@ function deleteRun(runId) {
     })
     .catch(e => console.error('Delete failed:', e));
 }
+
+// Populate the backtest timeframe dropdown from the server's supported set.
+fetch('/api/timeframes')
+  .then(r => r.json())
+  .then(d => {
+    const sel = document.getElementById('bt-tf');
+    if (!sel || !Array.isArray(d.timeframes)) return;
+    sel.innerHTML = d.timeframes
+      .map(tf => `<option value="${tf}"${tf === d.backtest_default ? ' selected' : ''}>${tf}</option>`)
+      .join('');
+  })
+  .catch(() => { /* leave empty; backend falls back to the default */ });
 
 // On page load: check for a running backtest (resume polling if found), then
 // load the most recent done run so results survive a refresh — no localStorage.
