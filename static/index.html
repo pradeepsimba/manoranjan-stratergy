@@ -228,7 +228,16 @@
           </div>
           <div class="field">
             <label class="field-label" for="bt-tf">Timeframe</label>
-            <select class="field-input" id="bt-tf" style="width:90px"></select>
+            <!-- Static intraday fallbacks so the dropdown is never blank even if
+                 /api/timeframes is unavailable; dashboard.js refreshes it. -->
+            <select class="field-input" id="bt-tf" style="width:90px">
+              <option value="1m">1m</option>
+              <option value="3m">3m</option>
+              <option value="5m" selected>5m</option>
+              <option value="15m">15m</option>
+              <option value="30m">30m</option>
+              <option value="1h">1h</option>
+            </select>
           </div>
           <button class="btn-run" onclick="runBacktest()">Run</button>
         </div>
