@@ -85,7 +85,11 @@ function render() {
   groups.forEach(g => {
     // Skip settings that are shown nested under a condition elsewhere.
     const own = g.settings.filter(s => !s.cond);
-    const overridden = g.settings.filter(s => s.overridden).length;
+    // Count "changed" over what actually RENDERS in this panel: own rows plus
+    // any linked value rows nested under this group's condition toggles (which
+    // may live in another group). Otherwise the badge and visible rows disagree.
+    const rendered = own.concat(...own.map(s => linked[s.key] || []));
+    const overridden = rendered.filter(s => s.overridden).length;
     const panel = document.createElement('div');
     panel.className = 'panel';
     const rows = own.map(s => {

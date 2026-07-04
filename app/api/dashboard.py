@@ -199,6 +199,7 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         # Only the scan window matters to a replay — validating against the
         # live-only times (premarket/open/session-end) would falsely reject.
         settings.validate_time_order(attr_overrides, points=("SCAN_START", "CUTOFF"))
+        settings.validate_macd_periods(attr_overrides)
     except ValueError as e:
         raise HTTPException(400, f"overrides: {e}")
 

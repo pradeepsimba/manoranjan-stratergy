@@ -259,6 +259,21 @@ def expand_changes(changes: Dict[str, Any], *, bt_only: bool = False) -> Dict[st
     return out
 
 
+def validate_macd_periods(attr_changes: Dict[str, Any]) -> None:
+    """
+    Cross-field guard: MACD fast EMA must be shorter than the slow EMA (they are
+    independent int fields, so a fat-finger like fast=26/slow=12 is possible and
+    makes TA-Lib's MACD return garbage/NaN). No-op unless a MACD period changed.
+    """
+    if not any(k in attr_changes for k in ("MACD_FAST", "MACD_SLOW")):
+        return
+    fast = attr_changes.get("MACD_FAST", cfg.MACD_FAST)
+    slow = attr_changes.get("MACD_SLOW", cfg.MACD_SLOW)
+    if fast >= slow:
+        raise ValueError(
+            f"MACD fast period ({fast}) must be less than the slow period ({slow})")
+
+
 def _coerce_attr(key: str, raw: Any) -> Any:
     """
     Validate one raw cfg-attr value (as stored in the DB) against its SPEC.
@@ -377,6 +392,16 @@ async def load_and_apply(db) -> None:
         print(f"Settings: stored session times invalid ({e}) — "
               f"dropped {time_attrs}, using default timings")
 
+    # Same self-heal for a stored MACD fast≥slow combination.
+    try:
+        validate_macd_periods(valid)
+    except ValueError as e:
+        macd_attrs = [k for k in ("MACD_FAST", "MACD_SLOW", "MACD_SIGNAL") if k in valid]
+        for k in macd_attrs:
+            valid.pop(k, None)
+        print(f"Settings: stored MACD periods invalid ({e}) — "
+              f"dropped {macd_attrs}, using defaults")
+
     if valid:
         cfg.set_runtime_overrides(valid)
         print(f"Settings: applied {len(valid)} stored overrides")
@@ -390,6 +415,7 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     """
     attr_changes = expand_changes(changes)
     validate_time_order(attr_changes)
+    validate_macd_periods(attr_changes)
 
     defaults   = cfg.dynamic_defaults()
     store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
@@ -423,6 +449,9 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
     defaults = cfg.dynamic_defaults()
     validate_time_order({k: defaults[k] for k in attr_keys
                          if k.endswith("_HOUR") or k.endswith("_MIN")})
+    # Same guard for a partial MACD reset (e.g. resetting slow→26 while fast=30).
+    validate_macd_periods({k: defaults[k] for k in attr_keys
+                           if k in ("MACD_FAST", "MACD_SLOW")})
 
     await db.delete_app_settings(attr_keys)
     cfg.clear_runtime_overrides(attr_keys)
