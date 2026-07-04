@@ -143,22 +143,23 @@ def _simulate_day(
     slippage_bps: float,
     capital:      Optional[float] = None,
     overrides:    Optional[Dict]  = None,
-    intraday:     bool            = True,
 ) -> List:
     """
     Simulate ONE trading day with its own fresh portfolio. Days are fully
-    independent (intraday strategy, EOD square-off, daily reset), which is what
+    independent (INTRADAY strategy, EOD square-off, daily reset), which is what
     lets the caller run them in parallel. Returns that day's trades in close
     order.
+
+    This engine is intraday-only: a position opens on an early bar and exits on
+    a LATER bar or at EOD square-off. Timeframes coarser than 1h yield too few
+    bars per day for that to be meaningful, so the API rejects them upstream.
 
     `overrides` are the run's per-request settings; they are scoped to THIS
     worker thread only (cfg.thread_overrides), so a concurrent live session
     keeps reading the global runtime values.
-    `intraday` False (daily+ timeframes) bypasses the time-of-day scan window,
-    whose 09:45–14:30 bounds are meaningless for a single daily/multi-hour bar.
     """
     with cfg.thread_overrides(overrides or {}):
-        return _simulate_day_impl(day, symbols, nifty, slippage_bps, capital, intraday)
+        return _simulate_day_impl(day, symbols, nifty, slippage_bps, capital)
 
 
 def _simulate_day_impl(
@@ -167,7 +168,6 @@ def _simulate_day_impl(
     nifty:        SymbolSeries,
     slippage_bps: float,
     capital:      Optional[float],
-    intraday:     bool = True,
 ) -> List:
     grid = sorted(nifty.at.get(day, {}).items())   # [(time, nifty_gidx), ...]
     if not grid:
@@ -225,7 +225,7 @@ def _simulate_day_impl(
         # 2) Entries — only inside the scan window, before cutoff, and only when
         #    the portfolio can take a new position. Once 3 are open (or the loss
         #    limit is hit) the whole 500-symbol scan is skipped until a slot frees.
-        if (not intraday) or (scan_start <= tm < cutoff):
+        if scan_start <= tm < cutoff:
             open_syms, traded, dpnl = port.snapshot()
             if len(open_syms) < max_pos and dpnl > -loss_limit:
                 signals: List[BTPosition] = []
@@ -275,7 +275,6 @@ def simulate(
     slippage_bps: float,
     capital:      Optional[float] = None,
     overrides:    Optional[Dict]  = None,
-    timeframe:    Optional[str]   = None,
 ) -> Tuple[List, List, int]:
     """
     Run the full replay. Days are independent, so they execute in parallel across
@@ -288,16 +287,11 @@ def simulate(
     if not days:
         return [], [], 0
 
-    # A daily (or coarser) bar can't honor an intraday time-of-day scan window —
-    # skip it so daily backtests don't silently return zero trades.
-    tf       = timeframe or cfg.BACKTEST_TIMEFRAME
-    intraday = cfg.TIMEFRAME_MINUTES.get(tf, 5) < 375
-
     workers = max(1, min(cfg.SCAN_WORKERS, len(days)))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bt-day") as pool:
         # map preserves input order → results already in chronological day order
         per_day = list(pool.map(
-            lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital, overrides, intraday),
+            lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital, overrides),
             days,
         ))
 
@@ -335,7 +329,7 @@ async def run_backtest(
             return
 
         trades, equity, days = await asyncio.to_thread(
-            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital, overrides, tf
+            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital, overrides
         )
 
         summary = compute_metrics(trades, equity, days)

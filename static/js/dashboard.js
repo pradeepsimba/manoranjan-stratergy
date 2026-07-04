@@ -575,8 +575,9 @@ fetch('/api/timeframes')
   .then(r => r.json())
   .then(d => {
     const sel = document.getElementById('bt-tf');
-    if (!sel || !Array.isArray(d.timeframes)) return;
-    sel.innerHTML = d.timeframes
+    const list = Array.isArray(d.backtest_timeframes) ? d.backtest_timeframes : d.timeframes;
+    if (!sel || !Array.isArray(list)) return;
+    sel.innerHTML = list
       .map(tf => `<option value="${tf}"${tf === d.backtest_default ? ' selected' : ''}>${tf}</option>`)
       .join('');
   })

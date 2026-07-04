@@ -99,7 +99,13 @@ def _detect_bullish_pattern(
             and c.close > (prev2.open + prev2.close) / 2):
         return "Morning Star"
 
-    if c.is_bullish() and body / rng > 0.7 and body > 5:
+    # "Strong Bull Close" — a decisive green bar (body ≥ 70% of range) whose
+    # move is significant relative to PRICE. The significance floor is price-
+    # relative (0.1% of close) rather than an absolute ₹ amount: an absolute
+    # `body > 5` was ₹-biased — trivially true for ₹5000 stocks and effectively
+    # unreachable for ₹90 ones, across NSE's wide price range. Shared by live
+    # and backtest, so this changes signal generation identically for both.
+    if c.is_bullish() and body / rng > 0.7 and body > c.close * 0.001:
         return "Strong Bull Close"
 
     return None

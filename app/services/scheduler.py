@@ -657,6 +657,14 @@ class SchedulerService:
         total   = len(trades)
         winners = sum(1 for p in trades if p.pnl > 0)
 
+        # Intraday max drawdown: peak-to-trough of running realized P&L in close
+        # order (same definition as the backtest's metrics.max_drawdown).
+        peak = cum = max_dd = 0.0
+        for p in trades:
+            cum += p.pnl
+            peak = max(peak, cum)
+            max_dd = max(max_dd, peak - cum)
+
         # Only persist stats when this process actually ran a session. On a
         # restart after market close the state is fresh/empty — writing here
         # would overwrite the day's real row with zeros (ON CONFLICT DO UPDATE).
@@ -666,7 +674,10 @@ class SchedulerService:
                     total_trades     = total,
                     winning_trades   = winners,
                     total_pnl        = st.daily_pnl,
-                    gemini_shortlist = st.gemini_shortlist,
+                    # None when empty (restart-restore has no shortlist) → the
+                    # DB COALESCE keeps the real one saved earlier today.
+                    gemini_shortlist = st.gemini_shortlist or None,
+                    max_drawdown     = round(max_dd, 2),
                 )
             except Exception as e:
                 print(f"EOD stats error: {e}")

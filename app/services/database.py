@@ -186,22 +186,29 @@ class DatabaseService:
         total_trades: int,
         winning_trades: int,
         total_pnl: float,
-        gemini_shortlist: List[str],
+        gemini_shortlist: Optional[List[str]],
+        max_drawdown: float = 0.0,
     ) -> None:
         # IST calendar date — the trading day, regardless of the host timezone.
+        # gemini_shortlist=None → keep whatever is already stored (COALESCE): a
+        # restart-after-close restores trades but NOT the shortlist, and must not
+        # clobber the real one written earlier in the day.
         today = datetime.now(_IST).date()
+        shortlist = json.dumps(gemini_shortlist) if gemini_shortlist is not None else None
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO daily_stats
-                    (stat_date, total_trades, winning_trades, total_pnl, gemini_shortlist)
-                VALUES ($1,$2,$3,$4,$5)
+                    (stat_date, total_trades, winning_trades, total_pnl,
+                     gemini_shortlist, max_drawdown)
+                VALUES ($1,$2,$3,$4,$5,$6)
                 ON CONFLICT (stat_date) DO UPDATE
-                    SET total_trades=$2, winning_trades=$3,
-                        total_pnl=$4, gemini_shortlist=$5
+                    SET total_trades=$2, winning_trades=$3, total_pnl=$4,
+                        gemini_shortlist=COALESCE($5, daily_stats.gemini_shortlist),
+                        max_drawdown=$6
                 """,
-                today, total_trades, winning_trades,
-                total_pnl, json.dumps(gemini_shortlist),
+                today, total_trades, winning_trades, total_pnl,
+                shortlist, max_drawdown,
             )
 
     # ── App settings (runtime overrides + internal key-value state) ──────────

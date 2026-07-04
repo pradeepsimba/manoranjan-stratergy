@@ -63,6 +63,11 @@ TIMEFRAME_MINUTES = {
 def is_timeframe(tf: str) -> bool:
     return tf in TIMEFRAMES
 
+
+# Timeframes the (intraday, EOD-square-off) backtest engine can replay: coarser
+# bars give too few bars/day for an entry to precede the day's last bar.
+BACKTEST_TIMEFRAMES = [tf for tf in TIMEFRAMES if TIMEFRAME_MINUTES[tf] <= 60]
+
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
 HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
 SCAN_WORKERS      = 16    # ThreadPoolExecutor size for the parallel scan

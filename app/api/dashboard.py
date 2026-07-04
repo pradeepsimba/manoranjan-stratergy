@@ -213,6 +213,14 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         raise HTTPException(400, "slippage_bps must be ≥ 0")
     if not cfg.is_timeframe(timeframe):
         raise HTTPException(400, f"timeframe must be one of {cfg.TIMEFRAMES}")
+    # The replay is intraday-only (fresh portfolio per day, EOD square-off).
+    # Coarser-than-1h bars give too few bars/day for an entry to precede the
+    # day's last bar, so entry+square-off would collapse onto one bar and every
+    # trade would be a guaranteed slippage/cost loss. Reject rather than mislead.
+    if cfg.TIMEFRAME_MINUTES.get(timeframe, 5) > 60:
+        raise HTTPException(
+            400, "backtest supports intraday timeframes up to 1h "
+                 "(the engine squares off at EOD and cannot hold overnight)")
 
     run_id = uuid.uuid4().hex[:12]
     await _db.create_backtest_run(
@@ -394,7 +402,8 @@ async def indicators_by_timeframe(timeframe: str) -> List[Dict[str, Any]]:
 
 @router.get("/api/timeframes")
 def timeframes() -> Dict[str, Any]:
-    return {"timeframes": cfg.TIMEFRAMES,
+    return {"timeframes": cfg.TIMEFRAMES,                 # viewer: all intervals
+            "backtest_timeframes": cfg.BACKTEST_TIMEFRAMES,  # replay: intraday only
             "backtest_default": cfg.BACKTEST_TIMEFRAME}
 
 

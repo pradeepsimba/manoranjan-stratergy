@@ -254,8 +254,13 @@ class MarketDataService:
                 elif interval == "1h":
                     self._upsert(self.state.candles_1h, symbol, candle)
 
-        if interval == "5m":
-            self.state.last_5m_bar_time = candle.start_time[11:16]
+        # Dashboard "last bar" clock — only for accepted STOCK 5m bars, and never
+        # move it backwards (a reconnect-replayed stale bar is dropped by _upsert
+        # but must not rewind this display; NIFTY's own cadence isn't "the" bar).
+        if interval == "5m" and symbol != cfg.NIFTY50_TOKEN:
+            bt = candle.start_time[11:16]
+            if self.state.last_5m_bar_time is None or bt >= self.state.last_5m_bar_time:
+                self.state.last_5m_bar_time = bt
 
         if ltp > 0:
             if symbol == cfg.NIFTY50_TOKEN:
@@ -270,7 +275,13 @@ class MarketDataService:
         if snap and stockname and symbol != cfg.NIFTY50_TOKEN and interval == "5m":
             depth = _parse_depth(snap)
             if depth:
-                self.state.depth[stockname] = depth
+                # MERGE, don't replace: a partial snap (e.g. bid/ask present but
+                # no BuyQty/SellQty line) would otherwise drop the last-known
+                # `ratio`, silently turning depth_bullish into an auto-pass and
+                # letting a sell-skewed book through. New dict = atomic swap for
+                # lock-free readers (same GIL-safe pattern as ltp).
+                prev = self.state.depth.get(stockname)
+                self.state.depth[stockname] = {**prev, **depth} if prev else depth
 
         # Tick-wise engine: flag this stock for re-evaluation on the next loop
         # cycle. Only 5m ticks update the forming bar; 1h ticks must not enqueue
