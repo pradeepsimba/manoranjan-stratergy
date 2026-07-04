@@ -102,6 +102,14 @@ function connect() {
       var d = JSON.parse(e.data);
       // Accept full snapshot (1 s broadcast) and per-tick delta (~100 ms)
       if (d.type !== 'STATE_UPDATE' && d.type !== 'INDICATOR_UPDATE') return;
+      // Keep the clock + market badge live on EVERY message — STATE_UPDATE now
+      // carries indicatorSnapshot only every 10th push, so gating these behind
+      // snapshot presence would freeze them between snapshots outside market
+      // hours (when no ~100ms INDICATOR_UPDATE deltas flow).
+      var now = new Date();
+      document.getElementById('updated-txt').textContent =
+        'Live · ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      updateMarketBadge();
       var snap = d.indicatorSnapshot;
       if (!snap || typeof snap !== 'object') return;
       // Merge fresher WS data; always force entry.symbol = the JSON key
@@ -133,10 +141,6 @@ function connect() {
       });
       scheduleRender();   // coalesces into one paint frame even if ticks arrive faster
       _saveCache();
-      var now = new Date();
-      document.getElementById('updated-txt').textContent =
-        'Live · ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      updateMarketBadge();
     } catch (err) { console.error(err); }
   };
 
