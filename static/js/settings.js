@@ -50,36 +50,56 @@ function controlHtml(s) {
           step="${step}" ${min} ${max}>`;
 }
 
+// One setting row. `nested` = rendered indented under its condition toggle.
+function rowHtml(s, nested) {
+  return `
+    <div class="set-row${nested ? ' set-nested' : ''}" data-row="${escHtml(s.key)}">
+      <div class="set-info">
+        <div class="set-label">
+          ${s.overridden ? '<span class="dot-override" title="Differs from default"></span>' : ''}
+          ${escHtml(s.label)}
+        </div>
+        ${s.help ? `<div class="set-help">${escHtml(s.help)}</div>` : ''}
+        <div class="set-default">default: ${escHtml(fmtVal(s, s.default))}${s.bt ? '' : ' · live only'}</div>
+      </div>
+      <div class="set-ctl">
+        ${controlHtml(s)}
+        ${s.overridden ? `<button class="btn-mini" data-reset="${escHtml(s.key)}" title="Reset to default">↺</button>` : ''}
+      </div>
+    </div>`;
+}
+
 function render() {
   const groups = (specData && specData.groups) || [];
   wrap.querySelectorAll('.panel').forEach(p => p.remove());
   const loading = document.getElementById('loading-note');
   if (loading) loading.remove();
 
+  // Map COND_* toggle key → its linked value settings (gathered across ALL
+  // groups) so each condition's thresholds render inline under its toggle.
+  const linked = {};
+  groups.forEach(g => g.settings.forEach(s => {
+    if (s.cond) (linked[s.cond] = linked[s.cond] || []).push(s);
+  }));
+
   groups.forEach(g => {
+    // Skip settings that are shown nested under a condition elsewhere.
+    const own = g.settings.filter(s => !s.cond);
     const overridden = g.settings.filter(s => s.overridden).length;
     const panel = document.createElement('div');
     panel.className = 'panel';
+    const rows = own.map(s => {
+      let html = rowHtml(s, false);
+      // A condition toggle with linked values: render them indented below it.
+      if (linked[s.key]) html += linked[s.key].map(ls => rowHtml(ls, true)).join('');
+      return html;
+    }).join('');
     panel.innerHTML = `
       <div class="panel-header">
         <span class="panel-title">${escHtml(g.name)}</span>
         ${overridden ? `<span class="badge yellow grp-badge">${overridden} changed</span>` : ''}
       </div>
-      ${g.settings.map(s => `
-        <div class="set-row" data-row="${escHtml(s.key)}">
-          <div class="set-info">
-            <div class="set-label">
-              ${s.overridden ? '<span class="dot-override" title="Differs from default"></span>' : ''}
-              ${escHtml(s.label)}
-            </div>
-            ${s.help ? `<div class="set-help">${escHtml(s.help)}</div>` : ''}
-            <div class="set-default">default: ${escHtml(fmtVal(s, s.default))}${s.bt ? '' : ' · live only'}</div>
-          </div>
-          <div class="set-ctl">
-            ${controlHtml(s)}
-            ${s.overridden ? `<button class="btn-mini" data-reset="${escHtml(s.key)}" title="Reset to default">↺</button>` : ''}
-          </div>
-        </div>`).join('')}
+      ${rows}
     `;
     wrap.appendChild(panel);
   });

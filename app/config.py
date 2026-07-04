@@ -98,8 +98,13 @@ _DEFAULTS: Dict[str, Any] = {
     "ADX_PERIOD":        14,
     "ADX_THRESHOLD":     20.0,
     "RSI_PERIOD":        14,
-    "RSI_OVERSOLD":      30,
+    "RSI_OVERSOLD":      30,      # the RSI level ("30") the RSI rule compares against
     "RSI_RISING_BARS":   3,       # RSI must rise for this many consecutive bars
+    # How the RSI entry condition uses the level above:
+    #   "above_or_rising" — RSI > level OR rising N bars (default / original)
+    #   "above"           — RSI > level only
+    #   "below"           — RSI < level (oversold-bounce entry)
+    "RSI_MODE":          "above_or_rising",
     "SWING_LOW_BARS":    10,      # Lookback bars for structural support floor
     "SUPPORT_TOUCH_PCT": 0.015,   # Price within 1.5% of support = "at support"
     "MIN_SL_OFFSET":     5.0,     # Minimum SL distance in ₹
@@ -107,6 +112,9 @@ _DEFAULTS: Dict[str, Any] = {
     "VOLUME_MULTIPLIER": 1.5,     # Bar volume must exceed this × the volume MA
     "RR_RATIO":          1.5,     # target_offset = sl_offset × RR_RATIO
     "MACD_CROSS_BARS":   3,       # Allow entry up to N bars after a bullish cross
+    "MACD_FAST":         12,      # MACD fast EMA period
+    "MACD_SLOW":         26,      # MACD slow EMA period
+    "MACD_SIGNAL":       9,       # MACD signal EMA period
     "DEPTH_MIN_RATIO":   0.4,     # Order-book buy-side ratio floor (live only)
     # Tail length fed to TA-Lib per scan. 120 bars lets RSI(14)/ADX(14)/MACD(26,9)
     # fully converge (Wilder smoothing) while skipping multi-day warmup history.

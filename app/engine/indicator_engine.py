@@ -236,7 +236,8 @@ def compute_indicators(
 
     # ── MACD (12, 26, 9) ──────────────────────────────────────────────────────
     macd, macdsignal, _ = talib.MACD(
-        close, fastperiod=12, slowperiod=26, signalperiod=9
+        close, fastperiod=cfg.MACD_FAST, slowperiod=cfg.MACD_SLOW,
+        signalperiod=cfg.MACD_SIGNAL,
     )
     # Store None when TA-Lib returns NaN (insufficient bars) so callers can
     # distinguish "no data" from a legitimate value of 0.0.

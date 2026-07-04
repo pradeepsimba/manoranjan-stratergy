@@ -30,10 +30,13 @@ def _s(key: str, label: str, type_: str, group: str, *,
        min_: Optional[float] = None, max_: Optional[float] = None,
        step: Optional[float] = None, help_: str = "", bt: bool = True,
        parts: Optional[tuple] = None,
-       choices: Optional[list] = None) -> Dict[str, Any]:
+       choices: Optional[list] = None,
+       cond: Optional[str] = None) -> Dict[str, Any]:
+    # cond = the COND_* toggle key this value belongs to; the Settings UI nests
+    # it under that condition instead of showing it in a separate group.
     return {"key": key, "label": label, "type": type_, "group": group,
             "min": min_, "max": max_, "step": step, "help": help_,
-            "bt": bt, "parts": parts, "choices": choices}
+            "bt": bt, "parts": parts, "choices": choices, "cond": cond}
 
 
 SPEC: List[Dict[str, Any]] = [
@@ -75,22 +78,38 @@ SPEC: List[Dict[str, Any]] = [
        min_=100, max_=10_000_000, step=100, help_="No new entries once daily P&L breaches −limit."),
 
     # ── Strategy parameters ───────────────────────────────────────────────────
-    _s("ADX_PERIOD", "ADX period", "int", "Strategy", min_=5, max_=50),
-    _s("ADX_THRESHOLD", "ADX threshold", "float", "Strategy", min_=5, max_=50, step=0.5),
-    _s("RSI_PERIOD", "RSI period", "int", "Strategy", min_=5, max_=50),
-    _s("RSI_OVERSOLD", "RSI floor", "int", "Strategy", min_=10, max_=50,
-       help_="rsi_ok passes when RSI > floor OR RSI rose N bars."),
-    _s("RSI_RISING_BARS", "RSI rising bars", "int", "Strategy", min_=1, max_=10),
-    _s("SWING_LOW_BARS", "Support lookback bars", "int", "Strategy", min_=3, max_=50),
+    # `cond=...` links a value to an Entry-Condition toggle so the UI shows it
+    # inline under that condition. Ones with no cond are global (sizing/lookback).
+    _s("RSI_MODE", "RSI rule", "choice", "Strategy", cond="COND_RSI",
+       choices=["above_or_rising", "above", "below"],
+       help_="above_or_rising = RSI > level OR rising · above = RSI > level · below = RSI < level (oversold)."),
+    _s("RSI_OVERSOLD", "RSI level", "int", "Strategy", min_=5, max_=95, cond="COND_RSI",
+       help_="The RSI level the rule compares against (your \"30\")."),
+    _s("RSI_PERIOD", "RSI period", "int", "Strategy", min_=5, max_=50, cond="COND_RSI"),
+    _s("RSI_RISING_BARS", "RSI rising bars", "int", "Strategy", min_=1, max_=10, cond="COND_RSI"),
+
+    _s("ADX_THRESHOLD", "ADX threshold", "float", "Strategy", min_=5, max_=50, step=0.5, cond="COND_ADX"),
+    _s("ADX_PERIOD", "ADX period", "int", "Strategy", min_=5, max_=50, cond="COND_ADX"),
+
+    _s("MACD_CROSS_BARS", "MACD cross window (bars)", "int", "Strategy", min_=1, max_=10, cond="COND_MACD_CROSS"),
+    _s("MACD_FAST", "MACD fast period", "int", "Strategy", min_=2, max_=100, cond="COND_MACD_CROSS"),
+    _s("MACD_SLOW", "MACD slow period", "int", "Strategy", min_=3, max_=200, cond="COND_MACD_CROSS"),
+    _s("MACD_SIGNAL", "MACD signal period", "int", "Strategy", min_=2, max_=100, cond="COND_MACD_CROSS"),
+
+    _s("VOLUME_MULTIPLIER", "Volume surge ×", "float", "Strategy", min_=1.0, max_=10, step=0.1, cond="COND_VOLUME_SURGE"),
+    _s("VOLUME_MA_PERIOD", "Volume MA period", "int", "Strategy", min_=5, max_=100, cond="COND_VOLUME_SURGE"),
+
+    _s("SWING_LOW_BARS", "Support lookback bars", "int", "Strategy", min_=3, max_=50, cond="COND_NEAR_SUPPORT"),
     _s("SUPPORT_TOUCH_PCT", "Support proximity (fraction)", "float", "Strategy",
-       min_=0.001, max_=0.10, step=0.001, help_="0.015 = within 1.5% above the swing low."),
-    _s("MIN_SL_OFFSET", "Min stop distance ₹", "float", "Strategy", min_=0.5, max_=100, step=0.5),
-    _s("VOLUME_MA_PERIOD", "Volume MA period", "int", "Strategy", min_=5, max_=100),
-    _s("VOLUME_MULTIPLIER", "Volume surge ×", "float", "Strategy", min_=1.0, max_=10, step=0.1),
-    _s("RR_RATIO", "Reward : risk ratio", "float", "Strategy", min_=0.5, max_=10, step=0.1),
-    _s("MACD_CROSS_BARS", "MACD cross window (bars)", "int", "Strategy", min_=1, max_=10),
+       min_=0.001, max_=0.10, step=0.001, cond="COND_NEAR_SUPPORT",
+       help_="0.015 = within 1.5% above the swing low."),
+
     _s("DEPTH_MIN_RATIO", "Min order-book buy ratio", "float", "Strategy",
-       min_=0.0, max_=1.0, step=0.05, help_="Live only — backtests have no order book."),
+       min_=0.0, max_=1.0, step=0.05, cond="COND_DEPTH",
+       help_="Live only — backtests have no order book."),
+
+    _s("MIN_SL_OFFSET", "Min stop distance ₹", "float", "Strategy", min_=0.5, max_=100, step=0.5),
+    _s("RR_RATIO", "Reward : risk ratio", "float", "Strategy", min_=0.5, max_=10, step=0.1),
     _s("TALIB_LOOKBACK", "Indicator lookback bars", "int", "Strategy", min_=60, max_=290,
        help_="Tail fed to TA-Lib; must stay under the 300-bar candle buffer."),
 
@@ -312,6 +331,7 @@ def describe() -> Dict[str, Any]:
             "max":        spec["max"],
             "step":       spec["step"],
             "choices":    spec["choices"],
+            "cond":       spec["cond"],
             "bt":         spec["bt"],
             "value":      value,
             "default":    default,

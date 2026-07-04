@@ -14,6 +14,22 @@ from typing import Dict, List, Optional
 import app.config as cfg
 from app.models import IndicatorResult
 
+def _rsi_ok(ind, r) -> bool:
+    """
+    RSI entry rule, direction controlled by cfg.RSI_MODE against RSI_OVERSOLD:
+      above_or_rising (default) — RSI > level OR rose for RSI_RISING_BARS
+      above                     — RSI > level
+      below                     — RSI < level (oversold-bounce entry)
+    ind.rsi_above_30 already means "RSI > RSI_OVERSOLD" (name is historical).
+    """
+    mode = cfg.RSI_MODE
+    if mode == "below":
+        return ind.rsi is not None and ind.rsi < cfg.RSI_OVERSOLD
+    if mode == "above":
+        return ind.rsi_above_30
+    return ind.rsi_above_30 or ind.rsi_rising
+
+
 # The single source of truth: check key → (config toggle attr, evaluator).
 # depth_ratio=None (no snap data yet / backtest) defaults depth to PASS —
 # it only vetoes a clearly sell-skewed book.
@@ -24,8 +40,7 @@ _CONDITIONS: Dict[str, tuple] = {
                         lambda ind, r: ind.bullish_pattern),
     "adx_ok":          ("COND_ADX",
                         lambda ind, r: ind.adx_ok),
-    "rsi_ok":          ("COND_RSI",
-                        lambda ind, r: ind.rsi_above_30 or ind.rsi_rising),
+    "rsi_ok":          ("COND_RSI", _rsi_ok),
     "macd_cross":      ("COND_MACD_CROSS",
                         lambda ind, r: ind.macd_bullish_cross),
     "volume_surge":    ("COND_VOLUME_SURGE",

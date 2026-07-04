@@ -54,6 +54,13 @@
     .set-row.dirty .set-label::after {
       content: '●'; color: var(--warn); font-size: 8px;
     }
+    /* condition value rows nested under their toggle */
+    .set-nested {
+      padding-left: 26px;
+      background: color-mix(in srgb, var(--surf) 55%, var(--bg));
+      border-left: 2px solid var(--prime-container);
+    }
+    .set-nested .set-label { font-size: 12px; color: var(--txt-2); }
     .dot-override {
       width: 6px; height: 6px; border-radius: 50%;
       background: var(--prime); flex-shrink: 0;
