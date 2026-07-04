@@ -21,6 +21,7 @@ import numpy as np
 import talib
 
 import app.config as cfg
+from app.engine.conditions import cheap_gates_veto
 from app.models import Candle, IndicatorResult
 
 
@@ -203,14 +204,11 @@ def compute_indicators(
         ind.volume_surge  = (ind.avg_volume_20 > 0
                              and float(volume[-1]) > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
 
-    if entry_short_circuit and (
-            (cfg.COND_NEAR_SUPPORT    and not ind.near_support)
-            or (cfg.COND_BULLISH_PATTERN and not ind.bullish_pattern)
-            or (cfg.COND_ABOVE_VWAP      and not ind.price_above_vwap)
-            or (cfg.COND_VOLUME_SURGE    and not ind.volume_surge)):
-        # An ENABLED cheap gate already vetoes the entry — the RSI/MACD/ADX
-        # values can't change the (conjunctive) decision, so skip the TA-Lib
-        # calls entirely. Disabled conditions auto-pass and must not veto here.
+    if entry_short_circuit and cheap_gates_veto(ind):
+        # An ENABLED cheap condition already vetoes the entry — the RSI/MACD/
+        # ADX values can't change the (conjunctive) decision, so skip the
+        # TA-Lib calls entirely. Shares the _CONDITIONS table with entry_ok,
+        # so the veto and the final check cannot drift.
         return ind
 
     # ── RSI (14) ────────────────────────────────────────────────────────────

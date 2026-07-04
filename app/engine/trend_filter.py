@@ -52,22 +52,44 @@ def check_trend(
     `day_open` is today's open, sourced from today's first 5m bar by the caller,
     so the daily gate never depends on a separate (never live-updated) 1d fetch.
 
-    Gates (each individually toggleable at runtime — a DISABLED gate is
-    treated as green so it never blocks; shared by live and backtest):
+    Gates:
       1. Daily Green       — stock LTP > today's open
       2. Hourly Green      — current 1H candle close > open
       3. NIFTY Daily Green — precomputed
       4. NIFTY Above VWAP  — precomputed
+
+    Records the ACTUAL market state of every gate — runtime enable/disable
+    toggles are applied in trend_blockers(), NOT here, so the TrendGate saved
+    with a position (and the DB daily_green/hourly_green columns) stays an
+    honest diagnostic even when a gate is disabled.
     """
     gate = TrendGate()
-    gate.nifty_daily_green = nifty_daily_green or not cfg.GATE_NIFTY_DAILY
-    gate.nifty_above_vwap  = nifty_above_vwap  or not cfg.GATE_NIFTY_VWAP
+    gate.nifty_daily_green = nifty_daily_green
+    gate.nifty_above_vwap  = nifty_above_vwap
 
-    gate.daily_green = ((day_open > 0 and ltp > 0 and ltp > day_open)
-                        or not cfg.GATE_STOCK_DAILY)
+    if day_open > 0 and ltp > 0:
+        gate.daily_green = ltp > day_open
 
-    gate.hourly_green = ((bool(candles_1h)
-                          and candles_1h[-1].close > candles_1h[-1].open)
-                         or not cfg.GATE_STOCK_HOURLY)
+    if candles_1h:
+        gate.hourly_green = candles_1h[-1].close > candles_1h[-1].open
 
     return gate
+
+
+# (gate attr, config toggle, human-readable rejection reason)
+_GATE_TOGGLES = (
+    ("daily_green",       "GATE_STOCK_DAILY",  "Daily not green"),
+    ("hourly_green",      "GATE_STOCK_HOURLY", "Hourly not green"),
+    ("nifty_daily_green", "GATE_NIFTY_DAILY",  "NIFTY not daily-green"),
+    ("nifty_above_vwap",  "GATE_NIFTY_VWAP",   "NIFTY below VWAP"),
+)
+
+
+def trend_blockers(gate: TrendGate) -> List[str]:
+    """
+    Rejection reasons among the ENABLED gates that are red; empty list = the
+    trend filter passes. The single place gate toggles are applied — shared by
+    the live engine and the backtest so they cannot drift.
+    """
+    return [reason for attr, toggle, reason in _GATE_TOGGLES
+            if getattr(cfg, toggle) and not getattr(gate, attr)]

@@ -101,10 +101,7 @@ function render(d) {
   renderScans(d.scanResults || []);
 }
 
-function escHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-                  .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+// (escHtml lives in the shared /js/util.js)
 
 function renderPositions(positions, openCount) {
   document.getElementById('pos-count').textContent = openCount;
@@ -472,17 +469,8 @@ function fmtDT(s) {
   } catch { return s; }
 }
 
-// ── Theme ──────────────────────────────────────────────────────────────────────
-
-function toggleTheme() {
-  const root    = document.documentElement;
-  const current = root.getAttribute('data-theme') || 'dark';
-  const next    = current === 'light' ? 'dark' : 'light';
-  root.setAttribute('data-theme', next);
-  localStorage.setItem('theme', next);
-}
-
 // ── Init ───────────────────────────────────────────────────────────────────────
+// (toggleTheme lives in the shared /js/util.js)
 
 // ── Backtest history ───────────────────────────────────────────────────────────
 

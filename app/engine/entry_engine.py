@@ -6,7 +6,7 @@ import app.config as cfg
 from app.engine.conditions import build_entry_checks, failed_entry_checks
 from app.engine.indicator_engine import compute_indicators
 from app.engine.position_manager import calc_quantity, can_enter
-from app.engine.trend_filter import check_trend
+from app.engine.trend_filter import check_trend, trend_blockers
 from app.models import Candle, EntrySignal
 from app.state import get_state
 
@@ -112,16 +112,11 @@ def scan_stock(
         st.record_scan(symbol, {"pass": False, "reason": reason})
         return None
 
-    # ── Trend gate (entry pre-filter) ────────────────────────────────────────
-    gate = check_trend(ltp, day_open, candles_1h, nifty_daily_green, nifty_above_vwap)
-    if not gate.all_clear:
-        reason = (
-            "Daily not green"       if not gate.daily_green      else
-            "Hourly not green"      if not gate.hourly_green      else
-            "NIFTY not daily-green" if not gate.nifty_daily_green else
-            "NIFTY below VWAP"
-        )
-        st.record_scan(symbol, {"pass": False, "reason": reason})
+    # ── Trend gate (entry pre-filter; disabled gates can't block) ────────────
+    gate     = check_trend(ltp, day_open, candles_1h, nifty_daily_green, nifty_above_vwap)
+    blockers = trend_blockers(gate)
+    if blockers:
+        st.record_scan(symbol, {"pass": False, "reason": blockers[0]})
         return None
 
     # ── 8 entry conditions (shared with backtest; toggles are settings) ──────

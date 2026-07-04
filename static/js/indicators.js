@@ -361,13 +361,7 @@ function renderTable() {
   }
 }
 
-// ── Theme ─────────────────────────────────────────────────────────────────────
-function toggleTheme() {
-  var root = document.documentElement;
-  var next = (root.getAttribute('data-theme') || 'dark') === 'light' ? 'dark' : 'light';
-  root.setAttribute('data-theme', next);
-  localStorage.setItem('theme', next);
-}
+// (toggleTheme lives in the shared /js/util.js)
 
 // ── Init — cache first (instant), then REST seed, then live WS ───────────────
 _loadCache();

@@ -140,6 +140,34 @@ GROUP_ORDER = ["AI Pre-market Screen", "Session Timings", "Risk & Capital",
                "Strategy", "Entry Conditions", "Trend Gates", "Engine",
                "Backtest & Costs"]
 
+# cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
+# loader validate raw stored attrs (incl. expanded time parts) one by one.
+_ATTR_SPEC: Dict[str, tuple] = {}
+for _spec in SPEC:
+    if _spec["type"] == "time":
+        _ATTR_SPEC[_spec["parts"][0]] = (_spec, "hour")
+        _ATTR_SPEC[_spec["parts"][1]] = (_spec, "min")
+    else:
+        _ATTR_SPEC[_spec["key"]] = (_spec, "value")
+
+# Import-time consistency check: every SPEC entry must map to a real dynamic
+# config default and every default must be editable — catches the "added a
+# tunable in only one place" drift at startup instead of as a silent bug.
+_defaults_keys = set(cfg.dynamic_defaults())
+_spec_attr_keys = set(_ATTR_SPEC)
+if _spec_attr_keys != _defaults_keys:
+    raise RuntimeError(
+        "settings SPEC / config._DEFAULTS drift — "
+        f"missing from SPEC: {sorted(_defaults_keys - _spec_attr_keys)}, "
+        f"unknown in SPEC: {sorted(_spec_attr_keys - _defaults_keys)}"
+    )
+
+# Session times must stay ordered or the phase driver / backtest window breaks.
+_TIME_ORDER = ("PREMARKET", "MARKET_OPEN", "SCAN_START", "CUTOFF", "SESSION_END")
+_TIME_LABEL = {"PREMARKET": "pre-market", "MARKET_OPEN": "market open",
+               "SCAN_START": "scan start", "CUTOFF": "entry cutoff",
+               "SESSION_END": "session end"}
+
 
 # ── Value coercion / validation ───────────────────────────────────────────────
 
@@ -202,6 +230,49 @@ def expand_changes(changes: Dict[str, Any], *, bt_only: bool = False) -> Dict[st
     return out
 
 
+def _coerce_attr(key: str, raw: Any) -> Any:
+    """
+    Validate one raw cfg-attr value (as stored in the DB) against its SPEC.
+    Time settings are stored expanded as *_HOUR/*_MIN ints, so they are
+    validated through _coerce with a synthetic int spec (one validation path,
+    consistent error messages) instead of the "HH:MM" string coercion.
+    """
+    spec, role = _ATTR_SPEC[key]
+    if role == "value":
+        return _coerce(spec, raw)
+    hi = 23 if role == "hour" else 59
+    return _coerce({"key": key, "type": "int", "min": 0, "max": hi}, raw)
+
+
+def validate_time_order(attr_changes: Dict[str, Any],
+                        points: tuple = _TIME_ORDER) -> None:
+    """
+    Cross-field guard: with `attr_changes` applied on top of the current
+    config, the session times in `points` (order matters) must be ordered —
+    the full live chain enforces
+        premarket ≤ market open ≤ scan start < cutoff ≤ session end,
+    while the backtest passes points=("SCAN_START","CUTOFF") since those are
+    the only times a replay uses (comparing against live-only settings would
+    falsely reject valid runs). No-op when attr_changes touches none of the
+    points. Raises ValueError naming the violated pair.
+    """
+    if not any(k in attr_changes for p in points
+               for k in (f"{p}_HOUR", f"{p}_MIN")):
+        return
+
+    def eff(attr: str) -> int:
+        return attr_changes.get(attr, getattr(cfg, attr))
+
+    minutes = [eff(f"{p}_HOUR") * 60 + eff(f"{p}_MIN") for p in points]
+    for i in range(len(points) - 1):
+        strict = points[i] == "SCAN_START"   # zero-width scan window is useless
+        if minutes[i] > minutes[i + 1] or (strict and minutes[i] == minutes[i + 1]):
+            raise ValueError(
+                f"session times out of order: {_TIME_LABEL[points[i]]} must be "
+                f"{'before' if strict else 'at or before'} {_TIME_LABEL[points[i + 1]]}"
+            )
+
+
 def _attr_keys(spec: Dict[str, Any]) -> List[str]:
     return list(spec["parts"]) if spec["type"] == "time" else [spec["key"]]
 
@@ -242,17 +313,42 @@ def describe() -> Dict[str, Any]:
 # ── Persistence glue ──────────────────────────────────────────────────────────
 
 async def load_and_apply(db) -> None:
-    """Startup: apply stored overrides from the app_settings table."""
+    """
+    Startup: apply stored overrides from the app_settings table. Every value
+    is re-validated against SPEC — a corrupt/out-of-range row (manual edit,
+    schema drift) is skipped with a warning instead of poisoning the engine
+    (e.g. PREMARKET_HOUR=99 would crash the phase driver's time math).
+    """
     try:
         stored = await db.get_app_settings()
     except Exception as e:
         print(f"Settings load failed (using defaults): {e}")
         return
-    known = {k: v for k, v in stored.items()
-             if not k.startswith(INTERNAL_PREFIX) and cfg.is_dynamic(k)}
-    if known:
-        cfg.set_runtime_overrides(known)
-        print(f"Settings: applied {len(known)} stored overrides")
+    valid: Dict[str, Any] = {}
+    for k, v in stored.items():
+        if k.startswith(INTERNAL_PREFIX) or k not in _ATTR_SPEC:
+            continue
+        try:
+            valid[k] = _coerce_attr(k, v)
+        except (ValueError, TypeError) as e:
+            print(f"Settings: ignoring invalid stored override {k}={v!r} ({e})")
+
+    # Cross-field self-heal: individually-valid rows can still form an
+    # inverted session-time chain (partial manual edit / historical bug).
+    # Fall back to the DEFAULT times rather than brick the trading day.
+    try:
+        validate_time_order(valid)
+    except ValueError as e:
+        time_attrs = [k for k in valid
+                      if k.endswith("_HOUR") or k.endswith("_MIN")]
+        for k in time_attrs:
+            valid.pop(k, None)
+        print(f"Settings: stored session times invalid ({e}) — "
+              f"dropped {time_attrs}, using default timings")
+
+    if valid:
+        cfg.set_runtime_overrides(valid)
+        print(f"Settings: applied {len(valid)} stored overrides")
 
 
 async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
@@ -262,16 +358,18 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     changes in code flow through). Returns the fresh describe() payload.
     """
     attr_changes = expand_changes(changes)
-    cfg.set_runtime_overrides(attr_changes)
+    validate_time_order(attr_changes)
 
-    defaults  = cfg.dynamic_defaults()
-    store     = {k: v for k, v in attr_changes.items() if v != defaults[k]}
+    defaults   = cfg.dynamic_defaults()
+    store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
     at_default = [k for k, v in attr_changes.items() if v == defaults[k]]
-    if store:
-        await db.set_app_settings(store)
-    if at_default:
-        cfg.clear_runtime_overrides(at_default)
-        await db.delete_app_settings(at_default)
+
+    # Persist FIRST (atomically — upsert + delete in one transaction), then
+    # apply. Whatever the outcome, live behavior matches what a restart
+    # would restore: DB failure → nothing persisted, nothing applied.
+    await db.replace_app_settings(store, at_default)
+    cfg.set_runtime_overrides(store)
+    cfg.clear_runtime_overrides(at_default)
     return describe()
 
 
@@ -286,6 +384,15 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
             if spec is None:
                 raise ValueError(f"unknown setting: {key}")
             attr_keys.extend(_attr_keys(spec))
-    cfg.clear_runtime_overrides(attr_keys)
+
+    # A PARTIAL reset of a session time must honor the same ordering guard as
+    # a save: resetting only CUTOFF back to 14:30 while SCAN_START is
+    # overridden to 14:45 would invert the window and block all entries.
+    # (A full reset is always valid — defaults are ordered.)
+    defaults = cfg.dynamic_defaults()
+    validate_time_order({k: defaults[k] for k in attr_keys
+                         if k.endswith("_HOUR") or k.endswith("_MIN")})
+
     await db.delete_app_settings(attr_keys)
+    cfg.clear_runtime_overrides(attr_keys)
     return describe()

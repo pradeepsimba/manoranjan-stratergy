@@ -112,6 +112,9 @@ class SchedulerService:
         # settings are dynamic), so premarket/EOD must self-deduplicate by date.
         self._premarket_date: str | None = None
         self._eod_date:       str | None = None
+        # Serializes the read-modify-write of the persisted watchlist-override
+        # blob — two rapid dashboard edits would otherwise lose one update.
+        self._wl_lock = asyncio.Lock()
 
     async def start(self) -> None:
         self._tasks = [
@@ -289,7 +292,7 @@ class SchedulerService:
         Tick-wise engine. Runs from 09:45 until 15:30, every TICK_EVAL_INTERVAL_MS:
           • Exits  — check every open position's live price vs SL/target (always).
           • Entries — re-evaluate every stock that ticked since the last cycle on
-            its forming bar; fill the ones whose 7 signals align (until cutoff).
+            its forming bar; fill the ones whose enabled conditions align (until cutoff).
           • Full scan — every 5 minutes, scan ALL full_watchlist stocks so non-Gemini
             stocks also appear in indicator_snapshot (WS is only subscribed to the
             Gemini subset; this is their only source of indicator updates).
@@ -516,13 +519,18 @@ class SchedulerService:
 
     # ── Runtime watchlist control (dashboard add/remove) ─────────────────────
 
-    async def _load_watchlist_overrides(self) -> dict:
-        """Today's manual watchlist edits from the DB, or {} if none/stale."""
+    async def _load_watchlist_overrides(self) -> Optional[dict]:
+        """
+        Today's manual watchlist edits from the DB. {} = none/stale (a valid,
+        known-empty state); None = the READ FAILED — callers that rewrite the
+        blob must abort on None or a transient DB error would wipe the whole
+        day's edits.
+        """
         try:
             stored = await self._db.get_app_settings()
         except Exception as e:
             print(f"Watchlist overrides load failed: {e}")
-            return {}
+            return None
         ov = stored.get(WATCHLIST_OVERRIDES_KEY) or {}
         if not isinstance(ov, dict) or ov.get("date") != _now().strftime("%Y-%m-%d"):
             return {}
@@ -532,7 +540,7 @@ class SchedulerService:
         """Re-apply today's persisted manual add/removes onto the fresh lists."""
         st = get_state()
         ov = await self._load_watchlist_overrides()
-        if not ov:
+        if not ov:   # None (read failed) or {} — nothing to re-apply
             return
         for sym, tok in (ov.get("add") or {}).items():
             st.active_watchlist.setdefault(sym, tok)
@@ -547,24 +555,31 @@ class SchedulerService:
     async def _persist_watchlist_change(self, *, add: Optional[tuple] = None,
                                         remove: Optional[str] = None) -> None:
         """Record a manual edit (day-scoped) so it survives a restart."""
-        ov = await self._load_watchlist_overrides()
-        adds    = dict(ov.get("add") or {})
-        removes = set(ov.get("remove") or [])
-        if add is not None:
-            sym, tok = add
-            adds[sym] = tok
-            removes.discard(sym)
-        if remove is not None:
-            adds.pop(remove, None)
-            removes.add(remove)
-        try:
-            await self._db.set_app_settings({WATCHLIST_OVERRIDES_KEY: {
-                "date":   _now().strftime("%Y-%m-%d"),
-                "add":    adds,
-                "remove": sorted(removes),
-            }})
-        except Exception as e:
-            print(f"Watchlist overrides persist failed: {e}")
+        async with self._wl_lock:   # read-modify-write must not interleave
+            ov = await self._load_watchlist_overrides()
+            if ov is None:
+                # Read failed — writing now would REPLACE the blob and lose
+                # every earlier edit of the day. The in-memory change still
+                # holds; only restart-persistence of this one edit is lost.
+                print("Watchlist overrides: skipping persist (DB read failed)")
+                return
+            adds    = dict(ov.get("add") or {})
+            removes = set(ov.get("remove") or [])
+            if add is not None:
+                sym, tok = add
+                adds[sym] = tok
+                removes.discard(sym)
+            if remove is not None:
+                adds.pop(remove, None)
+                removes.add(remove)
+            try:
+                await self._db.set_app_settings({WATCHLIST_OVERRIDES_KEY: {
+                    "date":   _now().strftime("%Y-%m-%d"),
+                    "add":    adds,
+                    "remove": sorted(removes),
+                }})
+            except Exception as e:
+                print(f"Watchlist overrides persist failed: {e}")
 
     async def watchlist_add(self, symbol: str) -> dict:
         """

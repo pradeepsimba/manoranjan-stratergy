@@ -18,10 +18,7 @@ function loadSettings() {
     .catch(e => toast('Failed to load settings: ' + e.message, false));
 }
 
-function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-                  .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+// (escHtml lives in the shared /js/util.js)
 
 function fmtVal(setting, v) {
   if (setting.type === 'bool') return v ? 'on' : 'off';
@@ -29,17 +26,17 @@ function fmtVal(setting, v) {
 }
 
 function controlHtml(s) {
-  const key = esc(s.key);
+  const key = escHtml(s.key);
   if (s.type === 'bool') {
     return `<label class="switch">
       <input type="checkbox" data-key="${key}" ${s.value ? 'checked' : ''}>
       <span class="slider"></span></label>`;
   }
   if (s.type === 'time') {
-    return `<input class="field-input" type="time" data-key="${key}" value="${esc(s.value)}">`;
+    return `<input class="field-input" type="time" data-key="${key}" value="${escHtml(s.value)}">`;
   }
   if (s.type === 'str') {
-    return `<input class="field-input wide" type="text" data-key="${key}" value="${esc(s.value)}">`;
+    return `<input class="field-input wide" type="text" data-key="${key}" value="${escHtml(s.value)}">`;
   }
   const step = s.step != null ? s.step : (s.type === 'int' ? 1 : 'any');
   const min  = s.min  != null ? `min="${s.min}"` : '';
@@ -60,22 +57,22 @@ function render() {
     panel.className = 'panel';
     panel.innerHTML = `
       <div class="panel-header">
-        <span class="panel-title">${esc(g.name)}</span>
+        <span class="panel-title">${escHtml(g.name)}</span>
         ${overridden ? `<span class="badge yellow grp-badge">${overridden} changed</span>` : ''}
       </div>
       ${g.settings.map(s => `
-        <div class="set-row" data-row="${esc(s.key)}">
+        <div class="set-row" data-row="${escHtml(s.key)}">
           <div class="set-info">
             <div class="set-label">
               ${s.overridden ? '<span class="dot-override" title="Differs from default"></span>' : ''}
-              ${esc(s.label)}
+              ${escHtml(s.label)}
             </div>
-            ${s.help ? `<div class="set-help">${esc(s.help)}</div>` : ''}
-            <div class="set-default">default: ${esc(fmtVal(s, s.default))}${s.bt ? '' : ' · live only'}</div>
+            ${s.help ? `<div class="set-help">${escHtml(s.help)}</div>` : ''}
+            <div class="set-default">default: ${escHtml(fmtVal(s, s.default))}${s.bt ? '' : ' · live only'}</div>
           </div>
           <div class="set-ctl">
             ${controlHtml(s)}
-            ${s.overridden ? `<button class="btn-mini" data-reset="${esc(s.key)}" title="Reset to default">↺</button>` : ''}
+            ${s.overridden ? `<button class="btn-mini" data-reset="${escHtml(s.key)}" title="Reset to default">↺</button>` : ''}
           </div>
         </div>`).join('')}
     `;
@@ -132,57 +129,44 @@ function updateSaveBar() {
 
 // ── Actions ────────────────────────────────────────────────────────────────────
 
+// Shared submit: every mutation endpoint returns the fresh describe() payload,
+// so success handling is identical — re-render from the response.
+function submitSettings(method, url, body, okMsg, failLabel) {
+  return fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(body),
+  })
+    .then(async r => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
+      specData = d; edits = {}; render();
+      toast(okMsg, true);
+    })
+    .catch(e => toast(failLabel + ': ' + e.message, false));
+}
+
 function saveChanges() {
   const changes = { ...edits };
   if (!Object.keys(changes).length) return;
   const btn = document.getElementById('btn-save');
   btn.disabled = true;
-  fetch('/api/settings', {
-    method:  'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ changes }),
-  })
-    .then(async r => {
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || r.statusText);
-      specData = d; edits = {}; render();
-      toast('Settings saved — applied live', true);
-    })
-    .catch(e => toast('Save failed: ' + e.message, false))
+  submitSettings('PUT', '/api/settings', { changes },
+                 'Settings saved — applied live', 'Save failed')
     .finally(() => { btn.disabled = false; });
 }
 
 function discardChanges() { loadSettings(); }
 
 function resetKeys(keys) {
-  fetch('/api/settings/reset', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ keys }),
-  })
-    .then(async r => {
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || r.statusText);
-      specData = d; edits = {}; render();
-      toast('Reset to default', true);
-    })
-    .catch(e => toast('Reset failed: ' + e.message, false));
+  submitSettings('POST', '/api/settings/reset', { keys },
+                 'Reset to default', 'Reset failed');
 }
 
 function resetAll() {
   if (!confirm('Reset ALL settings to their built-in defaults?')) return;
-  fetch('/api/settings/reset', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({}),
-  })
-    .then(async r => {
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || r.statusText);
-      specData = d; edits = {}; render();
-      toast('All settings reset to defaults', true);
-    })
-    .catch(e => toast('Reset failed: ' + e.message, false));
+  submitSettings('POST', '/api/settings/reset', {},
+                 'All settings reset to defaults', 'Reset failed');
 }
 
 // ── Toast / theme ──────────────────────────────────────────────────────────────
@@ -196,13 +180,7 @@ function toast(msg, ok) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
 }
 
-function toggleTheme() {
-  const root    = document.documentElement;
-  const current = root.getAttribute('data-theme') || 'dark';
-  const next    = current === 'light' ? 'dark' : 'light';
-  root.setAttribute('data-theme', next);
-  localStorage.setItem('theme', next);
-}
+// (toggleTheme lives in the shared /js/util.js)
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 

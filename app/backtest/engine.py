@@ -30,10 +30,10 @@ from app.backtest.fills import (
 )
 from app.backtest.metrics import compute_metrics
 from app.backtest.portfolio import BTPosition, Portfolio
-from app.engine.conditions import build_entry_checks, failed_entry_checks
+from app.engine.conditions import entry_ok
 from app.engine.indicator_engine import compute_indicators, session_vwap_from_cumsums
 from app.engine.position_manager import calc_quantity, can_enter
-from app.engine.trend_filter import check_trend
+from app.engine.trend_filter import check_trend, trend_blockers
 from app.models import Candle
 
 # Scan window / lookback are DYNAMIC settings (and per-run overridable), so
@@ -70,7 +70,7 @@ def _scan_symbol(
     c1h = [Candle(start_time=cur.start_time, open=hour_open, close=ltp, high=cur.high, low=cur.low)]
 
     gate = check_trend(ltp, day_open, c1h, nifty_daily_green, nifty_above_vwap)
-    if not gate.all_clear:
+    if trend_blockers(gate):
         return None
 
     lo  = max(0, gidx - cfg.TALIB_LOOKBACK + 1)
@@ -91,9 +91,10 @@ def _scan_symbol(
         entry_short_circuit=True,
     )
 
-    # Same shared checks + runtime toggles as the live entry engine.
+    # Same shared condition table + runtime toggles as the live entry engine,
+    # via the short-circuit path (no per-scan dict build in this hot loop).
     # depth_ratio=None → depth_bullish passes (no order book in history).
-    if failed_entry_checks(build_entry_checks(ind, None)):
+    if not entry_ok(ind, None):
         return None
 
     qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level, capital)

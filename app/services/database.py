@@ -237,6 +237,34 @@ class DatabaseService:
                 "DELETE FROM app_settings WHERE key = ANY($1::text[])", list(keys)
             )
 
+    async def replace_app_settings(self, store: Dict[str, Any],
+                                   delete_keys: List[str]) -> None:
+        """
+        Upsert + delete in ONE transaction — a settings save must be all-or-
+        nothing, or a failure between the two writes leaves the DB persisting
+        values that were never applied live (and a restart would silently
+        change trading behavior).
+        """
+        if not store and not delete_keys:
+            return
+        rows = [(k, json.dumps(v)) for k, v in store.items()]
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                if rows:
+                    await conn.executemany(
+                        """
+                        INSERT INTO app_settings (key, value, updated_at)
+                        VALUES ($1, $2::jsonb, NOW())
+                        ON CONFLICT (key) DO UPDATE SET value=$2::jsonb, updated_at=NOW()
+                        """,
+                        rows,
+                    )
+                if delete_keys:
+                    await conn.execute(
+                        "DELETE FROM app_settings WHERE key = ANY($1::text[])",
+                        list(delete_keys),
+                    )
+
     # ── Backtest ──────────────────────────────────────────────────────────────
 
     async def create_backtest_run(self, run_id: str, from_date, to_date,

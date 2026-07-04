@@ -104,6 +104,9 @@ class MarketDataService:
         if not self._running:
             return
         await self.stop()
+        # stop() advertises "WS Stopped" — overwrite so the dashboard doesn't
+        # flash a scary status during an intentional resubscribe.
+        self.state.ws_status = "WS Resubscribing…"
         self.start()
 
     # ── WebSocket connection loops ─────────────────────────────────────────────
