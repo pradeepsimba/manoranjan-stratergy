@@ -120,7 +120,7 @@ The `/ws/dashboard` endpoint broadcasts two distinct message shapes — **both p
 
 | `type` | Cadence | Payload |
 |--------|---------|---------|
-| `STATE_UPDATE` | 1 s | Full dashboard payload: `clock`, `phase`, `wsStatus`, `niftyLtp`, `positions`, `scanResults`, `geminiList`, `watchlist`, `indicatorSnapshot` |
+| `STATE_UPDATE` | 1 s | Full dashboard payload: `clock`, `phase`, `wsStatus`, `niftyLtp`, `positions`, `scanResults`, `geminiList`, `watchlist`; `indicatorSnapshot` rides along only every 10th push (`_SNAPSHOT_EVERY_N_PUSHES`) — the deltas keep ticking symbols fresh |
 | `INDICATOR_UPDATE` | ~100 ms (per dirty tick) | Only `indicatorSnapshot` — all other fields absent |
 
 **Critical:** `dashboard.js` (main page) filters to `STATE_UPDATE` only — rendering on `INDICATOR_UPDATE` would blank every scalar field (nifty, clock, watchlist, etc.). `indicators.js` accepts both types and merges `indicatorSnapshot` into its local `rowsMap`.

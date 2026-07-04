@@ -169,9 +169,14 @@ def _simulate_day_impl(
     if not grid:
         return []
 
-    # Dynamic scan window — read here (inside the thread-override scope).
+    # Dynamic settings hoisted ONCE per day — we are inside the run's
+    # thread-override scope, so these cannot change mid-day, and re-resolving
+    # them per bar/per symbol costs millions of dynamic cfg lookups on a long
+    # run (module __getattr__ + thread-local check each).
     scan_start = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"
     cutoff     = f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d}"
+    max_pos    = cfg.MAX_CONCURRENT_POSITIONS
+    loss_limit = cfg.DAILY_LOSS_LIMIT
 
     port = Portfolio()
     nifty_day_start = nifty.by_day[day][0]
@@ -218,10 +223,14 @@ def _simulate_day_impl(
         #    limit is hit) the whole 500-symbol scan is skipped until a slot frees.
         if scan_start <= tm < cutoff:
             open_syms, traded, dpnl = port.snapshot()
-            if (len(open_syms) < cfg.MAX_CONCURRENT_POSITIONS
-                    and dpnl > -cfg.DAILY_LOSS_LIMIT):
+            if len(open_syms) < max_pos and dpnl > -loss_limit:
                 signals: List[BTPosition] = []
                 for ss, day_map, day_idxs, hour_open_day in day_syms:
+                    # can_enter (inside _scan_symbol) would reject these
+                    # anyway — skipping here avoids the whole call for every
+                    # already-traded symbol on every remaining bar of the day.
+                    if ss.name in traded or ss.name in open_syms:
+                        continue
                     gidx = day_map.get(tm)
                     if gidx is None:
                         continue

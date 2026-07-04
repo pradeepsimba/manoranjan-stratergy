@@ -35,12 +35,29 @@ var _CACHE_DATE_KEY = 'ind_date_v2';
 var _CACHE_ROWS_KEY = 'ind_rows_v2';
 var _TODAY_IST = new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-function _saveCache() {
+// The cache only needs to survive a reload — sub-second freshness buys
+// nothing, and stringifying ~500 rows + a sync localStorage write on every
+// ~100ms WS delta was the page's single largest main-thread cost. Debounce
+// to one write per 5s, plus a final flush when the page is hidden/closed.
+var _cacheTimer = null;
+
+function _writeCacheNow() {
+  _cacheTimer = null;
   try {
     localStorage.setItem(_CACHE_DATE_KEY, _TODAY_IST);
     localStorage.setItem(_CACHE_ROWS_KEY, JSON.stringify(rowsMap));
   } catch(e) {}
 }
+
+function _saveCache() {
+  if (_cacheTimer) return;
+  _cacheTimer = setTimeout(_writeCacheNow, 5000);
+}
+
+window.addEventListener('pagehide', _writeCacheNow);
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'hidden') _writeCacheNow();
+});
 
 function _loadCache() {
   try {
@@ -92,9 +109,14 @@ function connect() {
       Object.keys(snap).forEach(function(sym) {
         if (!rowsMap[sym]) {
           rowsMap[sym] = { symbol: sym, _normSymbol: normalise(sym) };
+          _needFull = true;              // new row → full render (sort/filter)
         }
         var target = rowsMap[sym];
         var source = snap[sym];
+        _dirtySyms.add(sym);
+        // An update touching the active sort column can reorder the table —
+        // only then is the O(n log n) full render needed.
+        if (sortKey !== 'symbol' && sortKey in source) _needFull = true;
         Object.keys(source).forEach(function(key) {
           if (source[key] !== null && source[key] !== undefined) {
             target[key] = source[key];
@@ -146,7 +168,7 @@ function loadInitial() {
           rowsMap[item.symbol] = item;
         }
       });
-      scheduleRender();
+      scheduleFullRender();   // REST seed adds rows — needs sort/filter pass
       _saveCache();
     })
     .catch(function() { setTimeout(loadInitial, 30000); });
@@ -256,15 +278,34 @@ function _updateTR(tr, r) {
 }
 
 // ── scheduleRender — coalesce multiple rapid WS ticks into one paint frame ────
+// Fast path: when only cell VALUES changed (no new rows, sort column
+// untouched), patch just the dirty rows in place — O(dirty) instead of
+// re-filtering, re-sorting and re-formatting all ~500 rows per delta.
+var _dirtySyms = new Set();
+var _needFull  = true;    // first paint (and structural changes) render fully
+
 function scheduleRender() {
   if (_rafPending) return;
   _rafPending = true;
   requestAnimationFrame(function() {
     _rafPending = false;
-    renderTable();
+    if (_needFull) {
+      _needFull = false;
+      _dirtySyms.clear();
+      renderTable();        // sort + filter + reorder + every row
+    } else {
+      _dirtySyms.forEach(function(sym) {
+        var tr = _rowEls[sym];          // absent when filtered out — skip;
+        var r  = rowsMap[sym];          // the next full render catches it up
+        if (tr && r) _updateTR(tr, r);
+      });
+      _dirtySyms.clear();
+    }
     renderSummary();
   });
 }
+
+function scheduleFullRender() { _needFull = true; scheduleRender(); }
 
 // ── Render table — DOM-diffing, zero blink ────────────────────────────────────
 function renderTable() {

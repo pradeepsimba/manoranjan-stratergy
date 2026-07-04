@@ -736,19 +736,30 @@ class SchedulerService:
 
     # ── Dashboard broadcast ───────────────────────────────────────────────────
 
+    # Every Nth 1s STATE_UPDATE carries the full indicatorSnapshot. The main
+    # dashboard never reads it, and the indicators page is kept fresh by the
+    # ~100ms INDICATOR_UPDATE deltas — rebuilding + serializing ~500 rows
+    # (~100KB) every second was pure event-loop and bandwidth waste; the slow
+    # full copy only needs to catch rows with no tick flow (non-Gemini stocks
+    # between 5-min full scans, overnight idle).
+    _SNAPSHOT_EVERY_N_PUSHES = 10
+
     async def _push_dashboard_loop(self) -> None:
+        n = 0
         while True:
             try:
                 # Skip building the payload entirely when no browser is watching.
                 if self._ws.count() > 0:
+                    include_snap = (n % self._SNAPSHOT_EVERY_N_PUSHES == 0)
+                    n += 1
                     await self._ws.broadcast(
-                        json.dumps(self._build_payload(), default=str)
+                        json.dumps(self._build_payload(include_snap), default=str)
                     )
             except Exception as e:
                 print(f"Dashboard push error: {e}")
             await asyncio.sleep(1)
 
-    def _build_payload(self) -> dict:
+    def _build_payload(self, include_snapshot: bool = True) -> dict:
         st    = get_state()
         clock = _now().strftime("%H:%M:%S")
 
@@ -774,7 +785,7 @@ class SchedulerService:
                 "orderId":   pos.order_id,
             })
 
-        return {
+        payload = {
             "type":        "STATE_UPDATE",
             "clock":       clock,
             "phase":       st.phase.value,
@@ -789,9 +800,11 @@ class SchedulerService:
                 {"symbol": sym, **res}
                 for sym, res in st.scan_snapshot()[-20:]
             ],
-            "lastBarTime":       st.last_5m_bar_time,
-            "indicatorSnapshot": self._build_indicator_snapshot(st),
+            "lastBarTime": st.last_5m_bar_time,
         }
+        if include_snapshot:
+            payload["indicatorSnapshot"] = self._build_indicator_snapshot(st)
+        return payload
 
     async def _push_tick_updates_loop(self) -> None:
         """Pushes real-time LTP delta updates to the UI every 100ms in all active/wait/cutoff phases."""
