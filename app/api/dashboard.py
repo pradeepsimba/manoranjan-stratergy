@@ -214,7 +214,7 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         # Only the scan window matters to a replay — validating against the
         # live-only times (premarket/open/session-end) would falsely reject.
         settings.validate_time_order(attr_overrides, points=("SCAN_START", "CUTOFF"))
-        settings.validate_macd_periods(attr_overrides)
+        settings.validate_indicator_periods(attr_overrides)
     except ValueError as e:
         raise HTTPException(400, f"overrides: {e}")
 
@@ -412,6 +412,95 @@ async def indicators_by_timeframe(timeframe: str) -> List[Dict[str, Any]]:
     hist = await fetch_indicator_history(wl, timeframe, days_back=days_back)
     # TA-Lib pass off the event loop.
     return await asyncio.to_thread(_tf_indicator_rows, wl, hist)
+
+
+# ── Multi-timeframe comparison (confluence) ───────────────────────────────────
+# For each stock, computes the SAME indicators on several timeframes at once and
+# scores each TF's directional bias from three sub-signals (above-VWAP, MACD line
+# vs signal, +DI vs −DI): 0–3, ≥2 = bullish-leaning. The per-stock "confluence" =
+# how many selected TFs are bullish-leaning; rows sort by it so the strongest
+# multi-timeframe alignments surface first. On-demand + polled; never live state.
+
+def _mtf_tf_signals(watchlist: Dict[str, str], hist: Dict[str, list]) -> Dict[str, Any]:
+    """Per-symbol bias signals for ONE timeframe (runs in a worker thread)."""
+    from app.engine.indicator_engine import compute_indicators   # numpy/TA-Lib
+    out: Dict[str, Any] = {}
+    for sym, tok in watchlist.items():
+        candles = hist.get(tok) or []
+        if len(candles) < 3:
+            out[sym] = None
+            continue
+        today = candles[-1].start_time[:10]
+        i = len(candles)
+        while i > 0 and candles[i - 1].start_time[:10] == today:
+            i -= 1
+        ind = compute_indicators(candles, session_candles_5m=candles[i:])
+        above   = bool(ind.price_above_vwap)
+        macd_up = (ind.macd_line is not None and ind.macd_signal_line is not None
+                   and ind.macd_line > ind.macd_signal_line)
+        di_up   = (ind.plus_di is not None and ind.minus_di is not None
+                   and ind.plus_di > ind.minus_di)
+        out[sym] = {
+            "rsi":   round(ind.rsi, 1) if ind.rsi is not None else None,
+            "score": int(above) + int(macd_up) + int(di_up),   # 0–3
+            "vwap":  above, "macd": macd_up, "di": di_up,
+            "close": round(candles[-1].close, 2),
+        }
+    return out
+
+
+@router.get("/api/indicators/mtf")
+async def indicators_mtf(tfs: str = "5m,15m,1h") -> Dict[str, Any]:
+    # Validate + dedupe (preserve order) + cap at 4 to bound compute.
+    chosen: List[str] = []
+    for t in tfs.split(","):
+        t = t.strip()
+        if cfg.is_timeframe(t) and t not in chosen:
+            chosen.append(t)
+    chosen = chosen[:4]
+    if len(chosen) < 2:
+        raise HTTPException(400, "pick at least 2 valid timeframes to compare")
+
+    st = get_state()
+    wl = dict(st.full_watchlist if st.full_watchlist else st.active_watchlist)
+    if not wl:
+        return {"timeframes": chosen, "rows": []}
+
+    # Fetch each TF with ITS OWN lookback, concurrently — so adding a coarse TF
+    # (e.g. 1d) doesn't force a huge fetch of the fine ones.
+    def _days(tf: str) -> int:
+        mins = cfg.TIMEFRAME_MINUTES.get(tf, 5)
+        return max(5, math.ceil(cfg.TALIB_LOOKBACK * mins / 375.0 * 7.0 / 5.0) + 2)
+
+    hists = await asyncio.gather(
+        *[fetch_indicator_history(wl, tf, days_back=_days(tf)) for tf in chosen])
+    # Each TF's TA-Lib pass in its own thread (GIL released) — concurrent.
+    sigs = await asyncio.gather(
+        *[asyncio.to_thread(_mtf_tf_signals, wl, h) for h in hists])
+    sig_by_tf = dict(zip(chosen, sigs))
+
+    live = st.ltp
+    smallest = min(chosen, key=lambda t: cfg.TIMEFRAME_MINUTES.get(t, 5))
+    rows: List[Dict[str, Any]] = []
+    for sym in wl:
+        per, bull, have = {}, 0, False
+        for tf in chosen:
+            s = sig_by_tf[tf].get(sym)
+            per[tf] = s
+            if s:
+                have = True
+                if s["score"] >= 2:
+                    bull += 1
+        if not have:
+            continue
+        lp = round(live.get(sym, 0.0), 2)
+        if lp <= 0:
+            small = per.get(smallest)
+            lp = small["close"] if small else 0.0
+        rows.append({"symbol": sym, "ltp": lp, "tf": per, "bull": bull, "n": len(chosen)})
+
+    rows.sort(key=lambda r: (-r["bull"], r["symbol"]))
+    return {"timeframes": chosen, "rows": rows}
 
 
 # ── Timeframes (choice set for the UI) ────────────────────────────────────────

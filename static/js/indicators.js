@@ -112,9 +112,9 @@ function connect() {
       // snapshot presence would freeze them between snapshots outside market
       // hours (when no ~100ms INDICATOR_UPDATE deltas flow).
       updateMarketBadge();
-      // While viewing a non-live timeframe, ignore live 5m WS updates (clock
-      // still shows the poll timestamp set by loadTF).
-      if (viewTF !== 'live') return;
+      // Ignore live 5m WS updates while comparing timeframes or viewing a
+      // non-live timeframe (those views are polled, not streamed).
+      if (mtfMode || viewTF !== 'live') return;
       var now = new Date();
       document.getElementById('updated-txt').textContent =
         'Live · ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -455,6 +455,7 @@ function _resetTable(msg) {
 }
 
 function switchTF(tf) {
+  if (mtfMode) _leaveCompare();   // picking a TF exits compare mode cleanly
   viewTF = tf;
   clearInterval(tfPoll); tfPoll = null;
   var toolbar = document.querySelector('.ind-toolbar');
@@ -502,6 +503,7 @@ function _populateTFs() {
   fetch('/api/timeframes')
     .then(function (r) { return r.json(); })
     .then(function (d) {
+      if (Array.isArray(d.timeframes)) { _allTFs = d.timeframes; _buildCompareChecks(); }
       var sel = document.getElementById('tf-select');
       if (!sel || !Array.isArray(d.timeframes)) return;
       d.timeframes.forEach(function (tf) {
@@ -511,6 +513,111 @@ function _populateTFs() {
       });
     })
     .catch(function () { /* dropdown keeps just the live option */ });
+}
+
+// ── Multi-timeframe comparison ─────────────────────────────────────────────────
+var mtfMode = false;
+var mtfPoll = null;
+var _allTFs = [];
+
+function _buildCompareChecks() {
+  var host = document.getElementById('cmp-tfs');
+  if (!host || !_allTFs.length) return;
+  var def = { '5m': 1, '15m': 1, '1hr': 1 };   // sensible default selection
+  host.innerHTML = _allTFs.map(function (tf) {
+    var on = def[tf] ? ' checked' : '';
+    return '<label class="cmp-tf' + (def[tf] ? ' on' : '') + '">' +
+      '<input type="checkbox" value="' + escHtml(tf) + '"' + on +
+      ' onchange="this.parentNode.classList.toggle(\'on\', this.checked)">' + escHtml(tf) + '</label>';
+  }).join('');
+}
+
+function toggleComparePanel() {
+  var bar = document.getElementById('cmp-bar');
+  if (!bar) return;
+  if (!document.querySelector('#cmp-tfs .cmp-tf')) _buildCompareChecks();
+  bar.style.display = (bar.style.display === 'none') ? 'flex' : 'none';
+}
+
+function startCompare() {
+  var tfs = Array.prototype.slice
+    .call(document.querySelectorAll('#cmp-tfs input:checked'))
+    .map(function (el) { return el.value; });
+  if (tfs.length < 2) { alert('Pick at least 2 timeframes to compare.'); return; }
+  mtfMode = true;
+  clearInterval(mtfPoll); mtfPoll = null;
+  clearInterval(tfPoll);  tfPoll = null;   // stop any single-TF poll
+  document.querySelector('.ind-wrap').style.display = 'none';
+  var ss = document.querySelector('.sum-strip'); if (ss) ss.style.display = 'none';
+  document.getElementById('mtf-wrap').style.display = '';
+  document.getElementById('updated-txt').textContent = 'Comparing ' + tfs.join(' · ') + ' …';
+  loadMTF(tfs);
+  mtfPoll = setInterval(function () { loadMTF(tfs); }, 30000);
+}
+
+// Tear down compare-mode UI (show the single view again) WITHOUT reloading —
+// shared by exitCompare and switchTF so selecting a TF mid-compare is clean.
+function _leaveCompare() {
+  mtfMode = false;
+  clearInterval(mtfPoll); mtfPoll = null;
+  var w = document.getElementById('mtf-wrap');  if (w) w.style.display = 'none';
+  var b = document.getElementById('cmp-bar');   if (b) b.style.display = 'none';
+  var iw = document.querySelector('.ind-wrap'); if (iw) iw.style.display = '';
+  var ss = document.querySelector('.sum-strip'); if (ss) ss.style.display = '';
+}
+
+function exitCompare() {
+  _leaveCompare();
+  // Restore whichever single view was active (mtfMode is already false, so the
+  // switchTF guard is a no-op — no recursion).
+  if (viewTF === 'live') loadInitial(); else switchTF(viewTF);
+}
+
+function loadMTF(tfs) {
+  fetch('/api/indicators/mtf?tfs=' + encodeURIComponent(tfs.join(',')))
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!mtfMode) return;
+      renderMTF(d);
+      document.getElementById('updated-txt').textContent =
+        'Compare ' + (d.timeframes || []).join(' · ') + ' · ' +
+        new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    })
+    .catch(function () {
+      if (mtfMode) document.getElementById('updated-txt').textContent = 'compare fetch failed — retrying…';
+    });
+}
+
+function _dirChip(s) {
+  if (!s) return '<span class="muted">—</span>';
+  var arrow = s.score >= 2 ? '▲' : s.score === 1 ? '•' : '▼';
+  var rsi = (s.rsi != null) ? '<span class="mtf-rsi">' + Math.round(s.rsi) + '</span>' : '';
+  return '<span class="dir s' + s.score + '">' + arrow + '</span>' + rsi;
+}
+
+function renderMTF(d) {
+  var tfs = d.timeframes || [];
+  var rows = d.rows || [];
+  var head = '<thead><tr><th style="text-align:left">Symbol</th><th>LTP ₹</th>' +
+    tfs.map(function (tf) { return '<th class="tf-group">' + escHtml(tf) + '</th>'; }).join('') +
+    '<th>Confluence</th></tr></thead>';
+  var table = document.getElementById('mtf-table');
+  if (!rows.length) {
+    table.innerHTML = head + '<tbody><tr><td colspan="' + (tfs.length + 3) +
+      '" style="text-align:center;padding:30px;color:var(--txt-3)">' +
+      'No data — is the market universe loaded? (built at 09:00 IST or on demand)</td></tr></tbody>';
+    return;
+  }
+  var body = rows.map(function (r) {
+    var confCls = (r.bull === r.n) ? 'full' : (r.bull === 0) ? 'none' : 'some';
+    var cells = tfs.map(function (tf) {
+      return '<td class="tf-cell">' + _dirChip(r.tf ? r.tf[tf] : null) + '</td>';
+    }).join('');
+    return '<tr><td class="mtf-sym">' + escHtml(r.symbol) + '</td>' +
+      '<td>' + (r.ltp != null ? fmtINR(r.ltp) : '—') + '</td>' + cells +
+      '<td><span class="conf ' + confCls + '">' + r.bull + '/' + r.n + '</span></td></tr>';
+  }).join('');
+  table.innerHTML = head + '<tbody>' + body + '</tbody>';
 }
 
 // ── Init — cache first (instant), then REST seed, then live WS ───────────────

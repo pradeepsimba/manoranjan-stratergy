@@ -657,10 +657,14 @@ class SchedulerService:
         total   = len(trades)
         winners = sum(1 for p in trades if p.pnl > 0)
 
-        # Intraday max drawdown: peak-to-trough of running realized P&L in close
-        # order (same definition as the backtest's metrics.max_drawdown).
+        # Intraday max drawdown: peak-to-trough of running realized P&L in EXIT
+        # order (same definition as the backtest's metrics.max_drawdown). Sort
+        # by exit_time explicitly so the value is order-independent: a restart
+        # restores closed trades in DB/entry order, and computing over that
+        # would yield a different (wrong) drawdown that the EOD write would then
+        # clobber the correct one with.
         peak = cum = max_dd = 0.0
-        for p in trades:
+        for p in sorted(trades, key=lambda x: (x.exit_time or "")):
             cum += p.pnl
             peak = max(peak, cum)
             max_dd = max(max_dd, peak - cum)

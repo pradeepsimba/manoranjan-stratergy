@@ -320,12 +320,22 @@ async def run_backtest(
         # Warmup + timeframe affect the FETCH (event loop) — resolve them from
         # the run's overrides explicitly instead of thread-local config, which
         # must never be set on the event loop.
-        tf     = timeframe or overrides.get("BACKTEST_TIMEFRAME") or cfg.BACKTEST_TIMEFRAME
-        warmup = int(overrides.get("BACKTEST_WARMUP_DAYS", cfg.BACKTEST_WARMUP_DAYS))
+        tf       = timeframe or overrides.get("BACKTEST_TIMEFRAME") or cfg.BACKTEST_TIMEFRAME
+        warmup   = int(overrides.get("BACKTEST_WARMUP_DAYS", cfg.BACKTEST_WARMUP_DAYS))
+        # Resolve the run's TALIB_LOOKBACK here (event loop) so the warmup fetch
+        # matches the window the worker threads will actually slice.
+        lookback = int(overrides.get("TALIB_LOOKBACK", cfg.TALIB_LOOKBACK))
         universe, symbols, nifty = await load_backtest_data(
-            from_d, to_d, warmup_days=warmup, timeframe=tf)
+            from_d, to_d, warmup_days=warmup, timeframe=tf, lookback=lookback)
+        if not universe:
+            await db.fail_backtest_run(
+                run_id, "Empty universe — the client-status API returned no stocks")
+            return
         if not symbols or nifty is None:
-            await db.fail_backtest_run(run_id, "No historical data or empty universe")
+            await db.fail_backtest_run(
+                run_id, f"No {tf} data returned for {from_d} → {to_d} "
+                        f"(NIFTY {'ok' if nifty else 'missing'}, {len(symbols)} symbols). "
+                        f"Try a shorter date range.")
             return
 
         trades, equity, days = await asyncio.to_thread(

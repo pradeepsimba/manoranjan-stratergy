@@ -259,33 +259,51 @@ def expand_changes(changes: Dict[str, Any], *, bt_only: bool = False) -> Dict[st
     return out
 
 
-def validate_macd_periods(attr_changes: Dict[str, Any]) -> None:
+# cfg attrs whose value affects an indicator's minimum-bar requirement — the
+# self-heal and reset guards drop/validate this whole set together.
+INDICATOR_PERIOD_KEYS = ("MACD_FAST", "MACD_SLOW", "MACD_SIGNAL", "MACD_CROSS_BARS",
+                         "RSI_PERIOD", "RSI_RISING_BARS", "ADX_PERIOD", "TALIB_LOOKBACK")
+
+
+def validate_indicator_periods(attr_changes: Dict[str, Any]) -> None:
     """
-    Cross-field guards for MACD, checked against the effective config (changes
-    over current). No-op unless a relevant key changed.
-      1. fast < slow — independent int fields; fast≥slow makes TA-Lib return NaN.
-      2. TALIB_LOOKBACK ≥ slow + signal + cross-window — TA-Lib MACD needs
-         slow+signal-1 bars for a first value; if the lookback tail is shorter,
-         MACD is all-NaN, macd_bullish_cross never fires, and (with the condition
-         enabled) every entry is silently blocked forever.
+    Cross-field guards so a period/lookback combo can't leave an indicator
+    all-NaN — which (with its condition enabled) silently blocks EVERY entry in
+    both live and backtest, with no error. Checked against the effective config
+    (changes over current). No-op unless a relevant key changed.
+
+      • MACD: fast < slow (fast≥slow → TA-Lib NaN), and lookback ≥ slow + signal
+        + cross-window (MACD needs slow+signal-1 bars for a first value).
+      • ADX:  lookback ≥ 2·period + 1 (ADX converges around 2·period bars).
+      • RSI:  lookback ≥ period + rising-bars + 1 (need that many valid values
+        to test "rose N bars").
     """
-    keys = ("MACD_FAST", "MACD_SLOW", "MACD_SIGNAL", "MACD_CROSS_BARS", "TALIB_LOOKBACK")
-    if not any(k in attr_changes for k in keys):
+    if not any(k in attr_changes for k in INDICATOR_PERIOD_KEYS):
         return
 
     def eff(k: str) -> int:
         return attr_changes.get(k, getattr(cfg, k))
 
+    lookback = eff("TALIB_LOOKBACK")
     fast, slow, signal = eff("MACD_FAST"), eff("MACD_SLOW"), eff("MACD_SIGNAL")
     if fast >= slow:
         raise ValueError(
             f"MACD fast period ({fast}) must be less than the slow period ({slow})")
-    need = slow + signal + eff("MACD_CROSS_BARS")
-    lookback = eff("TALIB_LOOKBACK")
-    if lookback < need:
+
+    need = {
+        "MACD": slow + signal + eff("MACD_CROSS_BARS"),
+        "ADX":  2 * eff("ADX_PERIOD") + 1,
+        "RSI":  eff("RSI_PERIOD") + eff("RSI_RISING_BARS") + 1,
+    }
+    worst = max(need, key=need.get)
+    if lookback < need[worst]:
         raise ValueError(
-            f"indicator lookback ({lookback}) is too small for "
-            f"MACD({fast},{slow},{signal}) + cross window — need ≥ {need} bars")
+            f"indicator lookback ({lookback}) is too small — {worst} needs "
+            f"≥ {need[worst]} bars; raise TALIB_LOOKBACK or lower the period(s)")
+
+
+# Backwards-compatible alias (older call sites / tests).
+validate_macd_periods = validate_indicator_periods
 
 
 def _coerce_attr(key: str, raw: Any) -> Any:
@@ -406,15 +424,17 @@ async def load_and_apply(db) -> None:
         print(f"Settings: stored session times invalid ({e}) — "
               f"dropped {time_attrs}, using default timings")
 
-    # Same self-heal for a stored MACD fast≥slow combination.
+    # Same self-heal for a stored indicator period/lookback combo that would
+    # leave an indicator all-NaN. Drop ALL indicator-period overrides back to
+    # defaults (which are internally consistent), not just the MACD ones.
     try:
-        validate_macd_periods(valid)
+        validate_indicator_periods(valid)
     except ValueError as e:
-        macd_attrs = [k for k in ("MACD_FAST", "MACD_SLOW", "MACD_SIGNAL") if k in valid]
-        for k in macd_attrs:
+        dropped = [k for k in INDICATOR_PERIOD_KEYS if k in valid]
+        for k in dropped:
             valid.pop(k, None)
-        print(f"Settings: stored MACD periods invalid ({e}) — "
-              f"dropped {macd_attrs}, using defaults")
+        print(f"Settings: stored indicator periods invalid ({e}) — "
+              f"dropped {dropped}, using defaults")
 
     if valid:
         cfg.set_runtime_overrides(valid)
@@ -429,7 +449,7 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     """
     attr_changes = expand_changes(changes)
     validate_time_order(attr_changes)
-    validate_macd_periods(attr_changes)
+    validate_indicator_periods(attr_changes)
 
     defaults   = cfg.dynamic_defaults()
     store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
@@ -456,16 +476,16 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
                 raise ValueError(f"unknown setting: {key}")
             attr_keys.extend(_attr_keys(spec))
 
-    # A PARTIAL reset of a session time must honor the same ordering guard as
-    # a save: resetting only CUTOFF back to 14:30 while SCAN_START is
-    # overridden to 14:45 would invert the window and block all entries.
-    # (A full reset is always valid — defaults are ordered.)
+    # A PARTIAL reset must honor the same cross-field guards as a save: e.g.
+    # resetting only CUTOFF back to default while SCAN_START stays overridden
+    # could invert the window, or resetting one MACD/period key could leave an
+    # indicator all-NaN. Model the post-reset state as {reset key: default} over
+    # current config and run both guards (they no-op if no relevant key touched).
+    # (A full reset is always valid — defaults are internally consistent.)
     defaults = cfg.dynamic_defaults()
-    validate_time_order({k: defaults[k] for k in attr_keys
-                         if k.endswith("_HOUR") or k.endswith("_MIN")})
-    # Same guard for a partial MACD reset (e.g. resetting slow→26 while fast=30).
-    validate_macd_periods({k: defaults[k] for k in attr_keys
-                           if k in ("MACD_FAST", "MACD_SLOW")})
+    post_reset = {k: defaults[k] for k in attr_keys}
+    validate_time_order(post_reset)
+    validate_indicator_periods(post_reset)
 
     await db.delete_app_settings(attr_keys)
     cfg.clear_runtime_overrides(attr_keys)

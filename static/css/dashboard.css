@@ -830,8 +830,10 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 /* outcome breakdown bars (status-colored, always labelled) */
 .ob-row { display: grid; grid-template-columns: 58px 1fr 40px; align-items: center; gap: 9px; margin: 7px 0; }
 .ob-lbl { font-size: 11px; font-weight: 600; color: var(--txt-2); }
-.ob-track { height: 9px; background: var(--surf); border-radius: var(--r-pill); overflow: hidden; }
-.ob-fill  { height: 100%; border-radius: var(--r-pill); transition: width .5s cubic-bezier(.2,.8,.2,1); }
+.ob-track { display: block; height: 9px; background: var(--surf); border-radius: var(--r-pill); overflow: hidden; }
+/* display:block is REQUIRED — an inline <span> ignores width/height, so the
+   proportional fill would never render (only the empty track shows). */
+.ob-fill  { display: block; height: 100%; border-radius: var(--r-pill); transition: width .5s cubic-bezier(.2,.8,.2,1); }
 .ob-fill.win  { background: var(--pos); }
 .ob-fill.loss { background: var(--neg); }
 .ob-fill.flat { background: var(--txt-3); }

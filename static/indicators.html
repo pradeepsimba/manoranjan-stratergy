@@ -49,6 +49,56 @@
     .tf-select { cursor: pointer; }
     .ind-toolbar.viewing-tf { box-shadow: inset 0 -2px 0 var(--accent-2); }
 
+    /* ── Multi-timeframe compare ─────────────────────────────────────────────── */
+    .cmp-bar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 18px; background: var(--surf);
+      border-bottom: 1px solid var(--edge-soft);
+    }
+    .cmp-tfs { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+    .cmp-tf {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 9px; border-radius: var(--r-pill);
+      border: 1px solid var(--edge); background: var(--surf-raised);
+      font-size: 11px; font-weight: 600; color: var(--txt-2); cursor: pointer;
+    }
+    .cmp-tf input { accent-color: var(--prime); cursor: pointer; }
+    .cmp-tf.on { color: var(--prime); border-color: var(--prime-dim); background: var(--prime-container); }
+    .cmp-go, .cmp-exit {
+      border: none; border-radius: var(--r-sm); font-size: 11px; font-weight: 700;
+      padding: 5px 12px; cursor: pointer; font-family: inherit;
+    }
+    .cmp-go   { background: var(--prime); color: var(--on-prime); }
+    .cmp-exit { background: var(--surf-raised); border: 1px solid var(--edge); color: var(--txt-2); }
+    .cmp-hint { font-size: 10px; color: var(--txt-3); }
+
+    #mtf-table th, #mtf-table td { white-space: nowrap; }
+    #mtf-table thead th {
+      position: sticky; top: 0; z-index: 2; background: var(--surf);
+      color: var(--txt-2); font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; padding: 7px 10px; text-align: center;
+      border-bottom: 1px solid var(--edge);
+    }
+    #mtf-table th.tf-group { color: var(--prime); border-left: 1px solid var(--edge-soft); }
+    #mtf-table td { padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--edge-soft); text-align: center; }
+    #mtf-table td.mtf-sym { text-align: left; font-weight: 600; }
+    #mtf-table td.tf-cell { border-left: 1px solid var(--edge-soft); }
+    #mtf-table tbody tr:hover td { background: var(--surf-hover); }
+    /* directional chip by score 0–3 */
+    .dir { display: inline-block; min-width: 20px; font-weight: 700; }
+    .dir.s3 { color: var(--pos); }
+    .dir.s2 { color: var(--pos); opacity: .75; }
+    .dir.s1 { color: var(--warn); }
+    .dir.s0 { color: var(--neg); }
+    .mtf-rsi { color: var(--txt-2); font-size: 11px; margin-left: 4px; }
+    .conf {
+      display: inline-block; min-width: 42px; padding: 2px 8px; border-radius: var(--r-pill);
+      font-weight: 700; font-size: 11px; font-variant-numeric: tabular-nums;
+    }
+    .conf.full { background: var(--pos-bg); color: var(--pos); border: 1px solid var(--pos-edge); }
+    .conf.some { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-edge); }
+    .conf.none { background: var(--neg-bg); color: var(--neg); border: 1px solid var(--neg-edge); }
+
     .ind-meta {
       margin-left: auto;
       display: flex;
@@ -203,9 +253,20 @@
   <select class="ind-search tf-select" id="tf-select" onchange="switchTF(this.value)" style="width:auto">
     <option value="live">5m · live</option>
   </select>
+  <button class="ind-search tf-select" id="cmp-btn" style="cursor:pointer;width:auto"
+          onclick="toggleComparePanel()">⇄ Compare TFs</button>
   <div class="ind-meta">
     <span id="updated-txt">Loading…</span>
   </div>
+</div>
+
+<!-- ── Multi-timeframe compare bar (hidden until opened) ─────────────────────── -->
+<div class="cmp-bar" id="cmp-bar" style="display:none">
+  <span class="tf-label">Compare timeframes:</span>
+  <span id="cmp-tfs" class="cmp-tfs"></span>
+  <button class="cmp-go" onclick="startCompare()">Show comparison</button>
+  <button class="cmp-exit" onclick="exitCompare()">Exit</button>
+  <span class="cmp-hint">Score per TF = above-VWAP + MACD&gt;signal + (+DI&gt;−DI); ≥2 = bullish. Sorted by confluence.</span>
 </div>
 
 <!-- ── Summary strip ────────────────────────────────────────────────────────── -->
@@ -245,6 +306,11 @@
       <tr class="empty-row"><td colspan="16">Loading…</td></tr>
     </tbody>
   </table>
+</div>
+
+<!-- ── Multi-timeframe comparison table (hidden until compare mode) ──────────── -->
+<div class="ind-wrap" id="mtf-wrap" style="display:none">
+  <table id="mtf-table"><tbody id="mtf-tbody"></tbody></table>
 </div>
 
 <script src="/js/util.js"></script>

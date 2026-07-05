@@ -44,6 +44,24 @@
     .bt-adv-hint { font-size: 10px; color: var(--txt-3); margin-top: 4px; }
     .bt-adv-hint a { color: var(--prime); }
 
+    /* Backtest run meta: timeframe + which strategy was applied */
+    .bt-meta {
+      display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center;
+      margin-bottom: 10px;
+    }
+    .bt-meta .tag {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 9px; border-radius: var(--r-pill);
+      background: var(--surf); border: 1px solid var(--edge-soft);
+      font-size: 11px; color: var(--txt-2);
+    }
+    .bt-meta .tag b { color: var(--txt); font-weight: 700; }
+    .bt-meta .tag.tf { background: var(--prime-container); border-color: var(--prime-dim); color: var(--prime); }
+    .bt-meta .tag.tf b { color: var(--prime); }
+    .bt-meta .tag.ovr { background: var(--accent-2-bg); border-color: var(--accent-2); color: var(--accent-2); }
+    .bt-meta .strat { font-size: 11px; color: var(--txt-2); }
+    .bt-meta .strat b { color: var(--txt); }
+
     /* Backtest visualization: equity curve + outcome breakdown */
     .bt-viz {
       display: grid;
@@ -236,7 +254,7 @@
               <option value="5m" selected>5m</option>
               <option value="15m">15m</option>
               <option value="30m">30m</option>
-              <option value="1h">1h</option>
+              <option value="1hr">1hr</option>
             </select>
           </div>
           <button class="btn-run" onclick="runBacktest()">Run</button>
@@ -251,6 +269,7 @@
             conditions, gates, costs, scan window.
           </div>
         </details>
+        <div id="bt-meta" class="bt-meta" style="display:none"></div>
         <div id="bt-summary"></div>
         <div id="bt-viz" class="bt-viz" style="display:none">
           <div class="bt-viz-eq">

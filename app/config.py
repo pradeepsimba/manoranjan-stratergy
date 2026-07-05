@@ -44,19 +44,26 @@ POSTGRES_DSN   = os.getenv(
 
 # ── Static: data intervals + NIFTY identity ───────────────────────────────────
 INTERVAL_5M   = "5m"
+# Live 1h store key: kept as "1h" to MATCH the WebSocket's hardcoded "1h" ticks
+# that fill candles_1h during the session. The initial REST load with this id
+# returns nothing (the REST server uses "1hr") and the store is WS-filled — but
+# it must NOT be "1hr" here, or REST "1hr" bars and WS "1h" bars would mix in the
+# same store with possibly misaligned timestamps. The backtest/viewer/MTF use
+# TIMEFRAMES (below) directly and are unaffected by this constant.
 INTERVAL_1H   = "1h"
 NIFTY50_TOKEN = "99926000"
 NIFTY50_NAME  = "NIFTY 50"
 
-# Supported timeframes (server-dependent; order = UI display order). Used by the
-# indicators-page viewer and as the choice set for strategy/backtest timeframe.
-TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"]
+# Supported timeframes for the REST-historical features (indicators viewer/MTF,
+# backtest) — MUST match the market-data REST server's interval ids exactly:
+# it serves 1m, 3m, 5m, 15m, 30m, 1hr, 1day (no 4h). Order = UI display order.
+TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1hr", "1day"]
 
-# Approximate minutes per bar — for warmup-day math and bucketing. 1d uses the
-# NSE session length (~375 min) so a "day" of lookback still spans real bars.
+# Approximate minutes per bar — for warmup-day math. 1day uses the NSE session
+# length (~375 min) so a "day" of lookback still spans real bars.
 TIMEFRAME_MINUTES = {
     "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
-    "1h": 60, "4h": 240, "1d": 375,
+    "1hr": 60, "1day": 375,
 }
 
 

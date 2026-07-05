@@ -327,6 +327,7 @@ function runBacktest() {
   setRunBtn(true);
   document.getElementById('bt-summary').innerHTML = '';
   document.getElementById('bt-viz').style.display = 'none';
+  document.getElementById('bt-meta').style.display = 'none';
   document.getElementById('bt-trades').innerHTML =
     '<tr><td colspan="14" class="empty-cell">Running…</td></tr>';
 
@@ -370,6 +371,7 @@ function pollBacktest(runId) {
       if (run.status === 'error') {
         setBtStatus('failed', 'red');
         document.getElementById('bt-viz').style.display = 'none';
+        document.getElementById('bt-meta').style.display = 'none';
         document.getElementById('bt-summary').innerHTML =
           `<p class="pnl-neg" style="padding:8px 0;font-size:12px">${run.error || 'Backtest failed'}</p>`;
         document.getElementById('bt-trades').innerHTML =
@@ -379,7 +381,7 @@ function pollBacktest(runId) {
       }
       setBtStatus('done', 'green');
       setExportBtn(runId);
-      renderBacktestSummary(run.summary || {});
+      renderBacktestSummary(run);
       fetch(`/api/backtest/${runId}/trades`).then(r => r.json()).then(renderBacktestTrades);
       // Refresh history strip so the new run appears
       fetch('/api/backtests').then(r => r.json()).then(renderBtHistory).catch(() => {});
@@ -396,7 +398,40 @@ function setRunBtn(running) {
   if (controls) controls.classList.toggle('hidden', running);
 }
 
-function renderBacktestSummary(s) {
+// Caption above the summary: the timeframe this run used + a readable note of
+// which strategy was applied (the per-run overrides, or "Default strategy").
+function renderBacktestMeta(run) {
+  const el = document.getElementById('bt-meta');
+  if (!el) return;
+  const p = run.params || {};
+  const tf = p.timeframe || '5m';
+  const tags = [`<span class="tag tf">Timeframe <b>${escHtml(tf)}</b></span>`];
+  if (p.capital != null)      tags.push(`<span class="tag">Capital <b>₹${fmt2(p.capital)}</b></span>`);
+  if (p.slippage_bps != null) tags.push(`<span class="tag">Slippage <b>${p.slippage_bps} bps</b></span>`);
+
+  const ovr = p.overrides || {};
+  const keys = Object.keys(ovr);
+  let strat;
+  if (!keys.length) {
+    strat = '<span class="strat">Strategy: <b>Default</b> (conditions &amp; gates as configured)</span>';
+  } else {
+    const parts = keys.map(k => {
+      let v = ovr[k];
+      if (v === true) v = 'on'; else if (v === false) v = 'off';
+      return `${escHtml(k)}=${escHtml(String(v))}`;   // key & value escaped
+    });
+    strat = `<span class="strat">Strategy: <b>Custom</b> — ${parts.join(' · ')}</span>`;
+    tags.push(`<span class="tag ovr">${keys.length} override${keys.length !== 1 ? 's' : ''}</span>`);
+  }
+  el.innerHTML = tags.join('') + strat;
+  el.style.display = '';
+}
+
+// Accepts the full run object ({summary, params, from_date, to_date}) so it can
+// show which timeframe and which strategy overrides the run actually used.
+function renderBacktestSummary(run) {
+  const s = (run && run.summary) || {};
+  renderBacktestMeta(run || {});
   const pf = s.profit_factor != null ? s.profit_factor : '—';
   const net = s.net_pnl ?? 0;
   const cells = [
@@ -554,7 +589,7 @@ function loadRun(runId) {
   fetch(`/api/backtest/${runId}`)
     .then(r => r.json())
     .then(run => {
-      renderBacktestSummary(run.summary || {});
+      renderBacktestSummary(run);
       fetch(`/api/backtest/${runId}/trades`).then(r => r.json()).then(renderBacktestTrades);
     })
     .catch(e => setBtStatus('error: ' + e.message, 'red'));

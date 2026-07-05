@@ -64,24 +64,31 @@ def _sort_candles(candles: List[Candle]) -> List[Candle]:
     return sorted(candles, key=lambda c: c.start_time)
 
 
-def warmup_calendar_days(timeframe: str, configured: int) -> int:
+def warmup_calendar_days(timeframe: str, configured: int,
+                         lookback: Optional[int] = None) -> int:
     """
     Enough calendar days before the range for indicators to converge at the
-    chosen timeframe. TALIB_LOOKBACK bars at `timeframe` minutes → trading days
+    chosen timeframe. `lookback` bars at `timeframe` minutes → trading days
     (÷ ~375 session min) → calendar days (× 7/5 for weekends), floored at the
     configured warmup so intraday TFs keep today's ≥7-day default.
+
+    `lookback` is passed explicitly (not read from cfg) because a backtest run
+    may OVERRIDE TALIB_LOOKBACK, and that override is only active in worker
+    threads — this runs on the event loop where cfg would return the global.
     """
     import math
+    if lookback is None:
+        lookback = cfg.TALIB_LOOKBACK
     mins  = cfg.TIMEFRAME_MINUTES.get(timeframe, 5)
-    bars  = cfg.TALIB_LOOKBACK
-    tdays = math.ceil(bars * mins / 375.0)
+    tdays = math.ceil(lookback * mins / 375.0)
     cdays = math.ceil(tdays * 7.0 / 5.0) + 3
     return max(configured, cdays)
 
 
 async def load_backtest_data(from_d: date, to_d: date,
                              warmup_days: Optional[int] = None,
-                             timeframe: Optional[str] = None):
+                             timeframe: Optional[str] = None,
+                             lookback: Optional[int] = None):
     """
     Returns (universe, symbols, nifty) where:
       universe — {name: token} from client status
@@ -98,7 +105,7 @@ async def load_backtest_data(from_d: date, to_d: date,
     tf = timeframe or cfg.BACKTEST_TIMEFRAME
     if warmup_days is None:
         warmup_days = cfg.BACKTEST_WARMUP_DAYS
-    warmup_days = warmup_calendar_days(tf, warmup_days)
+    warmup_days = warmup_calendar_days(tf, warmup_days, lookback)
     fetch_from = (from_d - timedelta(days=warmup_days)).isoformat()
     fetch_to   = (to_d + timedelta(days=1)).isoformat()
 
