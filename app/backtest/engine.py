@@ -87,7 +87,7 @@ def _scan_symbol(
         ss.series[end - 3 : end],
         ohlcv_window=(ss.closes[lo:end], ss.highs[lo:end],
                       ss.lows[lo:end],   ss.vols[lo:end]),
-        session_vwap=session_vwap_from_cumsums(ss.cum_pv, ss.cum_v, day_start, gidx),
+        session_vwap=session_vwap_from_cumsums(ss.cum_pv, ss.cum_v, day_start, gidx, ss.cum_tp),
         entry_short_circuit=True,
     )
 
@@ -150,9 +150,9 @@ def _simulate_day(
     lets the caller run them in parallel. Returns that day's trades in close
     order.
 
-    This engine is intraday-only: a position opens on an early bar and exits on
-    a LATER bar or at EOD square-off. Timeframes coarser than 1h yield too few
-    bars per day for that to be meaningful, so the API rejects them upstream.
+    This per-day engine is for INTRADAY timeframes (≤60m): a position opens on
+    an early bar and exits on a LATER bar or at EOD square-off. The 1d
+    timeframe routes to _simulate_range_daily (positional mode) instead.
 
     `overrides` are the run's per-request settings; they are scoped to THIS
     worker thread only (cfg.thread_overrides), so a concurrent live session
@@ -202,12 +202,13 @@ def _simulate_day_impl(
     for tm, ngidx in grid:
         nifty_ltp  = nifty.series[ngidx].close
         # O(1) session VWAP from the precomputed prefix sums — same formula the
-        # per-stock scan uses, forward-in-time only (no look-ahead).
+        # per-stock scan uses, forward-in-time only (no look-ahead). cum_tp
+        # enables the TWAP fallback: the NIFTY feed carries volume=0 on every
+        # bar, so without it this gate could never pass.
         nifty_vwap = session_vwap_from_cumsums(
-            nifty.cum_pv, nifty.cum_v, nifty_day_start, ngidx
+            nifty.cum_pv, nifty.cum_v, nifty_day_start, ngidx, nifty.cum_tp
         )
         nifty_daily_green = nifty_ltp > nifty_day_open
-        # nifty_vwap==0 means NIFTY has no volume data — block entry (conservative)
         nifty_above_vwap  = nifty_vwap > 0.0 and nifty_ltp > nifty_vwap
 
         # 1) Exits first — only for positions opened on an earlier bar.
@@ -267,6 +268,97 @@ def _simulate_day_impl(
     return port.trades
 
 
+def _simulate_range_daily(
+    symbols:      Dict[str, SymbolSeries],
+    nifty:        SymbolSeries,
+    from_d:       date,
+    to_d:         date,
+    slippage_bps: float,
+    capital:      Optional[float],
+    overrides:    Optional[Dict],
+) -> Tuple[List, int]:
+    """
+    POSITIONAL replay for the 1d timeframe: ONE portfolio across the whole
+    range, stepped chronologically (bars are days, so sequential is cheap).
+    An entry fills at a daily bar's close; SL/target are checked on SUBSEQUENT
+    days' bars only (same gap-at-open handling as intraday via _try_exit);
+    survivors square off at each symbol's last bar in range.
+
+    Risk-guard semantics in this mode: `traded_today` = no re-entry for the
+    WHOLE run, and DAILY_LOSS_LIMIT acts as a run-level loss stop — the
+    natural positional reading of the intraday circuit breakers.
+
+    _scan_symbol is reused unchanged with day_start=gidx: "day open" becomes
+    the daily bar's open (daily-green = bar green; the synthesized hourly gate
+    degenerates to the same signal) and the single-bar session VWAP is the
+    bar's typical price, so above_vwap = close > (H+L+C)/3.
+    """
+    with cfg.thread_overrides(overrides or {}):
+        lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
+        days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
+        if not days:
+            return [], 0
+
+        max_pos    = cfg.MAX_CONCURRENT_POSITIONS
+        loss_limit = cfg.DAILY_LOSS_LIMIT
+        port = Portfolio()
+
+        for day in days:
+            n_idx = nifty.by_day[day][0]
+            nbar  = nifty.series[n_idx]
+            nifty_daily_green = nbar.close > nbar.open
+            nvwap = session_vwap_from_cumsums(nifty.cum_pv, nifty.cum_v, n_idx, n_idx, nifty.cum_tp)
+            nifty_above_vwap = nvwap > 0.0 and nbar.close > nvwap
+
+            # 1) Exits first — only for positions opened on an EARLIER day.
+            for sym in list(port.positions.keys()):
+                pos = port.positions[sym]
+                ss  = symbols.get(pos.token)
+                idxs = ss.by_day.get(day) if ss else None
+                if not idxs or idxs[0] <= pos.entry_gidx:
+                    continue
+                _try_exit(port, pos, ss.series[idxs[0]], slippage_bps)
+
+            # 2) Entries — collect the day's signals, then fill sequentially
+            #    honoring the circuit breakers (same shape as the intraday bar).
+            open_syms, traded, dpnl = port.snapshot()
+            if len(open_syms) < max_pos and dpnl > -loss_limit:
+                signals: List[BTPosition] = []
+                for token, ss in symbols.items():
+                    if ss.name in traded or ss.name in open_syms:
+                        continue
+                    idxs = ss.by_day.get(day)
+                    if not idxs:
+                        continue
+                    sig = _scan_symbol(
+                        ss, idxs[0], idxs[0], {},
+                        nifty_daily_green, nifty_above_vwap,
+                        open_syms, traded, dpnl, slippage_bps, capital,
+                    )
+                    if sig:
+                        signals.append(sig)
+                for sig in signals:
+                    ok, _ = can_enter(sig.symbol, port.positions,
+                                      port.traded_today, port.daily_pnl)
+                    if ok:
+                        port.open_position(sig)
+
+        # 3) Square off survivors at each symbol's last in-range bar.
+        for sym in list(port.positions.keys()):
+            pos = port.positions[sym]
+            ss  = symbols.get(pos.token)
+            if ss is None:
+                continue
+            last_day = max((d for d in ss.by_day if lo_s <= d <= hi_s), default=None)
+            if last_day is None:
+                continue
+            last = ss.series[ss.by_day[last_day][-1]]
+            port.close_position(sym, last.start_time,
+                                square_off_fill(last.close, slippage_bps), "EOD")
+
+        return port.trades, len(days)
+
+
 def simulate(
     symbols:      Dict[str, SymbolSeries],
     nifty:        SymbolSeries,
@@ -275,29 +367,36 @@ def simulate(
     slippage_bps: float,
     capital:      Optional[float] = None,
     overrides:    Optional[Dict]  = None,
+    timeframe:    Optional[str]   = None,
 ) -> Tuple[List, List, int]:
     """
-    Run the full replay. Days are independent, so they execute in parallel across
-    a thread pool — TA-Lib releases the GIL during the indicator math, giving real
-    multi-core speedup. Per-day trades are merged in chronological order and the
-    equity curve is rebuilt from the merged stream.
+    Run the full replay.
+    Intraday timeframes: days are independent, so they execute in parallel
+    across a thread pool — TA-Lib releases the GIL during the indicator math,
+    giving real multi-core speedup. Per-day trades merge in day order.
+    1d: positional mode — one portfolio, chronological, overnight holds
+    (_simulate_range_daily); parallelism is neither possible nor needed there.
     """
-    lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
-    days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
-    if not days:
-        return [], [], 0
-
-    workers = max(1, min(cfg.SCAN_WORKERS, len(days)))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bt-day") as pool:
-        # map preserves input order → results already in chronological day order
-        per_day = list(pool.map(
-            lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital, overrides),
-            days,
-        ))
-
-    trades: List = []
-    for day_trades in per_day:
-        trades.extend(day_trades)
+    tf = timeframe or cfg.BACKTEST_TIMEFRAME
+    if tf == "1d":
+        trades, ndays = _simulate_range_daily(
+            symbols, nifty, from_d, to_d, slippage_bps, capital, overrides)
+    else:
+        lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
+        days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
+        if not days:
+            return [], [], 0
+        workers = max(1, min(cfg.SCAN_WORKERS, len(days)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bt-day") as pool:
+            # map preserves input order → results already in chronological day order
+            per_day = list(pool.map(
+                lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital, overrides),
+                days,
+            ))
+        trades = []
+        for day_trades in per_day:
+            trades.extend(day_trades)
+        ndays = len(days)
 
     # Rebuild the running-equity curve from the merged, time-ordered trade stream.
     cum = 0.0
@@ -306,7 +405,7 @@ def simulate(
         cum += t.net_pnl
         equity_curve.append((t.exit_time, round(cum, 2)))
 
-    return trades, equity_curve, len(days)
+    return trades, equity_curve, ndays
 
 
 async def run_backtest(
@@ -339,7 +438,7 @@ async def run_backtest(
             return
 
         trades, equity, days = await asyncio.to_thread(
-            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital, overrides
+            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital, overrides, tf
         )
 
         summary = compute_metrics(trades, equity, days)

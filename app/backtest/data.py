@@ -41,6 +41,7 @@ class SymbolSeries:
     vols:   Optional[np.ndarray] = None
     cum_pv: Optional[np.ndarray] = None   # cumsum of (H+L+C)·V — VWAP numerator ×3
     cum_v:  Optional[np.ndarray] = None   # cumsum of V
+    cum_tp: Optional[np.ndarray] = None   # cumsum of (H+L+C) — TWAP fallback (index volume=0)
 
     def index_days(self) -> None:
         for i, c in enumerate(self.series):
@@ -56,8 +57,10 @@ class SymbolSeries:
         self.highs  = np.fromiter((c.high   for c in self.series), np.float64, n)
         self.lows   = np.fromiter((c.low    for c in self.series), np.float64, n)
         self.vols   = np.fromiter((c.volume for c in self.series), np.float64, n)
-        self.cum_pv = ((self.highs + self.lows + self.closes) * self.vols).cumsum()
+        tp = self.highs + self.lows + self.closes
+        self.cum_pv = (tp * self.vols).cumsum()
         self.cum_v  = self.vols.cumsum()
+        self.cum_tp = tp.cumsum()
 
 
 def _sort_candles(candles: List[Candle]) -> List[Candle]:

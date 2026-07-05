@@ -28,9 +28,11 @@ def compute_nifty_gates(
     above_vwap = False
     if nifty_ltp > 0 and nifty_candles_5m:
         # Single pass over the session bars — this runs every 100ms tick cycle,
-        # so no per-call list/array allocations.
+        # so no per-call list/array allocations. The NIFTY feed carries
+        # volume=0 on every bar, so session_vwap_candles degrades to the
+        # session TWAP (mean typical price) — without that fallback this gate
+        # could never pass. vwap==0 now only means "no bars yet" → block.
         vwap = session_vwap_candles(nifty_candles_5m)
-        # vwap==0 means NIFTY has no volume data — block entry (conservative)
         above_vwap = vwap > 0.0 and nifty_ltp > vwap
 
     return daily_green, above_vwap

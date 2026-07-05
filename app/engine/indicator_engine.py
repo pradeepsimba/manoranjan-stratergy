@@ -45,28 +45,51 @@ def session_vwap_candles(candles: List[Candle]) -> float:
     Session-anchored VWAP over the given bars in a single pass — only the final
     value is needed, so no cumulative arrays are materialised. Shared by the
     per-stock scan and the NIFTY gate so both use the exact same formula.
+
+    Volume-less fallback: INDEX feeds (NIFTY) carry volume=0 on every bar, so a
+    pure VWAP is permanently 0 and the above-VWAP gate could never pass.
+    Degrade to the session TWAP (mean typical price) — same "above the session
+    average" meaning, computable without volume.
     """
     tot_v  = 0.0
     tot_pv = 0.0
+    tot_tp = 0.0
     for c in candles:
-        v = c.volume
+        v  = c.volume
+        tp = c.high + c.low + c.close
         tot_v  += v
-        tot_pv += (c.high + c.low + c.close) * v
-    # typical price = (H+L+C)/3, factored out of the loop
-    return tot_pv / (3.0 * tot_v) if tot_v > 0 else 0.0
+        tot_pv += tp * v
+        tot_tp += tp
+    # typical price = (H+L+C)/3, factored out of the loops
+    if tot_v > 0:
+        return tot_pv / (3.0 * tot_v)
+    n = len(candles)
+    return tot_tp / (3.0 * n) if n else 0.0
 
 
-def session_vwap_from_cumsums(cum_pv, cum_v, start: int, end: int) -> float:
+def session_vwap_from_cumsums(cum_pv, cum_v, start: int, end: int,
+                              cum_tp=None) -> float:
     """
     O(1) session VWAP over bars [start..end] from prefix sums of (H+L+C)·V and
     V (see SymbolSeries.index_days). Algebraically identical to
     session_vwap_candles over the same slice — the backtest's fast path.
+
+    cum_tp (prefix sum of H+L+C) enables the same volume-less TWAP fallback as
+    session_vwap_candles — required for the NIFTY gates (index volume is 0 on
+    every bar) and keeps live/backtest parity for zero-volume slices.
     """
     base_pv = cum_pv[start - 1] if start > 0 else 0.0
     base_v  = cum_v[start - 1]  if start > 0 else 0.0
     pv = cum_pv[end] - base_pv
     v  = cum_v[end]  - base_v
-    return float(pv / (3.0 * v)) if v > 0 else 0.0
+    if v > 0:
+        return float(pv / (3.0 * v))
+    if cum_tp is not None:
+        base_tp = cum_tp[start - 1] if start > 0 else 0.0
+        n = end - start + 1
+        if n > 0:
+            return float((cum_tp[end] - base_tp) / (3.0 * n))
+    return 0.0
 
 
 # ── Bullish candlestick patterns (custom) ─────────────────────────────────────
