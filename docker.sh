@@ -15,6 +15,55 @@ if [ -z "$ACTION" ]; then
     exit 1
 fi
 
+# ── AppArmor-resilient `docker compose down` ──────────────────────────────────
+# On Ubuntu the container's docker-default AppArmor profile can go "unknown"
+# (after an apparmor reload or a Docker/kernel update); the kernel then blocks
+# the stop/kill syscall with "permission denied". This runs the given
+# `docker compose down …` and, on that failure, auto-recovers and retries
+# instead of erroring out.
+compose_down() {
+    if docker compose "$@"; then
+        return 0
+    fi
+
+    echo ""
+    echo "⚠️  'docker compose down' failed — likely the Ubuntu AppArmor issue."
+    echo "    Attempting automatic recovery (needs sudo)…"
+
+    # 1) Clear stale/unknown AppArmor profiles, then retry.
+    if command -v aa-remove-unknown >/dev/null 2>&1; then
+        echo "    → sudo aa-remove-unknown"
+        sudo aa-remove-unknown >/dev/null 2>&1 || true
+        if docker compose "$@"; then
+            echo "✅ Recovered after aa-remove-unknown."
+            return 0
+        fi
+    fi
+
+    # 2) Restart the Docker daemon (reloads the docker-default profile and
+    #    stops lingering containers), then retry.
+    echo "    → sudo systemctl restart docker"
+    if sudo systemctl restart docker >/dev/null 2>&1; then
+        # Wait for the daemon socket to come back before retrying.
+        for _ in $(seq 1 15); do
+            docker info >/dev/null 2>&1 && break
+            sleep 1
+        done
+        if docker compose "$@"; then
+            echo "✅ Recovered after restarting Docker."
+            return 0
+        fi
+    fi
+
+    # 3) Give up with the manual escalation steps.
+    echo ""
+    echo "❌ Automatic recovery failed. Run these manually, then retry:"
+    echo "    sudo aa-remove-unknown"
+    echo "    sudo systemctl restart apparmor"
+    echo "    sudo systemctl restart docker"
+    return 1
+}
+
 case "$ACTION" in
     build|--build)
         echo "=== Building Docker services ==="
@@ -26,16 +75,7 @@ case "$ACTION" in
         ;;
     stop|--stop|down|--down)
         echo "=== Stopping Docker services ==="
-        if ! docker compose down; then
-            echo ""
-            echo "⚠️  Error: Docker failed to stop the containers (Permission Denied)."
-            echo "This is commonly caused by AppArmor profiles blocking the Docker daemon on Ubuntu."
-            echo "Please try running the following command to resolve this:"
-            echo "  sudo aa-remove-unknown"
-            echo "Or restart the Docker service:"
-            echo "  sudo systemctl restart docker"
-            exit 1
-        fi
+        compose_down down || exit 1
         ;;
     logs|--logs)
         echo "=== Streaming app logs (Ctrl+C to exit) ==="
@@ -47,16 +87,7 @@ case "$ACTION" in
         ;;
     remove|--remove|clean|--clean)
         echo "=== Removing Docker services, volumes, and images ==="
-        if ! docker compose down --volumes --rmi all --remove-orphans; then
-            echo ""
-            echo "⚠️  Error: Docker failed to remove the containers (Permission Denied)."
-            echo "This is commonly caused by AppArmor profiles blocking the Docker daemon on Ubuntu."
-            echo "Please try running the following command to resolve this:"
-            echo "  sudo aa-remove-unknown"
-            echo "Or restart the Docker service:"
-            echo "  sudo systemctl restart docker"
-            exit 1
-        fi
+        compose_down down --volumes --rmi all --remove-orphans || exit 1
         ;;
     *)
         echo "Unknown action: $ACTION"

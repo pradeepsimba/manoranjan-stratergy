@@ -261,17 +261,31 @@ def expand_changes(changes: Dict[str, Any], *, bt_only: bool = False) -> Dict[st
 
 def validate_macd_periods(attr_changes: Dict[str, Any]) -> None:
     """
-    Cross-field guard: MACD fast EMA must be shorter than the slow EMA (they are
-    independent int fields, so a fat-finger like fast=26/slow=12 is possible and
-    makes TA-Lib's MACD return garbage/NaN). No-op unless a MACD period changed.
+    Cross-field guards for MACD, checked against the effective config (changes
+    over current). No-op unless a relevant key changed.
+      1. fast < slow — independent int fields; fast≥slow makes TA-Lib return NaN.
+      2. TALIB_LOOKBACK ≥ slow + signal + cross-window — TA-Lib MACD needs
+         slow+signal-1 bars for a first value; if the lookback tail is shorter,
+         MACD is all-NaN, macd_bullish_cross never fires, and (with the condition
+         enabled) every entry is silently blocked forever.
     """
-    if not any(k in attr_changes for k in ("MACD_FAST", "MACD_SLOW")):
+    keys = ("MACD_FAST", "MACD_SLOW", "MACD_SIGNAL", "MACD_CROSS_BARS", "TALIB_LOOKBACK")
+    if not any(k in attr_changes for k in keys):
         return
-    fast = attr_changes.get("MACD_FAST", cfg.MACD_FAST)
-    slow = attr_changes.get("MACD_SLOW", cfg.MACD_SLOW)
+
+    def eff(k: str) -> int:
+        return attr_changes.get(k, getattr(cfg, k))
+
+    fast, slow, signal = eff("MACD_FAST"), eff("MACD_SLOW"), eff("MACD_SIGNAL")
     if fast >= slow:
         raise ValueError(
             f"MACD fast period ({fast}) must be less than the slow period ({slow})")
+    need = slow + signal + eff("MACD_CROSS_BARS")
+    lookback = eff("TALIB_LOOKBACK")
+    if lookback < need:
+        raise ValueError(
+            f"indicator lookback ({lookback}) is too small for "
+            f"MACD({fast},{slow},{signal}) + cross window — need ≥ {need} bars")
 
 
 def _coerce_attr(key: str, raw: Any) -> Any:

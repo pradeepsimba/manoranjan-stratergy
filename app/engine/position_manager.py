@@ -23,6 +23,17 @@ def calc_quantity(
     """
     if capital is None:
         capital = cfg.ACCOUNT_BALANCE
+
+    # Support at/above entry means no structural stop BELOW the entry price.
+    # Flooring to MIN_SL_OFFSET would put the stop at an arbitrary entry−₹5 and
+    # size the position off that nonsensical distance (RISK/5 = a large qty).
+    # The near_support condition normally guarantees entry ≥ support, so this is
+    # only reachable with COND_NEAR_SUPPORT disabled — reject rather than size a
+    # trade on a meaningless stop. (support ≤ 0 = no data → entry−support = entry,
+    # a huge stop / tiny qty, which is harmless and left as-is.)
+    if support > entry_price:
+        return 0, 0.0, 0.0
+
     sl_offset = round(max(entry_price - support, cfg.MIN_SL_OFFSET), 2)
 
     raw_qty = cfg.RISK_PER_TRADE / sl_offset
