@@ -229,30 +229,48 @@ def _simulate_day_impl(
         if scan_start <= tm < cutoff:
             open_syms, traded, dpnl = port.snapshot()
             if len(open_syms) < max_pos and dpnl > -loss_limit:
+                # Concurrent positions SHARE the account: size new entries from
+                # what open positions haven't already committed (value ÷ lev).
+                cap_total = capital if capital is not None else cfg.ACCOUNT_BALANCE
+                available = cap_total - port.margin_used()
                 signals: List[BTPosition] = []
-                for ss, day_map, day_idxs, hour_open_day in day_syms:
-                    # can_enter (inside _scan_symbol) would reject these
-                    # anyway — skipping here avoids the whole call for every
-                    # already-traded symbol on every remaining bar of the day.
-                    if ss.name in traded or ss.name in open_syms:
-                        continue
-                    gidx = day_map.get(tm)
-                    if gidx is None:
-                        continue
-                    sig = _scan_symbol(
-                        ss, gidx, day_idxs[0], hour_open_day,
-                        nifty_daily_green, nifty_above_vwap,
-                        open_syms, traded, dpnl, slippage_bps, capital,
-                    )
-                    if sig:
-                        signals.append(sig)
+                if available > 0:
+                    for ss, day_map, day_idxs, hour_open_day in day_syms:
+                        # can_enter (inside _scan_symbol) would reject these
+                        # anyway — skipping here avoids the whole call for every
+                        # already-traded symbol on every remaining bar of the day.
+                        if ss.name in traded or ss.name in open_syms:
+                            continue
+                        gidx = day_map.get(tm)
+                        if gidx is None:
+                            continue
+                        sig = _scan_symbol(
+                            ss, gidx, day_idxs[0], hour_open_day,
+                            nifty_daily_green, nifty_above_vwap,
+                            open_syms, traded, dpnl, slippage_bps, available,
+                        )
+                        if sig:
+                            signals.append(sig)
 
                 # Apply fills sequentially, honoring the live circuit breakers.
+                # Re-check affordability per fill: an earlier fill on this SAME
+                # bar shrinks what's left for the next signal. Compare at the
+                # SIZING basis (unslipped close, de-slipped exactly): the check
+                # exists to catch same-bar consumption by earlier fills — NOT
+                # to re-reject the slippage haircut the sizer never saw. A qty
+                # capped to exactly fit `available` would otherwise be dropped
+                # whenever int() slack < slippage, a systematic under-entry
+                # bias vs live (which fills at the scan price).
+                lev  = cfg.INTRADAY_LEVERAGE
+                slip = 1.0 + slippage_bps / 10_000.0
                 for sig in signals:
                     ok, _ = can_enter(sig.symbol, port.positions,
                                       port.traded_today, port.daily_pnl)
-                    if ok:
-                        port.open_position(sig)
+                    if not ok:
+                        continue
+                    if (sig.entry_price / slip * sig.qty) / lev > cap_total - port.margin_used() + 1e-9:
+                        continue
+                    port.open_position(sig)
 
     # 3) EOD square-off any survivors at the day's last bar close.
     for sym in list(port.positions.keys()):
@@ -321,27 +339,38 @@ def _simulate_range_daily(
 
             # 2) Entries — collect the day's signals, then fill sequentially
             #    honoring the circuit breakers (same shape as the intraday bar).
+            #    Sizing shares the account across OPEN (overnight) positions.
             open_syms, traded, dpnl = port.snapshot()
             if len(open_syms) < max_pos and dpnl > -loss_limit:
+                cap_total = capital if capital is not None else cfg.ACCOUNT_BALANCE
+                available = cap_total - port.margin_used()
                 signals: List[BTPosition] = []
-                for token, ss in symbols.items():
-                    if ss.name in traded or ss.name in open_syms:
-                        continue
-                    idxs = ss.by_day.get(day)
-                    if not idxs:
-                        continue
-                    sig = _scan_symbol(
-                        ss, idxs[0], idxs[0], {},
-                        nifty_daily_green, nifty_above_vwap,
-                        open_syms, traded, dpnl, slippage_bps, capital,
-                    )
-                    if sig:
-                        signals.append(sig)
+                if available > 0:
+                    for token, ss in symbols.items():
+                        if ss.name in traded or ss.name in open_syms:
+                            continue
+                        idxs = ss.by_day.get(day)
+                        if not idxs:
+                            continue
+                        sig = _scan_symbol(
+                            ss, idxs[0], idxs[0], {},
+                            nifty_daily_green, nifty_above_vwap,
+                            open_syms, traded, dpnl, slippage_bps, available,
+                        )
+                        if sig:
+                            signals.append(sig)
+                # Same sizing-basis (de-slipped) comparison as the intraday
+                # engine — see the comment there.
+                lev  = cfg.INTRADAY_LEVERAGE
+                slip = 1.0 + slippage_bps / 10_000.0
                 for sig in signals:
                     ok, _ = can_enter(sig.symbol, port.positions,
                                       port.traded_today, port.daily_pnl)
-                    if ok:
-                        port.open_position(sig)
+                    if not ok:
+                        continue
+                    if (sig.entry_price / slip * sig.qty) / lev > cap_total - port.margin_used() + 1e-9:
+                        continue
+                    port.open_position(sig)
 
         # 3) Square off survivors at each symbol's last in-range bar.
         for sym in list(port.positions.keys()):

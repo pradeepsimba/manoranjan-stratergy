@@ -131,12 +131,25 @@ def scan_stock(
         return None
 
     # ── Position sizing ───────────────────────────────────────────────────────
-    qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level)
+    # Concurrent positions SHARE the account: size from what open positions
+    # haven't already committed (value ÷ leverage), matching the backtest's
+    # Portfolio.margin_used semantics. list() snapshots the dict atomically
+    # (CPython/GIL) — positions are mutated only on the event loop while this
+    # runs in a scan-pool worker.
+    lev       = cfg.INTRADAY_LEVERAGE
+    committed = sum(p.entry_price * p.quantity
+                    for p in list(st.positions.values())) / lev
+    available = cfg.ACCOUNT_BALANCE - committed
+    if available <= 0:
+        st.record_scan(symbol, {"pass": False, "reason": "No free capital"})
+        return None
+
+    qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level, available)
     if qty == 0:
         st.record_scan(symbol, {"pass": False, "reason": "Invalid SL / size=0"})
         return None
 
-    capital_needed = (ltp * qty) / cfg.INTRADAY_LEVERAGE
+    capital_needed = (ltp * qty) / lev
 
     signal = EntrySignal(
         symbol         = symbol,

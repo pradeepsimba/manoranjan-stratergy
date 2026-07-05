@@ -12,6 +12,7 @@ many runs could execute independently.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
+import app.config as cfg
 from app.backtest.fills import round_trip_costs
 
 
@@ -76,6 +77,16 @@ class Portfolio:
     def snapshot(self):
         """Read-only state for can_enter, safe to share across parallel scans."""
         return set(self.positions.keys()), set(self.traded_today), self.daily_pnl
+
+    def margin_used(self) -> float:
+        """
+        Capital currently committed by OPEN positions (position value ÷
+        leverage). New entries may only be sized from what's left of the
+        account — without this, each of the 3 concurrent positions could
+        consume the FULL buying power (3× the stated capital).
+        """
+        lev = cfg.INTRADAY_LEVERAGE
+        return sum(p.entry_price * p.qty for p in self.positions.values()) / lev
 
     # ── Open / close ────────────────────────────────────────────────────────
     def open_position(self, pos: BTPosition) -> None:

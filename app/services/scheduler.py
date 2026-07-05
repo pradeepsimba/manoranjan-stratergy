@@ -439,6 +439,15 @@ class SchedulerService:
             ok, _ = can_enter(sig.symbol, st.positions, st.traded_today, st.daily_pnl)
             if not ok:
                 continue
+            # Affordability re-check at FILL time: the signal was sized from the
+            # capital available when it was scanned; an earlier fill this same
+            # cycle (or a tick-race) may have committed some of it since. Runs
+            # on the event loop, so the margin sum is race-free here.
+            lev = cfg.INTRADAY_LEVERAGE
+            committed = sum(p.entry_price * p.quantity
+                            for p in st.positions.values()) / lev
+            if sig.capital_needed > cfg.ACCOUNT_BALANCE - committed + 1e-9:
+                continue
             pos = place_paper_order(
                 symbol        = sig.symbol,
                 token         = sig.token,
