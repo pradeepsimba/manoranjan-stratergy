@@ -74,6 +74,11 @@ class IndicatorResult:
     candle_pattern:  Optional[str] = None
     bullish_pattern: bool          = False
 
+    # Raw price/volume context — lets the custom-rule engine express
+    # price-relative clauses (e.g. "within 0.5% of VWAP", "volume 2× average").
+    ltp:          float           = 0.0    # close of the bar the scan ran on
+    volume_ratio: Optional[float] = None   # latest bar volume ÷ volume MA
+
 
 @dataclass(slots=True)   # built on every gated scan, live and backtest
 class TrendGate:

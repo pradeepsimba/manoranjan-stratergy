@@ -124,6 +124,11 @@ SPEC: List[Dict[str, Any]] = [
     _s("COND_DEPTH", "Order-book depth bullish", "bool", "Entry Conditions",
        help_="Live only — the backtest always passes this."),
 
+    # ── Custom entry rules (rendered by the dedicated builder UI) ────────────
+    _s("CUSTOM_ENTRY_RULES", "Custom entry rules", "rules", "Entry Conditions",
+       help_="OR-of-ANDs rule sets over any indicator; 'and' adds to the fixed "
+             "conditions, 'replace' swaps them out (trend gates still apply)."),
+
     # ── Trend-gate toggles ────────────────────────────────────────────────────
     _s("GATE_STOCK_DAILY", "Stock daily green", "bool", "Trend Gates"),
     _s("GATE_STOCK_HOURLY", "Stock hourly green", "bool", "Trend Gates"),
@@ -215,6 +220,12 @@ def _coerce(spec: Dict[str, Any], raw: Any) -> Any:
         if val not in (spec["choices"] or []):
             raise ValueError(f"{key}: must be one of {spec['choices']}")
         return val
+
+    if typ == "rules":
+        # Structural whitelist validation lives beside the evaluator so the
+        # two can't drift. (Import here: settings→conditions has no cycle.)
+        from app.engine.conditions import validate_rules
+        return validate_rules(raw)
 
     if typ == "time":
         if not isinstance(raw, str) or not _TIME_RE.match(raw.strip()):
@@ -363,13 +374,14 @@ def _read_value(spec: Dict[str, Any], source: Dict[str, Any]) -> Any:
 # ── Introspection for GET /api/settings ───────────────────────────────────────
 
 def describe() -> Dict[str, Any]:
+    from app.engine.conditions import RULE_FIELDS, RULE_OPS   # no import cycle
     defaults = cfg.dynamic_defaults()
     current = {k: getattr(cfg, k) for k in defaults}
     groups: Dict[str, list] = {g: [] for g in GROUP_ORDER}
     for spec in SPEC:
         value   = _read_value(spec, current)
         default = _read_value(spec, defaults)
-        groups.setdefault(spec["group"], []).append({
+        entry = {
             "key":        spec["key"],
             "label":      spec["label"],
             "type":       spec["type"],
@@ -383,7 +395,14 @@ def describe() -> Dict[str, Any]:
             "value":      value,
             "default":    default,
             "overridden": value != default,
-        })
+        }
+        if spec["type"] == "rules":
+            # Ship the builder's vocabulary with the setting so the UI can
+            # render field/op pickers without a second endpoint.
+            entry["fields"] = [{"key": k, "label": lbl, "kind": kind}
+                               for k, (lbl, kind, _) in RULE_FIELDS.items()]
+            entry["ops"] = list(RULE_OPS)
+        groups.setdefault(spec["group"], []).append(entry)
     return {"groups": [{"name": g, "settings": groups[g]}
                        for g in GROUP_ORDER if groups.get(g)]}
 

@@ -22,11 +22,17 @@ function loadSettings() {
 
 function fmtVal(setting, v) {
   if (setting.type === 'bool') return v ? 'on' : 'off';
+  if (setting.type === 'rules') {
+    if (!v || !v.enabled) return 'off';
+    const n = (v.groups || []).length;
+    return `${v.mode === 'replace' ? 'replace' : 'and'} · ${n} group${n !== 1 ? 's' : ''}`;
+  }
   return String(v);
 }
 
 function controlHtml(s) {
   const key = escHtml(s.key);
+  if (s.type === 'rules') return '';   // rendered by the dedicated builder below
   if (s.type === 'bool') {
     return `<label class="switch">
       <input type="checkbox" data-key="${key}" ${s.value ? 'checked' : ''}>
@@ -50,6 +56,137 @@ function controlHtml(s) {
           step="${step}" ${min} ${max}>`;
 }
 
+// ── Custom-rule builder (settings type "rules") ────────────────────────────────
+// Working drafts keyed by setting key; mutations sync into `edits` so the rule
+// set saves through the same PUT /api/settings pipeline as every other setting.
+const _ruleDrafts = {};
+
+const _OP_LABEL = { lt: '<', lte: '≤', gt: '>', gte: '≥', eq: '=', neq: '≠', between: 'between' };
+const _BOOL_OPS = ['eq', 'neq'];
+
+function _deepCopy(o) { return JSON.parse(JSON.stringify(o)); }
+function _rulesEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+
+function _fieldMeta(s, key) {
+  return (s.fields || []).find(f => f.key === key) || { key, label: key, kind: 'num' };
+}
+
+function ruleBuilderHtml(s, draft) {
+  const fieldOpts = fld => (s.fields || []).map(f =>
+    `<option value="${escHtml(f.key)}"${f.key === fld ? ' selected' : ''}>${escHtml(f.label)}</option>`).join('');
+  const opOpts = (kind, op) => (kind === 'bool' ? _BOOL_OPS : (s.ops || [])).map(o =>
+    `<option value="${o}"${o === op ? ' selected' : ''}>${_OP_LABEL[o] || o}</option>`).join('');
+
+  const groupsHtml = (draft.groups || []).map((g, gi) => {
+    const rows = g.map((cl, ci) => {
+      const kind = _fieldMeta(s, cl.field).kind;
+      const valCtl = kind === 'bool'
+        ? `<select class="field-input rb-in" data-g="${gi}" data-c="${ci}" data-prop="value">
+             <option value="true"${cl.value === true ? ' selected' : ''}>true</option>
+             <option value="false"${cl.value === false ? ' selected' : ''}>false</option></select>`
+        : `<input class="field-input rb-in rb-num" type="number" step="any" data-g="${gi}" data-c="${ci}"
+                  data-prop="value" value="${cl.value}">` +
+          (cl.op === 'between'
+            ? ` <span class="rb-and">and</span>
+                <input class="field-input rb-in rb-num" type="number" step="any" data-g="${gi}" data-c="${ci}"
+                       data-prop="value2" value="${cl.value2 != null ? cl.value2 : ''}">`
+            : '');
+      return `<div class="rb-clause">
+        <select class="field-input rb-in" data-g="${gi}" data-c="${ci}" data-prop="field">${fieldOpts(cl.field)}</select>
+        <select class="field-input rb-in" data-g="${gi}" data-c="${ci}" data-prop="op">${opOpts(kind, cl.op)}</select>
+        ${valCtl}
+        <button class="btn-mini rb-del" data-g="${gi}" data-c="${ci}" title="Remove condition">×</button>
+      </div>`;
+    }).join('');
+    return `<div class="rb-group">
+      <div class="rb-group-head"><span>Group ${gi + 1} — all must match</span>
+        <button class="btn-mini rb-del-group" data-g="${gi}" title="Remove group">×</button></div>
+      ${rows}
+      <button class="btn-mini rb-add-clause" data-g="${gi}">+ AND condition</button>
+    </div>`;
+  }).join('<div class="rb-or">— OR —</div>');
+
+  return `
+    <div class="rb-head">
+      <label class="switch"><input type="checkbox" class="rb-enabled"${draft.enabled ? ' checked' : ''}>
+        <span class="slider"></span></label>
+      <span class="rb-head-lbl">${draft.enabled ? 'Enabled' : 'Disabled'}</span>
+      <select class="field-input rb-mode">
+        <option value="and"${draft.mode === 'and' ? ' selected' : ''}>Add to fixed conditions (AND)</option>
+        <option value="replace"${draft.mode === 'replace' ? ' selected' : ''}>Replace fixed conditions</option>
+      </select>
+    </div>
+    ${groupsHtml || '<div class="rb-empty">No rule groups yet.</div>'}
+    <button class="btn-mini rb-add-group">+ OR group</button>`;
+}
+
+function renderRuleBuilder(s) {
+  const host = wrap.querySelector(`[data-rules="${CSS.escape(s.key)}"]`);
+  if (!host) return;
+  host.innerHTML = ruleBuilderHtml(s, _ruleDrafts[s.key]);
+
+  // Bind ONCE per host element. sync() re-renders into the SAME host, so an
+  // unconditional addEventListener would stack a new handler pair on every
+  // edit — each subsequent click/change would then apply N times (e.g. one
+  // "+ AND condition" click adding several clauses). Handlers read the draft
+  // through _ruleDrafts[s.key] (not a closure) so a later render()'s reseed
+  // is always picked up.
+  if (host._rbBound) return;
+  host._rbBound = true;
+
+  const sync = () => {
+    const draft = _ruleDrafts[s.key];
+    if (_rulesEqual(draft, s.value)) delete edits[s.key];
+    else edits[s.key] = _deepCopy(draft);
+    const row = wrap.querySelector(`[data-row="${CSS.escape(s.key)}"]`);
+    if (row) row.classList.toggle('dirty', s.key in edits);
+    updateSaveBar();
+    renderRuleBuilder(s);            // repaint (structure may have changed)
+  };
+
+  host.addEventListener('change', e => {
+    const t = e.target;
+    const draft = _ruleDrafts[s.key];
+    if (t.classList.contains('rb-enabled')) { draft.enabled = t.checked; sync(); return; }
+    if (t.classList.contains('rb-mode'))    { draft.mode = t.value; sync(); return; }
+    if (!t.classList.contains('rb-in')) return;
+    const cl = draft.groups[+t.dataset.g][+t.dataset.c];
+    const prop = t.dataset.prop;
+    if (prop === 'field') {
+      cl.field = t.value;
+      const kind = _fieldMeta(s, cl.field).kind;
+      if (kind === 'bool') { cl.op = 'eq'; cl.value = true; delete cl.value2; }
+      else if (typeof cl.value === 'boolean') { cl.op = 'gt'; cl.value = 0; }
+    } else if (prop === 'op') {
+      cl.op = t.value;
+      if (cl.op === 'between' && cl.value2 == null) cl.value2 = Number(cl.value) + 1;
+      if (cl.op !== 'between') delete cl.value2;
+    } else {
+      const kind = _fieldMeta(s, cl.field).kind;
+      cl[prop] = kind === 'bool' ? (t.value === 'true') : parseFloat(t.value);
+      if (Number.isNaN(cl[prop])) cl[prop] = 0;
+    }
+    sync();
+  });
+
+  host.addEventListener('click', e => {
+    const t = e.target;
+    const draft = _ruleDrafts[s.key];
+    if (t.classList.contains('rb-add-group')) {
+      draft.groups.push([{ field: 'rsi', op: 'lt', value: 30 }]); sync();
+    } else if (t.classList.contains('rb-add-clause')) {
+      draft.groups[+t.dataset.g].push({ field: 'rsi', op: 'lt', value: 30 }); sync();
+    } else if (t.classList.contains('rb-del-group')) {
+      draft.groups.splice(+t.dataset.g, 1); sync();
+    } else if (t.classList.contains('rb-del')) {
+      const g = draft.groups[+t.dataset.g];
+      g.splice(+t.dataset.c, 1);
+      if (!g.length) draft.groups.splice(+t.dataset.g, 1);
+      sync();
+    }
+  });
+}
+
 // One setting row. `nested` = rendered indented under its condition toggle.
 function rowHtml(s, nested) {
   return `
@@ -66,7 +203,7 @@ function rowHtml(s, nested) {
         ${controlHtml(s)}
         ${s.overridden ? `<button class="btn-mini" data-reset="${escHtml(s.key)}" title="Reset to default">↺</button>` : ''}
       </div>
-    </div>`;
+    </div>${s.type === 'rules' ? `<div class="rb-wrap" data-rules="${escHtml(s.key)}"></div>` : ''}`;
 }
 
 function render() {
@@ -115,6 +252,15 @@ function render() {
   wrap.querySelectorAll('[data-reset]').forEach(el => {
     el.addEventListener('click', () => resetKeys([el.getAttribute('data-reset')]));
   });
+
+  // Rule-builder settings: (re)seed the draft from pending edits or the server
+  // value, then paint the builder into its host container.
+  groups.forEach(g => g.settings.forEach(s => {
+    if (s.type !== 'rules') return;
+    _ruleDrafts[s.key] = _deepCopy(s.key in edits ? edits[s.key] : s.value);
+    renderRuleBuilder(s);
+  }));
+
   updateSaveBar();
   applyFilter();   // re-apply the active text filter to the freshly built panels
 }
@@ -133,6 +279,11 @@ function applyFilter() {
       const hay = (row.textContent + ' ' + (row.getAttribute('data-row') || '')).toLowerCase();
       const hit = !q || hay.indexOf(q) !== -1;
       row.classList.toggle('filtered-out', !hit);
+      // A rule-builder body lives OUTSIDE its .set-row — mirror the row's
+      // visibility onto it so filtering hides/shows the whole widget.
+      const key = row.getAttribute('data-row');
+      const rb = key && panel.querySelector(`[data-rules="${CSS.escape(key)}"]`);
+      if (rb) rb.classList.toggle('filtered-out', !hit);
       if (hit) shown++;
     });
     panel.classList.toggle('filtered-out', shown === 0);

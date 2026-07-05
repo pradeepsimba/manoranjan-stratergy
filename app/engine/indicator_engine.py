@@ -209,6 +209,12 @@ def compute_indicators(
         ind.avg_volume_20 = float(avg)
         ind.volume_surge  = (ind.avg_volume_20 > 0
                              and float(volume[-1]) > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
+        if ind.avg_volume_20 > 0:
+            ind.volume_ratio = float(volume[-1]) / ind.avg_volume_20
+
+    # Raw context for the custom-rule engine — set BEFORE any short-circuit so
+    # rules always see price/volume even on a partially-evaluated result.
+    ind.ltp = ltp
 
     if entry_short_circuit and cheap_gates_veto(ind):
         # An ENABLED cheap condition already vetoes the entry — the RSI/MACD/

@@ -418,6 +418,12 @@ function renderBacktestMeta(run) {
     const parts = keys.map(k => {
       let v = ovr[k];
       if (v === true) v = 'on'; else if (v === false) v = 'off';
+      else if (typeof v === 'object' && v !== null) {
+        // Structured overrides (e.g. CUSTOM_ENTRY_RULES) — summarize, don't dump.
+        v = k === 'CUSTOM_ENTRY_RULES'
+          ? `${v.mode || 'and'}·${(v.groups || []).length}g`
+          : JSON.stringify(v);
+      }
       return `${escHtml(k)}=${escHtml(String(v))}`;   // key & value escaped
     });
     strat = `<span class="strat">Strategy: <b>Custom</b> — ${parts.join(' · ')}</span>`;

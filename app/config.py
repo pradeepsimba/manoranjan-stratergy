@@ -143,6 +143,12 @@ _DEFAULTS: Dict[str, Any] = {
     "GATE_NIFTY_DAILY":  True,
     "GATE_NIFTY_VWAP":   True,
 
+    # Custom entry rules (OR-of-ANDs; see app/engine/conditions.py).
+    # mode "and" = extra condition on top of the fixed 8; "replace" = rules
+    # replace the fixed conditions (trend gates still apply). Treat the dict as
+    # IMMUTABLE — validation returns fresh copies; never mutate in place.
+    "CUSTOM_ENTRY_RULES": {"enabled": False, "mode": "and", "groups": []},
+
     # Tick-wise engine
     "TICK_EVAL_INTERVAL_MS": 100,   # cadence of the ACTIVE evaluation loop
     "FULL_SCAN_INTERVAL_S":  300,   # full-watchlist indicator refresh cadence
