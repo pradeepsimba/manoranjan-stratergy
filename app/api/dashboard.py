@@ -15,6 +15,7 @@ from pydantic import BaseModel
 import app.config as cfg
 import app.services.settings as settings
 from app.backtest.engine import run_backtest
+from app.engine.watchlist import fetch_active_watchlist
 from app.services.historical_data import fetch_indicator_history
 from app.services.snapshot import apply_depth, stub_entry
 from app.state import get_state
@@ -97,9 +98,23 @@ def watchlist() -> List[Dict[str, str]]:
 
 
 @router.get("/api/watchlist/full")
-def watchlist_full() -> List[Dict[str, Any]]:
+async def watchlist_full() -> List[Dict[str, Any]]:
     """Today's whole high-volume universe, flagged with tradeable/open state."""
     st = get_state()
+    # Premarket normally populates full_watchlist at 09:00 IST. Before that (or
+    # off-session), fetch the client-status universe on demand and seed state so
+    # the add-symbol box can BOTH suggest and add stocks any time — otherwise
+    # watchlist_add would refuse them ("universe not loaded yet"). Safe: the WS
+    # isn't running yet, and premarket overwrites these later.
+    if not st.full_watchlist:
+        try:
+            uni = await fetch_active_watchlist()
+        except Exception as e:
+            print(f"watchlist_full on-demand fetch failed: {e}")
+            uni = {}
+        if uni:
+            st.full_watchlist = uni
+            st.token_to_name  = {tok: name for name, tok in uni.items()}
     universe = dict(st.full_watchlist)
     # Restored open positions can be active without being in today's universe.
     for sym, tok in st.active_watchlist.items():
