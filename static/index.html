@@ -247,14 +247,16 @@
           <div class="field">
             <label class="field-label" for="bt-tf">Timeframe</label>
             <!-- Static intraday fallbacks so the dropdown is never blank even if
-                 /api/timeframes is unavailable; dashboard.js refreshes it. -->
+                 /api/timeframes is unavailable; dashboard.js refreshes it.
+                 Values = the data server's REAL interval ids (hourly is 60m). -->
             <select class="field-input" id="bt-tf" style="width:90px">
               <option value="1m">1m</option>
               <option value="3m">3m</option>
               <option value="5m" selected>5m</option>
+              <option value="10m">10m</option>
               <option value="15m">15m</option>
               <option value="30m">30m</option>
-              <option value="1hr">1hr</option>
+              <option value="60m">60m</option>
             </select>
           </div>
           <button class="btn-run" onclick="runBacktest()">Run</button>

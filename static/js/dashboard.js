@@ -138,7 +138,7 @@ function renderPositions(positions, openCount) {
     const pnlCls = p.livePnl > 0 ? 'pnl-pos' : p.livePnl < 0 ? 'pnl-neg' : '';
     const stCls  = p.status === 'OPEN' ? 'badge green' : 'badge gray';
     const cells  = tr.children;
-    _setCell(cells[0], p.symbol,                                               'card-title');
+    _setCell(cells[0], escHtml(p.symbol),                                      'card-title');
     _setCell(cells[1], `<span class="${stCls}">${p.status}</span>`,            '');
     _setCell(cells[2], fmt2(p.entry),                                          '');
     _setCell(cells[3], (p.entryTime || '').substring(11, 19),                  '');
@@ -270,13 +270,15 @@ function renderScans(scans) {
 
   const html = scans.slice(-25).reverse().map(r => {
     const passed = !!r.pass;
+    // Escape server-supplied strings (symbols like "M&M", failure reasons) —
+    // the pass-branch is numbers + intentional &middot; entities, left as-is.
     const detail = passed
       ? (r.signal
           ? `@${fmt2(r.signal.ltp)} &middot; RSI ${fmt2(r.signal.rsi)} &middot; ADX ${fmt2(r.signal.adx)}`
           : 'signal')
-      : (r.reason || '');
+      : escHtml(r.reason || '');
     return `<tr>
-      <td>${r.symbol}</td>
+      <td>${escHtml(r.symbol)}</td>
       <td><span class="badge ${passed ? 'green' : 'gray'}">${passed ? 'SIGNAL' : 'skip'}</span></td>
       <td style="color:var(--txt-2);font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis">${detail}</td>
     </tr>`;
@@ -355,17 +357,35 @@ function runBacktest() {
     });
 }
 
+// Which run the poller currently owns. In-flight responses for any OTHER run
+// are dropped — a stale response from a previous run must not clear the new
+// run's interval or paint the old run's numbers as final.
+let _activePollRun = null;
+let _pollFails     = 0;
+const _POLL_MAX_FAILS = 8;   // ~12s of consecutive failures before giving up
+
 function startPolling(runId) {
   clearInterval(btPoll);
+  _activePollRun = runId;
+  _pollFails = 0;
   btPoll = setInterval(() => pollBacktest(runId), 1500);
 }
 
 function pollBacktest(runId) {
   fetch(`/api/backtest/${runId}`)
-    .then(r => r.json())
-    .then(run => {
+    .then(async r => {
+      const run = await r.json();
+      if (runId !== _activePollRun) return;          // stale run — ignore
+      // A non-OK or shapeless response (e.g. 404 {detail}) is a FAILURE, not a
+      // completed run — without this it fell through to the "done" path and
+      // rendered a fake successful result.
+      if (!r.ok || !run || !['running', 'done', 'error'].includes(run.status)) {
+        throw new Error((run && run.detail) || r.statusText || 'bad response');
+      }
+      _pollFails = 0;
       if (run.status === 'running') { setBtStatus('running…', 'yellow'); return; }
       clearInterval(btPoll);
+      _activePollRun = null;
       setRunBtn(false);
 
       if (run.status === 'error') {
@@ -373,7 +393,7 @@ function pollBacktest(runId) {
         document.getElementById('bt-viz').style.display = 'none';
         document.getElementById('bt-meta').style.display = 'none';
         document.getElementById('bt-summary').innerHTML =
-          `<p class="pnl-neg" style="padding:8px 0;font-size:12px">${run.error || 'Backtest failed'}</p>`;
+          `<p class="pnl-neg" style="padding:8px 0;font-size:12px">${escHtml(run.error || 'Backtest failed')}</p>`;
         document.getElementById('bt-trades').innerHTML =
           '<tr><td colspan="14" class="empty-cell">—</td></tr>';
         toast('Backtest failed: ' + (run.error || 'unknown error'), 'err');
@@ -387,9 +407,19 @@ function pollBacktest(runId) {
       fetch('/api/backtests').then(r => r.json()).then(renderBtHistory).catch(() => {});
     })
     .catch(e => {
+      if (runId !== _activePollRun) return;          // stale run — ignore
+      // Transient failures (network blip, laptop resume, server restart) must
+      // NOT kill the poll — the run finishes server-side. Give up only after
+      // several consecutive failures.
+      if (++_pollFails < _POLL_MAX_FAILS) {
+        setBtStatus('running… (retrying)', 'yellow');
+        return;
+      }
       clearInterval(btPoll);
+      _activePollRun = null;
       setBtStatus('error: ' + e.message, 'red');
       setRunBtn(false);
+      toast('Lost contact with the backtest — reload the page to resume.', 'err');
     });
 }
 
@@ -509,18 +539,18 @@ function renderBacktestTrades(trades) {
     const sup     = t.support_level != null ? fmt2(t.support_level) : '—';
     const pat     = t.candle_pattern || '—';
     return `<tr>
-      <td class="sym-col">${t.symbol}</td>
+      <td class="sym-col">${escHtml(t.symbol)}</td>
       <td>${fmt2(t.entry_price)}</td>
       <td class="time-col">${entryT}</td>
       <td>${fmt2(t.exit_price)}</td>
       <td class="time-col">${exitT}</td>
       <td class="num-col">${t.quantity}</td>
-      <td class="${ocCls}">${t.outcome}</td>
+      <td class="${ocCls}">${escHtml(t.outcome || '')}</td>
       <td class="num-col">${rsi}</td>
       <td class="num-col">${adx}</td>
       <td class="num-col ${macdCls}">${macd}</td>
       <td class="num-col">${sup}</td>
-      <td class="pat-col">${pat}</td>
+      <td class="pat-col">${escHtml(pat)}</td>
       <td class="${pnlCls}">${fmt2(t.net_pnl)}</td>
       <td class="num-col">${t.r_multiple}</td>
     </tr>`;
@@ -590,15 +620,20 @@ function renderBtHistory(runs) {
 }
 
 function loadRun(runId) {
-  setBtStatus('done', 'green');
-  setExportBtn(runId);
   fetch(`/api/backtest/${runId}`)
-    .then(r => r.json())
-    .then(run => {
+    .then(async r => {
+      const run = await r.json();
+      // Validate BEFORE painting "done" — a 404 {detail} or non-done status
+      // must not render as a completed run with an Export button.
+      if (!r.ok || !run || run.status !== 'done') {
+        throw new Error((run && (run.detail || run.error)) || 'run not available');
+      }
+      setBtStatus('done', 'green');
+      setExportBtn(runId);
       renderBacktestSummary(run);
       fetch(`/api/backtest/${runId}/trades`).then(r => r.json()).then(renderBacktestTrades);
     })
-    .catch(e => setBtStatus('error: ' + e.message, 'red'));
+    .catch(e => { setBtStatus('error: ' + e.message, 'red'); setExportBtn(null); });
 }
 
 function deleteRun(runId) {

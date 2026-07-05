@@ -32,27 +32,31 @@ function fmtVal(setting, v) {
 
 function controlHtml(s) {
   const key = escHtml(s.key);
+  // Show the PENDING edit when one exists — a re-render (e.g. after resetting a
+  // different key) must not repaint controls with server values and visually
+  // discard the user's unsaved input.
+  const v = (s.key in edits) ? edits[s.key] : s.value;
   if (s.type === 'rules') return '';   // rendered by the dedicated builder below
   if (s.type === 'bool') {
     return `<label class="switch">
-      <input type="checkbox" data-key="${key}" ${s.value ? 'checked' : ''}>
+      <input type="checkbox" data-key="${key}" ${v ? 'checked' : ''}>
       <span class="slider"></span></label>`;
   }
   if (s.type === 'time') {
-    return `<input class="field-input" type="time" data-key="${key}" value="${escHtml(s.value)}">`;
+    return `<input class="field-input" type="time" data-key="${key}" value="${escHtml(v)}">`;
   }
   if (s.type === 'str') {
-    return `<input class="field-input wide" type="text" data-key="${key}" value="${escHtml(s.value)}">`;
+    return `<input class="field-input wide" type="text" data-key="${key}" value="${escHtml(v)}">`;
   }
   if (s.type === 'choice') {
     const opts = (s.choices || []).map(c =>
-      `<option value="${escHtml(c)}"${c === s.value ? ' selected' : ''}>${escHtml(c)}</option>`).join('');
+      `<option value="${escHtml(c)}"${c === v ? ' selected' : ''}>${escHtml(c)}</option>`).join('');
     return `<select class="field-input" data-key="${key}">${opts}</select>`;
   }
   const step = s.step != null ? s.step : (s.type === 'int' ? 1 : 'any');
   const min  = s.min  != null ? `min="${s.min}"` : '';
   const max  = s.max  != null ? `max="${s.max}"` : '';
-  return `<input class="field-input" type="number" data-key="${key}" value="${s.value}"
+  return `<input class="field-input" type="number" data-key="${key}" value="${v}"
           step="${step}" ${min} ${max}>`;
 }
 
@@ -261,6 +265,12 @@ function render() {
     renderRuleBuilder(s);
   }));
 
+  // Pending (unsaved) edits survive a re-render — restore their dirty markers.
+  Object.keys(edits).forEach(k => {
+    const row = wrap.querySelector(`[data-row="${CSS.escape(k)}"]`);
+    if (row) row.classList.add('dirty');
+  });
+
   updateSaveBar();
   applyFilter();   // re-apply the active text filter to the freshly built panels
 }
@@ -346,7 +356,10 @@ function updateSaveBar() {
 
 // Shared submit: every mutation endpoint returns the fresh describe() payload,
 // so success handling is identical — re-render from the response.
-function submitSettings(method, url, body, okMsg, failLabel) {
+// keepEdits: pending edits to PRESERVE across the re-render — resetting one key
+// must not silently discard the user's unsaved changes to OTHER keys (the
+// controls re-paint from `edits` first, so kept values stay visible).
+function submitSettings(method, url, body, okMsg, failLabel, keepEdits) {
   return fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
@@ -355,7 +368,7 @@ function submitSettings(method, url, body, okMsg, failLabel) {
     .then(async r => {
       const d = await r.json();
       if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
-      specData = d; edits = {}; render();
+      specData = d; edits = keepEdits || {}; render();
       toast(okMsg, true);
     })
     .catch(e => toast(failLabel + ': ' + e.message, false));
@@ -374,8 +387,10 @@ function saveChanges() {
 function discardChanges() { loadSettings(); }
 
 function resetKeys(keys) {
+  const keep = { ...edits };
+  keys.forEach(k => delete keep[k]);   // only the reset key's own pending edit goes
   submitSettings('POST', '/api/settings/reset', { keys },
-                 'Reset to default', 'Reset failed');
+                 'Reset to default', 'Reset failed', keep);
 }
 
 function resetAll() {

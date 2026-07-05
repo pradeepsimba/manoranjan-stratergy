@@ -20,6 +20,9 @@ var _formatter2dp = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, m
 // ── Market hours (IST) ────────────────────────────────────────────────────────
 function marketStatus() {
   var ist  = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  if (ist.getDay() === 0 || ist.getDay() === 6) {
+    return { open: false, label: 'Weekend' };   // clock-only heuristic; holidays unknown
+  }
   var mins = ist.getHours() * 60 + ist.getMinutes();
   if (mins < 9 * 60 + 15)  return { open: false, label: 'Pre-Market' };
   if (mins < 9 * 60 + 45)  return { open: true,  label: 'Wait Zone'  };
@@ -140,8 +143,12 @@ function connect() {
             target[key] = null;
           }
         });
-        // Always copy core fields even if they are null in update
-        if ('ltp' in source) target.ltp = source.ltp;
+        // Always copy core fields even if they are null in update.
+        // ltp: keep the LAST KNOWN price when the update carries 0 — server
+        // stubs send ltp 0.0 for not-yet-scanned symbols (e.g. right after a
+        // mid-session restart), and overwriting real prices with 0.00 would
+        // also poison the localStorage day-cache via the next _saveCache.
+        if ('ltp' in source && source.ltp > 0) target.ltp = source.ltp;
         if ('bar_time' in source && source.bar_time !== '—') target.bar_time = source.bar_time;
         if ('spread' in source) target.spread = source.spread;
         if ('bid' in source) target.bid = source.bid;
@@ -161,18 +168,24 @@ function connect() {
 
 // REST seed — retries every 30 s until the server returns data.
 // Covers mid-session restarts where full_watchlist isn't ready yet.
+var _seedRetry = null;   // single handle — view toggles must not stack chains
+
 function loadInitial() {
   // The live REST seed must never repopulate rowsMap while a non-live
   // timeframe is being viewed — a pending retry firing mid-view would splice
   // live 5m rows into the TF snapshot. switchTF('live') re-invokes this.
   if (viewTF !== 'live') return;
+  // One retry chain only: every call (initial, retry, or a return-to-live
+  // toggle) supersedes any pending retry instead of adding a parallel one.
+  clearTimeout(_seedRetry); _seedRetry = null;
   fetch('/api/indicators')
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (viewTF !== 'live') return;   // user switched away during the fetch
       if (!Array.isArray(data) || !data.length) {
         // Server still initialising (recovery in progress) — retry later
-        setTimeout(loadInitial, 30000);
+        clearTimeout(_seedRetry);
+        _seedRetry = setTimeout(loadInitial, 30000);
         return;
       }
       data.forEach(function(item) {
@@ -188,7 +201,10 @@ function loadInitial() {
       scheduleFullRender();   // REST seed adds rows — needs sort/filter pass
       _saveCache();
     })
-    .catch(function() { setTimeout(loadInitial, 30000); });
+    .catch(function() {
+      clearTimeout(_seedRetry);
+      _seedRetry = setTimeout(loadInitial, 30000);
+    });
 }
 
 // ── Summary strip ─────────────────────────────────────────────────────────────
@@ -523,7 +539,7 @@ var _allTFs = [];
 function _buildCompareChecks() {
   var host = document.getElementById('cmp-tfs');
   if (!host || !_allTFs.length) return;
-  var def = { '5m': 1, '15m': 1, '1hr': 1 };   // sensible default selection
+  var def = { '5m': 1, '15m': 1, '60m': 1 };   // sensible default selection
   host.innerHTML = _allTFs.map(function (tf) {
     var on = def[tf] ? ' checked' : '';
     return '<label class="cmp-tf' + (def[tf] ? ' on' : '') + '">' +
