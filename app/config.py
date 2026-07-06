@@ -80,6 +80,12 @@ def is_timeframe(tf: str) -> bool:
 # later days' bars, square-off at range end).
 BACKTEST_TIMEFRAMES = list(TIMEFRAMES)
 
+# How a backtest holds positions. "intraday" = per-day engine, EOD square-off.
+# "delivery" = positional: one portfolio across the range, overnight holds,
+# square-off at range end. The "1d" timeframe is positional by construction
+# (its bars ARE days), so it replays as delivery regardless of this choice.
+BACKTEST_MODES = ["intraday", "delivery"]
+
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
 HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
 SCAN_WORKERS      = 16    # ThreadPoolExecutor size for the parallel scan
@@ -160,6 +166,7 @@ _DEFAULTS: Dict[str, Any] = {
 
     # Backtest
     "BACKTEST_TIMEFRAME":   "5m",   # bar interval the replay steps through
+    "BACKTEST_MODE":  "intraday",   # intraday (EOD square-off) | delivery (overnight holds)
     "BACKTEST_WARMUP_DAYS": 7,      # extra calendar days fetched for warmup
     "SLIPPAGE_BPS":         2.0,    # slippage applied to entry and exit fills
 

@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import math
+import time
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket
@@ -14,9 +14,11 @@ from pydantic import BaseModel
 
 import app.config as cfg
 import app.services.settings as settings
+from app.backtest.data import warmup_calendar_days
 from app.backtest.engine import run_backtest
 from app.engine.watchlist import fetch_active_watchlist
-from app.services.historical_data import fetch_indicator_history
+from app.models import Candle
+from app.services.historical_data import IST, fetch_indicator_history
 from app.services.snapshot import apply_depth, stub_entry
 from app.state import get_state
 from app.ws.dashboard_ws import ws_manager
@@ -197,6 +199,10 @@ class BacktestRequest(BaseModel):
     capital:      Optional[float]          = None
     # Bar interval to replay; None → the BACKTEST_TIMEFRAME setting.
     timeframe:    Optional[str]            = None
+    # Holding style: "intraday" (EOD square-off) or "delivery" (positional,
+    # overnight holds); None → the BACKTEST_MODE setting. 1d bars are always
+    # positional regardless.
+    mode:         Optional[str]            = None
     # Per-run strategy overrides, {spec_key: value} — validated against the
     # settings registry and scoped to this run's worker threads only.
     overrides:    Optional[Dict[str, Any]] = None
@@ -223,24 +229,30 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
     capital = req.capital if req.capital is not None else \
         attr_overrides.get("ACCOUNT_BALANCE", cfg.ACCOUNT_BALANCE)
     timeframe = req.timeframe or attr_overrides.get("BACKTEST_TIMEFRAME") or cfg.BACKTEST_TIMEFRAME
+    mode = req.mode or attr_overrides.get("BACKTEST_MODE") or cfg.BACKTEST_MODE
     if capital <= 0:
         raise HTTPException(400, "capital must be greater than 0")
     if slippage < 0:
         raise HTTPException(400, "slippage_bps must be ≥ 0")
     if timeframe not in cfg.BACKTEST_TIMEFRAMES:
         raise HTTPException(400, f"timeframe must be one of {cfg.BACKTEST_TIMEFRAMES}")
+    if mode not in cfg.BACKTEST_MODES:
+        raise HTTPException(400, f"mode must be one of {cfg.BACKTEST_MODES}")
+    if timeframe == "1d":
+        mode = "delivery"   # 1d bars are days — positional by construction
 
     run_id = uuid.uuid4().hex[:12]
     await _db.create_backtest_run(
         run_id, req.from_date, req.to_date,
         {"slippage_bps": slippage, "capital": capital,
-         "timeframe": timeframe, "overrides": attr_overrides},
+         "timeframe": timeframe, "mode": mode, "overrides": attr_overrides},
     )
     asyncio.create_task(
         run_backtest(_db, run_id, req.from_date, req.to_date,
-                     slippage, capital, overrides=attr_overrides, timeframe=timeframe)
+                     slippage, capital, overrides=attr_overrides,
+                     timeframe=timeframe, mode=mode)
     )
-    return {"run_id": run_id, "status": "running", "timeframe": timeframe}
+    return {"run_id": run_id, "status": "running", "timeframe": timeframe, "mode": mode}
 
 
 @router.get("/api/backtest/{run_id}")
@@ -342,37 +354,261 @@ async def get_live_indicators() -> List[Dict[str, Any]]:
     return sorted(out, key=lambda x: x["symbol"])
 
 
-# ── Live indicators on ANY timeframe (on-demand viewer) ───────────────────────
-# Fetches recent candles at `timeframe` for the whole watchlist and computes the
-# SAME indicators as the live path — but from freshly-fetched history, never
-# touching live state or the WS engine. Heavier than the live snapshot (one REST
-# batch + a TA-Lib pass), so it is polled on demand by the indicators page, not
-# streamed.
+# ── Live indicators on ANY timeframe (live viewer) ────────────────────────────
+# History at `timeframe` is fetched from the REST server at most once per
+# _TF_CACHE_TTL seconds (per TF, whole watchlist, cached) — every request then
+# patches TODAY's bars from live in-process data before the TA-Lib pass, so the
+# view is tick-fresh without hammering the external server:
+#   • TF ≥ 5m (incl. 1d) — today's bars are resampled from the live 5m candle
+#     stream (covers the FULL watchlist via the secondary WS connection), so
+#     the forming bar moves with every tick.
+#   • TF < 5m (1m/3m)   — bars finer than the 5m stream can't be derived; the
+#     last bar is patched with the live LTP, new bars appear on refetch.
+# Live LTP + order-book depth are merged into every row. The page polls this
+# every few seconds; only the TTL refetch touches the external server.
+
+_TF_CACHE_TTL  = 60.0    # s between external refetches per TF
+_TF_NEG_TTL    = 15.0    # retry backoff after an empty fetch (server down/no data)
+_TF_IDLE_EVICT = 600.0   # drop a TF's history after this long with no viewer
+
+_tf_hist_cache: Dict[str, Dict[str, Any]] = {}   # tf → {ts, sig, hist, access}
+_tf_hist_locks: Dict[str, asyncio.Lock]   = {}
+_tf_refreshing: set                        = set()   # TFs with an in-flight bg refetch
+
+
+async def _refetch_tf_history(wl: Dict[str, str], timeframe: str,
+                              sig: frozenset) -> Dict[str, list]:
+    """Fetch + cache one TF's history (single-flight via the per-TF lock)."""
+    lock = _tf_hist_locks.setdefault(timeframe, asyncio.Lock())
+    async with lock:
+        # Re-check after the wait — another request may have refreshed already.
+        ent = _tf_hist_cache.get(timeframe)
+        if ent and ent["sig"] == sig:
+            ttl = _TF_CACHE_TTL if ent["hist"] else _TF_NEG_TTL
+            if (time.monotonic() - ent["ts"]) < ttl:
+                return ent["hist"]
+        days_back = warmup_calendar_days(timeframe, 5)
+        hist = await fetch_indicator_history(wl, timeframe, days_back=days_back)
+        now  = time.monotonic()
+        # An empty result is cached too (with the short negative TTL) so a dead
+        # data server is retried at _TF_NEG_TTL cadence, not on every poll.
+        _tf_hist_cache[timeframe] = {"ts": now, "sig": sig, "hist": hist, "access": now}
+        return hist
+
+
+async def _cached_tf_history(wl: Dict[str, str], timeframe: str) -> Dict[str, list]:
+    """
+    Watchlist history at `timeframe`, refetched at most every _TF_CACHE_TTL s.
+    Stale-while-revalidate: an expired-but-present entry is served immediately
+    and refreshed by a background task, so pollers never stall behind the
+    multi-batch external fetch — only the very first (cold) request waits.
+    """
+    now = time.monotonic()
+    # Idle sweep: a TF nobody has viewed for a while frees its candle lists
+    # (and the per-row memos derived from them).
+    for tf, ent in list(_tf_hist_cache.items()):
+        if now - ent["access"] > _TF_IDLE_EVICT:
+            del _tf_hist_cache[tf]
+            _evict_tf_memos(tf)
+
+    sig = frozenset(wl.values())         # watchlist edits invalidate the cache
+    ent = _tf_hist_cache.get(timeframe)
+    if ent and ent["sig"] == sig:
+        ent["access"] = now
+        ttl = _TF_CACHE_TTL if ent["hist"] else _TF_NEG_TTL
+        if now - ent["ts"] < ttl:
+            return ent["hist"]
+        if timeframe not in _tf_refreshing:          # single-flight bg refresh
+            _tf_refreshing.add(timeframe)
+
+            async def _bg() -> None:
+                try:
+                    await _refetch_tf_history(wl, timeframe, sig)
+                except Exception as e:               # keep the poller alive
+                    print(f"TF history refresh error ({timeframe}): {e}")
+                finally:
+                    _tf_refreshing.discard(timeframe)
+
+            asyncio.create_task(_bg())
+        return ent["hist"]                           # stale but instant
+    # Cold cache (or watchlist changed): block on the fetch once.
+    return await _refetch_tf_history(wl, timeframe, sig)
+
+
+def _min_of_day(ts: str) -> int:
+    return int(ts[11:13]) * 60 + int(ts[14:16])
+
+
+def _resample_5m(live5: List[Candle], mins: int, anchor: int) -> List[Candle]:
+    """Bucket chronological 5m candles into `mins`-minute bars anchored at `anchor`."""
+    bars: List[Candle] = []
+    for c in live5:
+        bs = _min_of_day(c.start_time)
+        bs -= (bs - anchor) % mins
+        start = f"{c.start_time[:11]}{bs // 60:02d}:{bs % 60:02d}:00"
+        if bars and bars[-1].start_time == start:
+            b = bars[-1]                 # fresh Candle built below — safe to mutate
+            b.high    = max(b.high, c.high)
+            b.low     = min(b.low,  c.low)
+            b.close   = c.close
+            b.volume += c.volume
+        else:
+            bars.append(Candle(start_time=start, open=c.open, close=c.close,
+                               high=c.high, low=c.low, volume=c.volume))
+    return bars
+
+
+def _today_5m(st, tok: str, today: str) -> List[Candle]:
+    """
+    Today's live 5m bars for a token — the chronological SUFFIX of the shared
+    buffer, collected walking backward so the per-token lock is held for
+    O(today's bars), not a scan of the full multi-day buffer.
+    """
+    out: List[Candle] = []
+    with st.candle_lock(tok):
+        buf = st.candles_5m.get(tok)
+        if buf:
+            for c in reversed(buf):
+                if c.start_time[:10] != today:
+                    break
+                out.append(c)
+    out.reverse()
+    return out
+
+
+def _live_patched(cached: list, timeframe: str, tok: str, sym: str,
+                  st, today: str) -> list:
+    """Copy of `cached` with TODAY's bars refreshed from live in-process data;
+    returns `cached` itself (no copy) when there is nothing to patch."""
+    mins  = cfg.TIMEFRAME_MINUTES.get(timeframe, 5)
+    live5 = _today_5m(st, tok, today) if mins >= 5 else []
+    ltp   = st.ltp.get(sym, 0.0)
+    has_today = bool(cached) and cached[-1].start_time[:10] == today
+
+    if not live5 and not (ltp > 0 and has_today):
+        return cached                    # nothing live to fold in
+
+    out = list(cached)                   # never mutate the shared cache entry
+
+    if live5 and timeframe == "1d":
+        open_min = cfg.MARKET_OPEN_HOUR * 60 + cfg.MARKET_OPEN_MIN
+        bar = Candle(start_time=(out[-1].start_time if has_today
+                                 else f"{today}T{open_min // 60:02d}:{open_min % 60:02d}:00"),
+                     open=live5[0].open, close=live5[-1].close,
+                     high=max(c.high for c in live5),
+                     low=min(c.low for c in live5),
+                     volume=sum(c.volume for c in live5))
+        if has_today:
+            out[-1] = bar                # replace today's (stale) daily bar
+        else:
+            out.append(bar)
+    elif live5:
+        # Anchor buckets the way the server does. Every bucket of a day shares
+        # the same modulo-`mins` residue, so the cached TAIL bar (when it is
+        # today's) yields the anchor in O(1); otherwise fall back to the
+        # session open (a dynamic setting — resolved here, not at import).
+        if has_today:
+            anchor = _min_of_day(out[-1].start_time) % mins
+        else:
+            anchor = (cfg.MARKET_OPEN_HOUR * 60 + cfg.MARKET_OPEN_MIN) % mins
+        for b in _resample_5m(live5, mins, anchor):
+            if not out or b.start_time > out[-1].start_time:
+                out.append(b)
+            elif b.start_time == out[-1].start_time:
+                # MERGE with the cached forming bar, don't replace: if the live
+                # 5m buffer misses the bucket's early bars (symbol subscribed
+                # mid-day), the server bar still holds the true open/high/low.
+                prev = out[-1]
+                out[-1] = Candle(start_time=b.start_time, open=prev.open,
+                                 high=max(prev.high, b.high),
+                                 low=min(prev.low, b.low),
+                                 close=b.close,
+                                 volume=max(prev.volume, b.volume))
+            # else: bucket already final in the cached fetch — keep it
+    elif ltp > 0:
+        # No live 5m data to resample (sub-5m TFs, or the stream is down):
+        # fold the live LTP into today's last bar so price still ticks between
+        # refetches. Resampled TFs already carry the last tick in the forming
+        # bar's close, so they skip this.
+        lb = out[-1]
+        out[-1] = Candle(start_time=lb.start_time, open=lb.open, close=ltp,
+                         high=max(lb.high, ltp), low=min(lb.low, ltp),
+                         volume=lb.volume)
+    return out
+
+
+# Per-(tf, token) memo of the last computed row/signal: most watchlist symbols
+# receive no ticks between polls, so their candle inputs — and therefore the
+# whole TA-Lib pass — are bit-identical poll after poll. The fingerprint (last
+# bar's identity + OHLCV + list length) changes on any tick, resample, LTP
+# patch, or refetch; on a hit the cached result is reused and only the cheap
+# TF-agnostic fields (live LTP, order-book depth) are refreshed.
+_tf_row_memo: Dict[tuple, tuple] = {}   # (tf, tok) → (fingerprint, entry dict)
+_mtf_sig_memo: Dict[tuple, tuple] = {}  # (tf, tok) → (fingerprint, signal dict)
+
+
+def _evict_tf_memos(timeframe: str) -> None:
+    for memo in (_tf_row_memo, _mtf_sig_memo):
+        for key in [k for k in memo if k[0] == timeframe]:
+            del memo[key]
+
+
+def _bar_fingerprint(candles: list) -> Optional[tuple]:
+    if not candles:
+        return None
+    last = candles[-1]
+    return (len(candles), last.start_time, last.open, last.high, last.low,
+            last.close, last.volume)
+
+
+def _last_day_start(candles: list) -> int:
+    """Index of the first bar of the last day — the session suffix start.
+    Feeds session_candles_5m, so it must never span more than one day (a
+    multi-day slice computes a wrong session VWAP)."""
+    i = len(candles)
+    day = candles[-1].start_time[:10]
+    while i > 0 and candles[i - 1].start_time[:10] == day:
+        i -= 1
+    return i
+
 
 def _tf_indicator_rows(watchlist: Dict[str, str],
-                       hist: Dict[str, list]) -> List[Dict[str, Any]]:
+                       hist: Dict[str, list],
+                       timeframe: str) -> List[Dict[str, Any]]:
     from app.engine.indicator_engine import compute_indicators   # numpy/TA-Lib
+    st        = get_state()
+    today_ist = datetime.now(IST).strftime("%Y-%m-%d")
     out: List[Dict[str, Any]] = []
     for sym, tok in watchlist.items():
-        candles = hist.get(tok) or []
+        candles = _live_patched(hist.get(tok) or [], timeframe, tok, sym, st, today_ist)
+        live_ltp = round(st.ltp.get(sym, 0.0), 2)
+
+        fp   = _bar_fingerprint(candles)
+        memo = _tf_row_memo.get((timeframe, tok))
+        if memo is not None and memo[0] == fp:
+            entry = dict(memo[1])                       # unchanged bars → no TA-Lib
+            if live_ltp > 0:
+                entry["ltp"] = live_ltp
+            apply_depth(entry, st.depth.get(sym, {}))   # depth is always live
+            out.append(entry)
+            continue
+
         entry = stub_entry()
-        apply_depth(entry, {})          # add bid/ask/… keys as None (no live book)
+        apply_depth(entry, st.depth.get(sym, {}))   # live order book (TF-agnostic)
         entry["symbol"] = sym
         if len(candles) < 3:
-            entry["ltp"]      = round(candles[-1].close, 2) if candles else 0.0
+            entry["ltp"]      = live_ltp if live_ltp > 0 else (round(candles[-1].close, 2) if candles else 0.0)
             entry["bar_time"] = candles[-1].start_time[11:16] if candles else "—"
+            _tf_row_memo[(timeframe, tok)] = (fp, dict(entry))
             out.append(entry)
             continue
         # today's session suffix (chronological) → correct session VWAP per TF
-        today = candles[-1].start_time[:10]
-        i = len(candles)
-        while i > 0 and candles[i - 1].start_time[:10] == today:
-            i -= 1
+        i = _last_day_start(candles)
         ind = compute_indicators(candles, session_candles_5m=candles[i:])
         macd_hist = (round(ind.macd_line - ind.macd_signal_line, 4)
                      if ind.macd_line is not None and ind.macd_signal_line is not None else None)
         entry.update({
-            "ltp":         round(candles[-1].close, 2),
+            "ltp":         live_ltp if live_ltp > 0 else round(candles[-1].close, 2),
             "bar_time":    candles[-1].start_time[11:16],
             "rsi":         round(ind.rsi, 1)              if ind.rsi is not None else None,
             "adx":         round(ind.adx, 1)             if ind.adx is not None else None,
@@ -386,6 +622,7 @@ def _tf_indicator_rows(watchlist: Dict[str, str],
             "above_vwap":  ind.price_above_vwap,
             "pattern":     ind.candle_pattern,
         })
+        _tf_row_memo[(timeframe, tok)] = (fp, dict(entry))
         out.append(entry)
     return sorted(out, key=lambda x: x["symbol"])
 
@@ -398,12 +635,9 @@ async def indicators_by_timeframe(timeframe: str) -> List[Dict[str, Any]]:
     wl = dict(st.full_watchlist if st.full_watchlist else st.active_watchlist)
     if not wl:
         return []
-    # Enough calendar days for TALIB_LOOKBACK bars to converge at this TF.
-    mins      = cfg.TIMEFRAME_MINUTES.get(timeframe, 5)
-    days_back = max(5, math.ceil(cfg.TALIB_LOOKBACK * mins / 375.0 * 7.0 / 5.0) + 2)
-    hist = await fetch_indicator_history(wl, timeframe, days_back=days_back)
-    # TA-Lib pass off the event loop.
-    return await asyncio.to_thread(_tf_indicator_rows, wl, hist)
+    hist = await _cached_tf_history(wl, timeframe)
+    # Live patch + TA-Lib pass off the event loop.
+    return await asyncio.to_thread(_tf_indicator_rows, wl, hist, timeframe)
 
 
 # ── Multi-timeframe comparison (confluence) ───────────────────────────────────
@@ -411,33 +645,43 @@ async def indicators_by_timeframe(timeframe: str) -> List[Dict[str, Any]]:
 # scores each TF's directional bias from three sub-signals (above-VWAP, MACD line
 # vs signal, +DI vs −DI): 0–3, ≥2 = bullish-leaning. The per-stock "confluence" =
 # how many selected TFs are bullish-leaning; rows sort by it so the strongest
-# multi-timeframe alignments surface first. On-demand + polled; never live state.
+# multi-timeframe alignments surface first. Uses the shared TF history cache +
+# the same live today-bar patching as the single-TF viewer.
 
-def _mtf_tf_signals(watchlist: Dict[str, str], hist: Dict[str, list]) -> Dict[str, Any]:
+def _mtf_tf_signals(watchlist: Dict[str, str], hist: Dict[str, list],
+                    timeframe: str) -> Dict[str, Any]:
     """Per-symbol bias signals for ONE timeframe (runs in a worker thread)."""
     from app.engine.indicator_engine import compute_indicators   # numpy/TA-Lib
+    st        = get_state()
+    today_ist = datetime.now(IST).strftime("%Y-%m-%d")
     out: Dict[str, Any] = {}
     for sym, tok in watchlist.items():
-        candles = hist.get(tok) or []
+        candles = _live_patched(hist.get(tok) or [], timeframe, tok, sym, st, today_ist)
         if len(candles) < 3:
             out[sym] = None
             continue
-        today = candles[-1].start_time[:10]
-        i = len(candles)
-        while i > 0 and candles[i - 1].start_time[:10] == today:
-            i -= 1
+
+        fp   = _bar_fingerprint(candles)
+        memo = _mtf_sig_memo.get((timeframe, tok))
+        if memo is not None and memo[0] == fp:
+            out[sym] = memo[1]                    # unchanged bars → no TA-Lib
+            continue
+
+        i = _last_day_start(candles)
         ind = compute_indicators(candles, session_candles_5m=candles[i:])
         above   = bool(ind.price_above_vwap)
         macd_up = (ind.macd_line is not None and ind.macd_signal_line is not None
                    and ind.macd_line > ind.macd_signal_line)
         di_up   = (ind.plus_di is not None and ind.minus_di is not None
                    and ind.plus_di > ind.minus_di)
-        out[sym] = {
+        sig = {
             "rsi":   round(ind.rsi, 1) if ind.rsi is not None else None,
             "score": int(above) + int(macd_up) + int(di_up),   # 0–3
             "vwap":  above, "macd": macd_up, "di": di_up,
             "close": round(candles[-1].close, 2),
         }
+        _mtf_sig_memo[(timeframe, tok)] = (fp, sig)
+        out[sym] = sig
     return out
 
 
@@ -458,17 +702,14 @@ async def indicators_mtf(tfs: str = "5m,15m,1h") -> Dict[str, Any]:
     if not wl:
         return {"timeframes": chosen, "rows": []}
 
-    # Fetch each TF with ITS OWN lookback, concurrently — so adding a coarse TF
-    # (e.g. 1d) doesn't force a huge fetch of the fine ones.
-    def _days(tf: str) -> int:
-        mins = cfg.TIMEFRAME_MINUTES.get(tf, 5)
-        return max(5, math.ceil(cfg.TALIB_LOOKBACK * mins / 375.0 * 7.0 / 5.0) + 2)
-
+    # Each TF fetched via the shared cache, concurrently (per-TF locks) — so
+    # compare polls reuse the same history the single-TF viewer keeps warm.
     hists = await asyncio.gather(
-        *[fetch_indicator_history(wl, tf, days_back=_days(tf)) for tf in chosen])
-    # Each TF's TA-Lib pass in its own thread (GIL released) — concurrent.
+        *[_cached_tf_history(wl, tf) for tf in chosen])
+    # Each TF's live patch + TA-Lib pass in its own thread (GIL released).
     sigs = await asyncio.gather(
-        *[asyncio.to_thread(_mtf_tf_signals, wl, h) for h in hists])
+        *[asyncio.to_thread(_mtf_tf_signals, wl, h, tf)
+          for tf, h in zip(chosen, hists)])
     sig_by_tf = dict(zip(chosen, sigs))
 
     live = st.ltp

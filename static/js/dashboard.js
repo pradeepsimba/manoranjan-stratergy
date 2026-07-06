@@ -335,10 +335,13 @@ function runBacktest() {
 
   const tfEl = document.getElementById('bt-tf');
   const timeframe = tfEl && tfEl.value ? tfEl.value : null;
+  const modeEl = document.getElementById('bt-mode');
+  const mode = modeEl && modeEl.value ? modeEl.value : null;
 
   const body = { from_date, to_date, capital };
   if (slippage !== null && !Number.isNaN(slippage)) body.slippage_bps = slippage;
   if (timeframe) body.timeframe = timeframe;
+  if (mode) body.mode = mode;
   if (overrides) body.overrides = overrides;
 
   fetch('/api/backtest', {
@@ -436,6 +439,9 @@ function renderBacktestMeta(run) {
   const p = run.params || {};
   const tf = p.timeframe || '5m';
   const tags = [`<span class="tag tf">Timeframe <b>${escHtml(tf)}</b></span>`];
+  // Older runs have no mode in params — they all ran intraday (or positional for 1d).
+  const mode = p.mode || (tf === '1d' ? 'delivery' : 'intraday');
+  tags.push(`<span class="tag">Mode <b>${escHtml(mode)}</b></span>`);
   if (p.capital != null)      tags.push(`<span class="tag">Capital <b>₹${fmt2(p.capital)}</b></span>`);
   if (p.slippage_bps != null) tags.push(`<span class="tag">Slippage <b>${p.slippage_bps} bps</b></span>`);
 
@@ -656,8 +662,23 @@ fetch('/api/timeframes')
     sel.innerHTML = list
       .map(tf => `<option value="${tf}"${tf === d.backtest_default ? ' selected' : ''}>${tf}</option>`)
       .join('');
+    syncBtMode();
   })
   .catch(() => { /* leave empty; backend falls back to the default */ });
+
+// 1d bars ARE days — that replay is positional by construction, so lock the
+// mode selector to Delivery while 1d is chosen (the server enforces it too).
+function syncBtMode() {
+  const tfEl = document.getElementById('bt-tf');
+  const modeEl = document.getElementById('bt-mode');
+  if (!tfEl || !modeEl) return;
+  const is1d = tfEl.value === '1d';
+  if (is1d) modeEl.value = 'delivery';
+  modeEl.disabled = is1d;
+  modeEl.title = is1d ? '1d bars replay positionally — mode is fixed to Delivery' : '';
+}
+const _btTfEl = document.getElementById('bt-tf');
+if (_btTfEl) _btTfEl.addEventListener('change', syncBtMode);
 
 // On page load: check for a running backtest (resume polling if found), then
 // load the most recent done run so results survive a refresh — no localStorage.

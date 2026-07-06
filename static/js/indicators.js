@@ -4,8 +4,9 @@
 var rowsMap  = {};
 var sortKey  = 'symbol';
 var sortAsc  = true;
-// Timeframe viewer: 'live' = the WS-driven 5m stream; any other value shows an
-// on-demand snapshot fetched for that timeframe (polled, no live WS merges).
+// Timeframe viewer: 'live' = the WS-driven 5m stream; any other value shows a
+// LIVE view of that timeframe — fast-polled server snapshots (today's bars are
+// patched server-side from the live 5m stream) + live LTP/depth WS merges.
 var viewTF   = 'live';
 var tfPoll   = null;
 var ws       = null;
@@ -115,9 +116,35 @@ function connect() {
       // snapshot presence would freeze them between snapshots outside market
       // hours (when no ~100ms INDICATOR_UPDATE deltas flow).
       updateMarketBadge();
-      // Ignore live 5m WS updates while comparing timeframes or viewing a
-      // non-live timeframe (those views are polled, not streamed).
-      if (mtfMode || viewTF !== 'live') return;
+      // Compare mode is fully polled — ignore live 5m WS updates.
+      if (mtfMode) return;
+      // Non-live timeframe view: bars/indicators come from the fast poll, but
+      // LTP and order-book depth are timeframe-AGNOSTIC — merge them live so
+      // price/bid/ask/spread/B-S tick between polls. Never create rows here:
+      // the TF snapshot owns the row set (5m-based RSI/MACD/… would be wrong).
+      if (viewTF !== 'live') {
+        var tfSnap = d.indicatorSnapshot;
+        if (!tfSnap || typeof tfSnap !== 'object') return;
+        var touched = false;
+        Object.keys(tfSnap).forEach(function (sym) {
+          var row = rowsMap[sym];
+          if (!row) return;
+          var src = tfSnap[sym];
+          ['ltp', 'bid', 'ask', 'spread', 'buy_qty', 'sell_qty', 'ratio'].forEach(function (k) {
+            var v = src[k];
+            if (v === null || v === undefined) return;
+            if (k === 'ltp' && !(v > 0)) return;   // stub rows send ltp 0.0
+            if (row[k] !== v) {
+              row[k] = v;
+              touched = true;
+              _dirtySyms.add(sym);
+              if (sortKey === k) _needFull = true;
+            }
+          });
+        });
+        if (touched) scheduleRender();
+        return;
+      }
       var now = new Date();
       document.getElementById('updated-txt').textContent =
         'Live · ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -485,12 +512,16 @@ function switchTF(tf) {
     _resetTable('Loading ' + tf + '…');
     document.getElementById('updated-txt').textContent = tf + ' · loading…';
     loadTF(tf);
-    tfPoll = setInterval(function () { loadTF(tf); }, 30000);
+    tfPoll = setInterval(function () { loadTF(tf); }, TF_POLL_MS);
   }
 }
 
-// On-demand snapshot for a non-live timeframe (computed server-side from fresh
-// history). Replaces rowsMap wholesale; the DOM diff reuses rows by symbol.
+// Live snapshot for a non-live timeframe: the server keeps history cached and
+// patches today's bars from the live 5m stream + LTP, so polling every few
+// seconds is cheap (no external fetch) and the view stays tick-fresh. LTP and
+// depth also merge in live from the WS between polls (see connect()).
+// Replaces rowsMap wholesale; the DOM diff reuses rows by symbol.
+var TF_POLL_MS = 5000;
 function loadTF(tf) {
   fetch('/api/indicators/tf/' + encodeURIComponent(tf))
     .then(function (r) { return r.json(); })
@@ -507,7 +538,7 @@ function loadTF(tf) {
       rowsMap = next;
       scheduleFullRender();
       document.getElementById('updated-txt').textContent =
-        tf + ' · ' + new Date().toLocaleTimeString('en-IN',
+        tf + ' · live · ' + new Date().toLocaleTimeString('en-IN',
           { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     })
     .catch(function () {
@@ -568,7 +599,8 @@ function startCompare() {
   document.getElementById('mtf-wrap').style.display = '';
   document.getElementById('updated-txt').textContent = 'Comparing ' + tfs.join(' · ') + ' …';
   loadMTF(tfs);
-  mtfPoll = setInterval(function () { loadMTF(tfs); }, 30000);
+  // Server keeps per-TF history cached + live-patched, so a fast poll is cheap.
+  mtfPoll = setInterval(function () { loadMTF(tfs); }, 10000);
 }
 
 // Tear down compare-mode UI (show the single view again) WITHOUT reloading —

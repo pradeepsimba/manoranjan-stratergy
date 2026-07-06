@@ -150,9 +150,10 @@ def _simulate_day(
     lets the caller run them in parallel. Returns that day's trades in close
     order.
 
-    This per-day engine is for INTRADAY timeframes (≤60m): a position opens on
-    an early bar and exits on a LATER bar or at EOD square-off. The 1d
-    timeframe routes to _simulate_range_daily (positional mode) instead.
+    This per-day engine is for INTRADAY MODE on intraday timeframes (≤60m): a
+    position opens on an early bar and exits on a LATER bar or at EOD
+    square-off. Delivery mode routes to _simulate_range_intraday (overnight
+    holds) and the 1d timeframe to _simulate_range_daily instead.
 
     `overrides` are the run's per-request settings; they are scoped to THIS
     worker thread only (cfg.thread_overrides), so a concurrent live session
@@ -169,10 +170,6 @@ def _simulate_day_impl(
     slippage_bps: float,
     capital:      Optional[float],
 ) -> List:
-    grid = sorted(nifty.at.get(day, {}).items())   # [(time, nifty_gidx), ...]
-    if not grid:
-        return []
-
     # Dynamic settings hoisted ONCE per day — we are inside the run's
     # thread-override scope, so these cannot change mid-day, and re-resolving
     # them per bar/per symbol costs millions of dynamic cfg lookups on a long
@@ -183,6 +180,47 @@ def _simulate_day_impl(
     loss_limit = cfg.DAILY_LOSS_LIMIT
 
     port = Portfolio()
+    _replay_day(port, day, symbols, nifty, slippage_bps, capital,
+                scan_start, cutoff, max_pos, loss_limit)
+
+    # 3) EOD square-off any survivors at the day's last bar close.
+    for sym in list(port.positions.keys()):
+        pos  = port.positions[sym]
+        ss   = symbols.get(pos.token)
+        idxs = ss.by_day.get(day) if ss else None
+        if not idxs:
+            continue
+        last = ss.series[idxs[-1]]
+        port.close_position(sym, last.start_time,
+                            square_off_fill(last.close, slippage_bps), "EOD")
+
+    return port.trades
+
+
+def _replay_day(
+    port:         Portfolio,
+    day:          str,
+    symbols:      Dict[str, SymbolSeries],
+    nifty:        SymbolSeries,
+    slippage_bps: float,
+    capital:      Optional[float],
+    scan_start:   str,
+    cutoff:       str,
+    max_pos:      int,
+    loss_limit:   float,
+) -> None:
+    """
+    Replay ONE day's bars into `port` (exits first, then entries, per bar) —
+    WITHOUT any EOD square-off, so the caller decides whether positions carry
+    overnight (delivery mode) or close at the day's last bar (intraday mode).
+    Positions opened on an earlier day exit from today's first bar onward
+    (global bar indices grow across days, so `gidx <= entry_gidx` never blocks
+    them); the gap-at-open resolution in _try_exit prices overnight gaps.
+    """
+    grid = sorted(nifty.at.get(day, {}).items())   # [(time, nifty_gidx), ...]
+    if not grid:
+        return
+
     nifty_day_start = nifty.by_day[day][0]
     nifty_day_open  = nifty.series[nifty_day_start].open
 
@@ -272,18 +310,64 @@ def _simulate_day_impl(
                         continue
                     port.open_position(sig)
 
-    # 3) EOD square-off any survivors at the day's last bar close.
+
+def _square_off_range_end(port: Portfolio, symbols: Dict[str, SymbolSeries],
+                          lo_s: str, hi_s: str, slippage_bps: float) -> None:
+    """Square off survivors at each symbol's last in-range bar (positional modes)."""
     for sym in list(port.positions.keys()):
         pos = port.positions[sym]
-        ent = by_token.get(pos.token)
-        if ent is None:
+        ss  = symbols.get(pos.token)
+        if ss is None:
             continue
-        ss, _, day_idxs, _ = ent
-        last = ss.series[day_idxs[-1]]
+        last_day = max((d for d in ss.by_day if lo_s <= d <= hi_s), default=None)
+        if last_day is None:
+            continue
+        last = ss.series[ss.by_day[last_day][-1]]
         port.close_position(sym, last.start_time,
                             square_off_fill(last.close, slippage_bps), "EOD")
 
-    return port.trades
+
+def _simulate_range_intraday(
+    symbols:      Dict[str, SymbolSeries],
+    nifty:        SymbolSeries,
+    from_d:       date,
+    to_d:         date,
+    slippage_bps: float,
+    capital:      Optional[float],
+    overrides:    Optional[Dict],
+) -> Tuple[List, int]:
+    """
+    DELIVERY (positional) replay on an INTRADAY timeframe: ONE portfolio across
+    the whole range, stepped chronologically day by day (same per-bar engine as
+    intraday mode via _replay_day). Entries still fire only inside each day's
+    scan window, but there is NO EOD square-off — positions carry overnight,
+    SL/target keep being checked on every later bar (overnight gaps resolve at
+    the open via _try_exit), and survivors square off at each symbol's last
+    in-range bar.
+
+    Risk-guard semantics match _simulate_range_daily (the positional reading):
+    `traded_today` = no re-entry for the WHOLE run, and DAILY_LOSS_LIMIT acts
+    as a run-level loss stop. Sequential by construction (the portfolio
+    persists across days), so no day-level parallelism here.
+    """
+    with cfg.thread_overrides(overrides or {}):
+        lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
+        days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
+        if not days:
+            return [], 0
+
+        scan_start = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"
+        cutoff     = f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d}"
+        max_pos    = cfg.MAX_CONCURRENT_POSITIONS
+        loss_limit = cfg.DAILY_LOSS_LIMIT
+
+        port = Portfolio()
+        for day in days:
+            _replay_day(port, day, symbols, nifty, slippage_bps, capital,
+                        scan_start, cutoff, max_pos, loss_limit)
+
+        _square_off_range_end(port, symbols, lo_s, hi_s, slippage_bps)
+        return port.trades, len(days)
 
 
 def _simulate_range_daily(
@@ -373,18 +457,7 @@ def _simulate_range_daily(
                     port.open_position(sig)
 
         # 3) Square off survivors at each symbol's last in-range bar.
-        for sym in list(port.positions.keys()):
-            pos = port.positions[sym]
-            ss  = symbols.get(pos.token)
-            if ss is None:
-                continue
-            last_day = max((d for d in ss.by_day if lo_s <= d <= hi_s), default=None)
-            if last_day is None:
-                continue
-            last = ss.series[ss.by_day[last_day][-1]]
-            port.close_position(sym, last.start_time,
-                                square_off_fill(last.close, slippage_bps), "EOD")
-
+        _square_off_range_end(port, symbols, lo_s, hi_s, slippage_bps)
         return port.trades, len(days)
 
 
@@ -397,18 +470,26 @@ def simulate(
     capital:      Optional[float] = None,
     overrides:    Optional[Dict]  = None,
     timeframe:    Optional[str]   = None,
+    mode:         Optional[str]   = None,
 ) -> Tuple[List, List, int]:
     """
     Run the full replay.
-    Intraday timeframes: days are independent, so they execute in parallel
-    across a thread pool — TA-Lib releases the GIL during the indicator math,
-    giving real multi-core speedup. Per-day trades merge in day order.
-    1d: positional mode — one portfolio, chronological, overnight holds
-    (_simulate_range_daily); parallelism is neither possible nor needed there.
+    Intraday mode on intraday timeframes: days are independent, so they execute
+    in parallel across a thread pool — TA-Lib releases the GIL during the
+    indicator math, giving real multi-core speedup. Per-day trades merge in
+    day order.
+    Delivery mode: positional — one portfolio, chronological, overnight holds
+    (_simulate_range_intraday); parallelism is not possible there.
+    1d: positional by construction (bars ARE days) — _simulate_range_daily
+    regardless of mode.
     """
     tf = timeframe or cfg.BACKTEST_TIMEFRAME
+    md = mode or cfg.BACKTEST_MODE
     if tf == "1d":
         trades, ndays = _simulate_range_daily(
+            symbols, nifty, from_d, to_d, slippage_bps, capital, overrides)
+    elif md == "delivery":
+        trades, ndays = _simulate_range_intraday(
             symbols, nifty, from_d, to_d, slippage_bps, capital, overrides)
     else:
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
@@ -441,6 +522,7 @@ async def run_backtest(
     db, run_id: str, from_d: date, to_d: date,
     slippage_bps: float, capital: Optional[float] = None,
     overrides: Optional[Dict] = None, timeframe: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> None:
     """Orchestrate one backtest run: fetch → simulate (in a worker thread) → persist."""
     try:
@@ -449,6 +531,7 @@ async def run_backtest(
         # the run's overrides explicitly instead of thread-local config, which
         # must never be set on the event loop.
         tf       = timeframe or overrides.get("BACKTEST_TIMEFRAME") or cfg.BACKTEST_TIMEFRAME
+        md       = mode or overrides.get("BACKTEST_MODE") or cfg.BACKTEST_MODE
         warmup   = int(overrides.get("BACKTEST_WARMUP_DAYS", cfg.BACKTEST_WARMUP_DAYS))
         # Resolve the run's TALIB_LOOKBACK here (event loop) so the warmup fetch
         # matches the window the worker threads will actually slice.
@@ -467,7 +550,7 @@ async def run_backtest(
             return
 
         trades, equity, days = await asyncio.to_thread(
-            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital, overrides, tf
+            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital, overrides, tf, md
         )
 
         summary = compute_metrics(trades, equity, days)

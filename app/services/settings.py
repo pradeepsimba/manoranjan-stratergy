@@ -145,6 +145,10 @@ SPEC: List[Dict[str, Any]] = [
     _s("BACKTEST_TIMEFRAME", "Backtest timeframe", "choice", "Backtest & Costs",
        choices=cfg.BACKTEST_TIMEFRAMES,
        help_="Bar interval a backtest replays (intraday only; per-run overridable on the form)."),
+    _s("BACKTEST_MODE", "Backtest mode", "choice", "Backtest & Costs",
+       choices=cfg.BACKTEST_MODES,
+       help_="intraday = EOD square-off, days independent; delivery = positional "
+             "(overnight holds, square-off at range end). 1d bars are always positional."),
     _s("BACKTEST_WARMUP_DAYS", "Backtest warmup days", "int", "Backtest & Costs",
        min_=3, max_=30),
     _s("SLIPPAGE_BPS", "Slippage (bps)", "float", "Backtest & Costs", min_=0, max_=100, step=0.5),

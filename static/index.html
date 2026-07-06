@@ -260,6 +260,17 @@
               <option value="1d">1d</option>
             </select>
           </div>
+          <div class="field">
+            <label class="field-label" for="bt-mode">Mode</label>
+            <!-- intraday = EOD square-off, days independent; delivery = one
+                 portfolio, overnight holds, square-off at range end.
+                 1d bars are always positional → dashboard.js locks this to
+                 delivery when the 1d timeframe is selected. -->
+            <select class="field-input" id="bt-mode" style="width:100px">
+              <option value="intraday" selected>Intraday</option>
+              <option value="delivery">Delivery</option>
+            </select>
+          </div>
           <button class="btn-run" onclick="runBacktest()">Run</button>
         </div>
         <details class="bt-adv">
