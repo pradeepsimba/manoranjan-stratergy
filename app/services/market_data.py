@@ -251,6 +251,10 @@ class MarketDataService:
             with self.state.candle_lock(symbol):
                 if interval == "5m":
                     self._upsert(self.state.candles_5m, symbol, candle)
+                    # Bumped under the SAME lock, right after the mutation, so
+                    # any reader observing the new version is guaranteed to
+                    # also see the updated candle list (see AppState.tick_version).
+                    self.state.tick_version[symbol] = self.state.tick_version.get(symbol, 0) + 1
                 elif interval == "1h":
                     self._upsert(self.state.candles_1h, symbol, candle)
 

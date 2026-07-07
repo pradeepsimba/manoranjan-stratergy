@@ -44,6 +44,12 @@ class AppState:
         self.candles_5m: Dict[str, List[Candle]] = {}
         self.candles_1h: Dict[str, List[Candle]] = {}
 
+        # Monotonic per-token counter, bumped once per accepted 5m candle
+        # upsert (same lock as the mutation — see market_data._process_tick).
+        # Lets a reader cheaply detect "this token's 5m data hasn't changed
+        # since I last looked" without re-walking/re-resampling candles_5m.
+        self.tick_version: Dict[str, int] = {}
+
         # NIFTY 50 session 5m bars — index trend gate + session VWAP
         self.nifty_candles_5m: List[Candle] = []
 

@@ -742,6 +742,11 @@ class SchedulerService:
             )
             for token_key, candles in hist.items():
                 st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
+                # Bump so any reader caching on tick_version (e.g. the
+                # indicators TF viewer) doesn't keep serving pre-load data —
+                # this replaces candles_5m outside the WS tick path, which is
+                # the only other place that mutates it.
+                st.tick_version[token_key] = st.tick_version.get(token_key, 0) + 1
 
             for token_key, frames in today.items():
                 st.candles_1h[token_key] = _deque(

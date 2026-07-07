@@ -291,24 +291,33 @@ def _replay_day(
                             signals.append(sig)
 
                 # Apply fills sequentially, honoring the live circuit breakers.
-                # Re-check affordability per fill: an earlier fill on this SAME
-                # bar shrinks what's left for the next signal. Compare at the
-                # SIZING basis (unslipped close, de-slipped exactly): the check
-                # exists to catch same-bar consumption by earlier fills — NOT
-                # to re-reject the slippage haircut the sizer never saw. A qty
-                # capped to exactly fit `available` would otherwise be dropped
-                # whenever int() slack < slippage, a systematic under-entry
-                # bias vs live (which fills at the scan price).
-                lev  = cfg.INTRADAY_LEVERAGE
-                slip = 1.0 + slippage_bps / 10_000.0
-                for sig in signals:
-                    ok, _ = can_enter(sig.symbol, port.positions,
-                                      port.traded_today, port.daily_pnl)
-                    if not ok:
-                        continue
-                    if (sig.entry_price / slip * sig.qty) / lev > cap_total - port.margin_used() + 1e-9:
-                        continue
-                    port.open_position(sig)
+                _fill_signals(port, signals, cap_total, slippage_bps)
+
+
+def _fill_signals(port: Portfolio, signals: List[BTPosition],
+                  cap_total: float, slippage_bps: float) -> None:
+    """
+    Apply queued entry signals sequentially, honoring the live circuit
+    breakers. Re-checks affordability per fill: an earlier fill on this SAME
+    bar/day shrinks what's left for the next signal. Compares at the SIZING
+    basis (unslipped close, de-slipped exactly): the check exists to catch
+    same-bar consumption by earlier fills — NOT to re-reject the slippage
+    haircut the sizer never saw. A qty capped to exactly fit `available`
+    would otherwise be dropped whenever int() slack < slippage, a systematic
+    under-entry bias vs live (which fills at the scan price). Shared by the
+    intraday per-bar loop (_replay_day) and the daily positional loop
+    (_simulate_range_daily) — keep them provably in sync.
+    """
+    lev  = cfg.INTRADAY_LEVERAGE
+    slip = 1.0 + slippage_bps / 10_000.0
+    for sig in signals:
+        ok, _ = can_enter(sig.symbol, port.positions,
+                          port.traded_today, port.daily_pnl)
+        if not ok:
+            continue
+        if (sig.entry_price / slip * sig.qty) / lev > cap_total - port.margin_used() + 1e-9:
+            continue
+        port.open_position(sig)
 
 
 def _square_off_range_end(port: Portfolio, symbols: Dict[str, SymbolSeries],
@@ -443,18 +452,7 @@ def _simulate_range_daily(
                         )
                         if sig:
                             signals.append(sig)
-                # Same sizing-basis (de-slipped) comparison as the intraday
-                # engine — see the comment there.
-                lev  = cfg.INTRADAY_LEVERAGE
-                slip = 1.0 + slippage_bps / 10_000.0
-                for sig in signals:
-                    ok, _ = can_enter(sig.symbol, port.positions,
-                                      port.traded_today, port.daily_pnl)
-                    if not ok:
-                        continue
-                    if (sig.entry_price / slip * sig.qty) / lev > cap_total - port.margin_used() + 1e-9:
-                        continue
-                    port.open_position(sig)
+                _fill_signals(port, signals, cap_total, slippage_bps)
 
         # 3) Square off survivors at each symbol's last in-range bar.
         _square_off_range_end(port, symbols, lo_s, hi_s, slippage_bps)

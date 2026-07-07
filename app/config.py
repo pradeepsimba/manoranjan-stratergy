@@ -183,6 +183,13 @@ _DEFAULTS: Dict[str, Any] = {
 _runtime_overrides: Dict[str, Any] = {}
 _thread_ctx = threading.local()
 
+# Bumped on every runtime-override mutation (Settings page apply/reset) — the
+# single choke point for "did a dynamic tunable change". Callers that cache
+# results derived from dynamic cfg values (e.g. the indicators-viewer row
+# memo) fold this into their cache key so a settings change invalidates them
+# without needing its own bespoke signal.
+_settings_generation = 0
+
 
 def __getattr__(name: str) -> Any:
     """PEP 562 resolver for dynamic tunables (static attrs never reach here)."""
@@ -216,20 +223,28 @@ def runtime_overrides() -> Dict[str, Any]:
     return dict(_runtime_overrides)
 
 
+def settings_generation() -> int:
+    return _settings_generation
+
+
 def set_runtime_overrides(changes: Dict[str, Any]) -> None:
     """Apply validated overrides globally (event-loop callers only)."""
+    global _settings_generation
     unknown = set(changes) - set(_DEFAULTS)
     if unknown:
         raise KeyError(f"unknown config keys: {sorted(unknown)}")
     _runtime_overrides.update(changes)
+    _settings_generation += 1
 
 
 def clear_runtime_overrides(keys: Optional[List[str]] = None) -> None:
+    global _settings_generation
     if keys is None:
         _runtime_overrides.clear()
     else:
         for k in keys:
             _runtime_overrides.pop(k, None)
+    _settings_generation += 1
 
 
 # ── Per-thread overrides (backtest workers ONLY — never the event loop) ──────
