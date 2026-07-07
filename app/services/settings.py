@@ -141,6 +141,37 @@ SPEC: List[Dict[str, Any]] = [
     _s("FULL_SCAN_INTERVAL_S", "Full-watchlist scan interval s", "int", "Engine",
        min_=30, max_=3600, bt=False),
 
+    # ── Delivery mode (positional backtests: mode="delivery" and "1d", which is
+    # always positional) — independent stop/target/risk/leverage/toggle profile
+    # for overnight holds. Shadows the plain keys only inside a positional
+    # replay (app.backtest.engine._delivery_overrides); live and intraday
+    # backtests never read these. ──────────────────────────────────────────────
+    _s("DELIVERY_MIN_SL_OFFSET", "Min stop distance ₹ (delivery)", "float", "Delivery Mode",
+       min_=0.5, max_=1000, step=0.5, help_="Structural stop floor for overnight/multi-day holds."),
+    _s("DELIVERY_RR_RATIO", "Reward : risk ratio (delivery)", "float", "Delivery Mode",
+       min_=0.5, max_=20, step=0.1),
+    _s("DELIVERY_RISK_PER_TRADE", "Risk per trade ₹ (delivery)", "float", "Delivery Mode",
+       min_=50, max_=100_000, step=50),
+    _s("DELIVERY_MAX_CONCURRENT_POSITIONS", "Max open positions (delivery)", "int", "Delivery Mode",
+       min_=1, max_=20),
+    _s("DELIVERY_DAILY_LOSS_LIMIT", "Run loss limit ₹ (delivery)", "float", "Delivery Mode",
+       min_=100, max_=10_000_000, step=100,
+       help_="Run-level loss stop — positional mode has no daily reset."),
+    _s("DELIVERY_LEVERAGE", "Leverage × (delivery)", "int", "Delivery Mode",
+       min_=1, max_=10, help_="CNC/delivery margin — usually 1x, unlike intraday's 5x."),
+
+    _s("DELIVERY_COND_NEAR_SUPPORT", "Near support (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_COND_BULLISH_PATTERN", "Bullish candle pattern (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_COND_ADX", "ADX trend strength (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_COND_RSI", "RSI ok (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_COND_MACD_CROSS", "MACD bullish cross (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_COND_VOLUME_SURGE", "Volume surge (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_COND_ABOVE_VWAP", "Price above VWAP (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_GATE_STOCK_DAILY", "Stock daily green (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_GATE_STOCK_HOURLY", "Stock hourly green (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_GATE_NIFTY_DAILY", "NIFTY daily green (delivery)", "bool", "Delivery Mode"),
+    _s("DELIVERY_GATE_NIFTY_VWAP", "NIFTY above VWAP (delivery)", "bool", "Delivery Mode"),
+
     # ── Backtest & costs ──────────────────────────────────────────────────────
     _s("BACKTEST_TIMEFRAME", "Backtest timeframe", "choice", "Backtest & Costs",
        choices=cfg.BACKTEST_TIMEFRAMES,
@@ -170,7 +201,7 @@ SPEC: List[Dict[str, Any]] = [
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
 GROUP_ORDER = ["AI Pre-market Screen", "Session Timings", "Risk & Capital",
                "Strategy", "Entry Conditions", "Trend Gates", "Engine",
-               "Backtest & Costs"]
+               "Delivery Mode", "Backtest & Costs"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.

@@ -18,7 +18,7 @@ Anti-look-ahead guarantees:
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import app.config as cfg
 from app.backtest.data import SymbolSeries, load_backtest_data
@@ -320,6 +320,36 @@ def _fill_signals(port: Portfolio, signals: List[BTPosition],
         port.open_position(sig)
 
 
+def _delivery_overrides() -> Dict[str, Any]:
+    """
+    Map the DELIVERY_* dynamic settings onto the plain keys the shared strategy
+    core reads (calc_quantity, can_enter, conditions.py, trend_filter.py), so a
+    positional replay gets delivery's own stop/target/risk/leverage/toggle
+    profile WITHOUT forking any of that shared logic. Resolved via cfg (not a
+    literal dict) so a request's own DELIVERY_* overrides — already applied by
+    the caller's outer thread_overrides — flow through.
+    """
+    return {
+        "MIN_SL_OFFSET":            cfg.DELIVERY_MIN_SL_OFFSET,
+        "RR_RATIO":                 cfg.DELIVERY_RR_RATIO,
+        "RISK_PER_TRADE":           cfg.DELIVERY_RISK_PER_TRADE,
+        "MAX_CONCURRENT_POSITIONS": cfg.DELIVERY_MAX_CONCURRENT_POSITIONS,
+        "DAILY_LOSS_LIMIT":         cfg.DELIVERY_DAILY_LOSS_LIMIT,
+        "INTRADAY_LEVERAGE":        cfg.DELIVERY_LEVERAGE,
+        "COND_NEAR_SUPPORT":        cfg.DELIVERY_COND_NEAR_SUPPORT,
+        "COND_BULLISH_PATTERN":     cfg.DELIVERY_COND_BULLISH_PATTERN,
+        "COND_ADX":                 cfg.DELIVERY_COND_ADX,
+        "COND_RSI":                 cfg.DELIVERY_COND_RSI,
+        "COND_MACD_CROSS":          cfg.DELIVERY_COND_MACD_CROSS,
+        "COND_VOLUME_SURGE":        cfg.DELIVERY_COND_VOLUME_SURGE,
+        "COND_ABOVE_VWAP":          cfg.DELIVERY_COND_ABOVE_VWAP,
+        "GATE_STOCK_DAILY":         cfg.DELIVERY_GATE_STOCK_DAILY,
+        "GATE_STOCK_HOURLY":        cfg.DELIVERY_GATE_STOCK_HOURLY,
+        "GATE_NIFTY_DAILY":         cfg.DELIVERY_GATE_NIFTY_DAILY,
+        "GATE_NIFTY_VWAP":          cfg.DELIVERY_GATE_NIFTY_VWAP,
+    }
+
+
 def _square_off_range_end(port: Portfolio, symbols: Dict[str, SymbolSeries],
                           lo_s: str, hi_s: str, slippage_bps: float) -> None:
     """Square off survivors at each symbol's last in-range bar (positional modes)."""
@@ -359,7 +389,7 @@ def _simulate_range_intraday(
     as a run-level loss stop. Sequential by construction (the portfolio
     persists across days), so no day-level parallelism here.
     """
-    with cfg.thread_overrides(overrides or {}):
+    with cfg.thread_overrides(overrides or {}), cfg.thread_overrides(_delivery_overrides()):
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
         days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
         if not days:
@@ -404,7 +434,7 @@ def _simulate_range_daily(
     degenerates to the same signal) and the single-bar session VWAP is the
     bar's typical price, so above_vwap = close > (H+L+C)/3.
     """
-    with cfg.thread_overrides(overrides or {}):
+    with cfg.thread_overrides(overrides or {}), cfg.thread_overrides(_delivery_overrides()):
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
         days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
         if not days:

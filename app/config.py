@@ -170,6 +170,36 @@ _DEFAULTS: Dict[str, Any] = {
     "BACKTEST_WARMUP_DAYS": 7,      # extra calendar days fetched for warmup
     "SLIPPAGE_BPS":         2.0,    # slippage applied to entry and exit fills
 
+    # Delivery mode (positional backtests: BACKTEST_MODE="delivery" and the "1d"
+    # timeframe, which is always positional). Overnight/multi-day holds need
+    # their own stop/target/risk/leverage profile — intraday's tight 5m-support
+    # stop and 5x margin don't fit a swing hold. These SHADOW the plain
+    # MIN_SL_OFFSET/RR_RATIO/RISK_PER_TRADE/MAX_CONCURRENT_POSITIONS/
+    # DAILY_LOSS_LIMIT/INTRADAY_LEVERAGE/COND_*/GATE_* keys for the duration of
+    # a positional replay only (see app.backtest.engine._delivery_overrides) —
+    # calc_quantity/can_enter/conditions.py/trend_filter.py are never forked.
+    "DELIVERY_MIN_SL_OFFSET":    15.0,    # wider structural stop for multi-day holds
+    "DELIVERY_RR_RATIO":         2.5,     # swing trades target a bigger reward:risk
+    "DELIVERY_RISK_PER_TRADE":   500.0,   # ₹ fixed risk capital per setup
+    "DELIVERY_MAX_CONCURRENT_POSITIONS": 3,
+    "DELIVERY_DAILY_LOSS_LIMIT": 2_000.0, # run-level loss stop (positional semantics)
+    "DELIVERY_LEVERAGE":         1,       # CNC/delivery has no intraday margin by default
+
+    # Delivery entry-condition + trend-gate toggles (independent from the live/
+    # intraday ones above). No DELIVERY_COND_DEPTH — depth is live-only (no
+    # order book in history) and always auto-passes in every backtest mode.
+    "DELIVERY_COND_NEAR_SUPPORT":    True,
+    "DELIVERY_COND_BULLISH_PATTERN": True,
+    "DELIVERY_COND_ADX":             True,
+    "DELIVERY_COND_RSI":             True,
+    "DELIVERY_COND_MACD_CROSS":      True,
+    "DELIVERY_COND_VOLUME_SURGE":    True,
+    "DELIVERY_COND_ABOVE_VWAP":      True,
+    "DELIVERY_GATE_STOCK_DAILY":     True,
+    "DELIVERY_GATE_STOCK_HOURLY":    True,
+    "DELIVERY_GATE_NIFTY_DAILY":     True,
+    "DELIVERY_GATE_NIFTY_VWAP":      True,
+
     # Realistic intraday-equity round-trip cost model (fractions of turnover)
     "COST_BROKERAGE_PCT": 0.0003,     # per executed order
     "COST_BROKERAGE_CAP": 20.0,       # ₹ cap per order
