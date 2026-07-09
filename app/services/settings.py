@@ -20,10 +20,10 @@ import app.config as cfg
 
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
-# Keys in app_settings that are NOT config overrides (e.g. day-scoped watchlist
-# edits). Prefixed with "_" and skipped by the settings loader.
+# Keys in app_settings that are NOT config overrides (day/persistent internal
+# state). Prefixed with "_" and skipped by the settings loader.
 INTERNAL_PREFIX = "_"
-WATCHLIST_OVERRIDES_KEY = "_WATCHLIST_OVERRIDES"
+BN_FUNDS_KEY = "_BN_FUNDS"   # persisted running paper-account balance
 
 
 def _s(key: str, label: str, type_: str, group: str, *,
@@ -32,26 +32,16 @@ def _s(key: str, label: str, type_: str, group: str, *,
        parts: Optional[tuple] = None,
        choices: Optional[list] = None,
        cond: Optional[str] = None) -> Dict[str, Any]:
-    # cond = the COND_* toggle key this value belongs to; the Settings UI nests
-    # it under that condition instead of showing it in a separate group.
     return {"key": key, "label": label, "type": type_, "group": group,
             "min": min_, "max": max_, "step": step, "help": help_,
             "bt": bt, "parts": parts, "choices": choices, "cond": cond}
 
 
 SPEC: List[Dict[str, Any]] = [
-    # ── AI pre-market screen (live only) ─────────────────────────────────────
-    _s("GEMINI_ENABLED", "Gemini screen enabled", "bool", "AI Pre-market Screen",
-       help_="Off = skip the AI screen and trade the capped full high-volume list.", bt=False),
-    _s("GEMINI_MODEL", "Gemini model id", "str", "AI Pre-market Screen",
-       help_="Must be a real google-genai model id; a bad id silently disables the screen.", bt=False),
-    _s("GEMINI_MAX_STOCKS", "Max tradeable stocks", "int", "AI Pre-market Screen",
-       min_=1, max_=100, help_="Cap on the shortlist / fallback list (WS buffer limit).", bt=False),
-
     # ── Session timings ───────────────────────────────────────────────────────
-    _s("PREMARKET_TIME", "Pre-market screen", "time", "Session Timings",
+    _s("PREMARKET_TIME", "Pre-market", "time", "Session Timings",
        parts=("PREMARKET_HOUR", "PREMARKET_MIN"), bt=False,
-       help_="When the watchlist fetch + Gemini screen run."),
+       help_="No-op placeholder in the BN engine (fixed instrument universe) — kept for phase-driver timing."),
     _s("MARKET_OPEN_TIME", "Market open / data load", "time", "Session Timings",
        parts=("MARKET_OPEN_HOUR", "MARKET_OPEN_MIN"), bt=False,
        help_="Historical load + WebSocket subscribe."),
@@ -60,117 +50,80 @@ SPEC: List[Dict[str, Any]] = [
        help_="No entries before this time (also used by the backtest)."),
     _s("CUTOFF_TIME", "Entry cutoff", "time", "Session Timings",
        parts=("CUTOFF_HOUR", "CUTOFF_MIN"),
-       help_="No new entries after this; exits keep running (also used by the backtest)."),
+       help_="No new entries after this; exit management keeps running (also used by the backtest)."),
     _s("SESSION_END_TIME", "Session end / square-off", "time", "Session Timings",
        parts=("SESSION_END_HOUR", "SESSION_END_MIN"), bt=False,
        help_="EOD square-off and daily reset."),
 
-    # ── Risk & capital ────────────────────────────────────────────────────────
-    _s("RISK_PER_TRADE", "Risk per trade ₹", "float", "Risk & Capital",
-       min_=50, max_=100_000, step=50, help_="Qty = risk ÷ stop distance."),
-    _s("ACCOUNT_BALANCE", "Account capital ₹", "float", "Risk & Capital",
-       min_=1_000, max_=100_000_000, step=1000),
-    _s("INTRADAY_LEVERAGE", "Intraday leverage ×", "int", "Risk & Capital",
-       min_=1, max_=10),
-    _s("MAX_CONCURRENT_POSITIONS", "Max open positions", "int", "Risk & Capital",
-       min_=1, max_=20),
-    _s("DAILY_LOSS_LIMIT", "Daily loss limit ₹", "float", "Risk & Capital",
-       min_=100, max_=10_000_000, step=100, help_="No new entries once daily P&L breaches −limit."),
+    # ── BN Strategy — gates ───────────────────────────────────────────────────
+    _s("BN_SIDEWAYS_RANGE_MIN", "Min 5-bar range (pts)", "float", "BN Strategy",
+       min_=1, max_=200, step=0.5, help_="Block entries when BankNifty's last 5 closes span less than this."),
+    _s("BN_MOMENTUM_THRESHOLD", "Momentum threshold (pts)", "float", "BN Strategy",
+       min_=1, max_=200, step=0.5, help_="Fixed 5m move threshold; ATR can only lower it."),
+    _s("BN_ATR_PERIOD", "ATR period (bars)", "int", "BN Strategy", min_=3, max_=50),
+    _s("BN_SAME_DIRECTION_REQUIRED", "Leaders required to agree", "int", "BN Strategy",
+       min_=1, max_=6, help_="Of the 6 leader stocks."),
+    _s("BN_QTY_AVG_PERIOD", "Volume-surge average window (bars)", "int", "BN Strategy", min_=5, max_=100),
+    _s("BN_QTY_SURGE_MULTIPLIER", "Volume-surge multiplier", "float", "BN Strategy",
+       min_=1.0, max_=10, step=0.1, help_="A leader's bar volume must exceed its own average × this."),
+    _s("BN_ENTRY_COOLDOWN_S", "Post-exit cooldown (s)", "int", "BN Strategy", min_=0, max_=600),
 
-    # ── Strategy parameters ───────────────────────────────────────────────────
-    # `cond=...` links a value to an Entry-Condition toggle so the UI shows it
-    # inline under that condition. Ones with no cond are global (sizing/lookback).
-    _s("RSI_MODE", "RSI rule", "choice", "Strategy", cond="COND_RSI",
-       choices=["above_or_rising", "above", "below"],
-       help_="above_or_rising = RSI > level OR rising · above = RSI > level · below = RSI < level (oversold)."),
-    _s("RSI_OVERSOLD", "RSI level", "int", "Strategy", min_=5, max_=95, cond="COND_RSI",
-       help_="The RSI level the rule compares against (your \"30\")."),
-    _s("RSI_PERIOD", "RSI period", "int", "Strategy", min_=5, max_=50, cond="COND_RSI"),
-    _s("RSI_RISING_BARS", "RSI rising bars", "int", "Strategy", min_=1, max_=10, cond="COND_RSI"),
+    # ── BN Strategy — composite indicator gate ───────────────────────────────
+    _s("BN_INDICATOR_LOOKBACK_BARS", "Indicator lookback bars", "int", "BN Strategy",
+       min_=60, max_=290, help_="Tail fed to RSI/MACD/EMA; must stay under the 300-bar candle buffer."),
+    _s("BN_RSI_PERIOD", "RSI period", "int", "BN Strategy", min_=5, max_=50),
+    _s("BN_EMA_FAST", "EMA fast period", "int", "BN Strategy", min_=2, max_=100),
+    _s("BN_EMA_SLOW", "EMA slow period", "int", "BN Strategy", min_=3, max_=200),
+    _s("BN_MACD_FAST", "MACD fast period (EMA, no signal line)", "int", "BN Strategy", min_=2, max_=100),
+    _s("BN_MACD_SLOW", "MACD slow period (EMA, no signal line)", "int", "BN Strategy", min_=3, max_=200),
+    _s("BN_RSI_BULL_LEVEL", "RSI bullish level", "int", "BN Strategy", min_=50, max_=90),
+    _s("BN_RSI_BEAR_LEVEL", "RSI bearish level", "int", "BN Strategy", min_=10, max_=50),
+    _s("BN_RSI_OVERBOUGHT", "RSI overbought penalty level", "int", "BN Strategy", min_=50, max_=95),
+    _s("BN_RSI_OVERSOLD", "RSI oversold bonus level", "int", "BN Strategy", min_=5, max_=50),
+    _s("BN_EMA_EXTENSION_PCT", "EMA extension penalty (%)", "float", "BN Strategy", min_=0.1, max_=10, step=0.1),
+    _s("BN_SCORE_MIN", "Min bull/bear score to fire", "float", "BN Strategy", min_=0.5, max_=10, step=0.1),
+    _s("BN_SCORE_MARGIN", "Score margin over the other side", "float", "BN Strategy", min_=0, max_=5, step=0.1),
 
-    _s("ADX_THRESHOLD", "ADX threshold", "float", "Strategy", min_=5, max_=50, step=0.5, cond="COND_ADX"),
-    _s("ADX_PERIOD", "ADX period", "int", "Strategy", min_=5, max_=50, cond="COND_ADX"),
+    # ── BN Risk ────────────────────────────────────────────────────────────────
+    _s("BN_TARGET_POINTS", "Target (BankNifty pts)", "float", "BN Risk", min_=5, max_=500, step=1),
+    _s("BN_STOPLOSS_POINTS", "Initial stop (BankNifty pts)", "float", "BN Risk", min_=5, max_=500, step=1),
+    _s("BN_BREAKEVEN_TRIGGER", "Breakeven trigger (pts)", "float", "BN Risk", min_=1, max_=500, step=1),
+    _s("BN_TRAIL_TRIGGER", "Trailing-stop trigger (pts)", "float", "BN Risk", min_=1, max_=500, step=1),
+    _s("BN_TRAIL_DISTANCE", "Trailing-stop distance (pts)", "float", "BN Risk", min_=1, max_=500, step=1),
+    _s("BN_STARTING_FUNDS", "Starting funds ₹", "float", "BN Risk", min_=1_000, max_=100_000_000, step=1000,
+       help_="Only seeds the persisted balance the first time / on explicit reset."),
 
-    _s("MACD_CROSS_BARS", "MACD cross window (bars)", "int", "Strategy", min_=1, max_=10, cond="COND_MACD_CROSS"),
-    _s("MACD_FAST", "MACD fast period", "int", "Strategy", min_=2, max_=100, cond="COND_MACD_CROSS"),
-    _s("MACD_SLOW", "MACD slow period", "int", "Strategy", min_=3, max_=200, cond="COND_MACD_CROSS"),
-    _s("MACD_SIGNAL", "MACD signal period", "int", "Strategy", min_=2, max_=100, cond="COND_MACD_CROSS"),
+    # ── BN Options Pricing (synthetic Black-Scholes — no real option data) ──
+    _s("BN_RISK_FREE_RATE", "Risk-free rate", "float", "BN Options Pricing", min_=0, max_=0.2, step=0.005),
+    _s("BN_IV_MIN", "IV floor", "float", "BN Options Pricing", min_=0.05, max_=1.0, step=0.01),
+    _s("BN_IV_MAX", "IV ceiling", "float", "BN Options Pricing", min_=0.05, max_=2.0, step=0.01),
+    _s("BN_IV_DEFAULT", "IV default (insufficient data)", "float", "BN Options Pricing", min_=0.05, max_=2.0, step=0.01),
+    _s("BN_IV_LOOKBACK_BARS", "IV lookback bars", "int", "BN Options Pricing", min_=5, max_=290),
+    _s("BN_IV_MANUAL_ENABLED", "Manual IV override", "bool", "BN Options Pricing", bt=False),
+    _s("BN_IV_MANUAL_VALUE", "Manual IV value", "float", "BN Options Pricing",
+       min_=0.05, max_=2.0, step=0.01, cond="BN_IV_MANUAL_ENABLED", bt=False),
 
-    _s("VOLUME_MULTIPLIER", "Volume surge ×", "float", "Strategy", min_=1.0, max_=10, step=0.1, cond="COND_VOLUME_SURGE"),
-    _s("VOLUME_MA_PERIOD", "Volume MA period", "int", "Strategy", min_=5, max_=100, cond="COND_VOLUME_SURGE"),
-
-    _s("SWING_LOW_BARS", "Support lookback bars", "int", "Strategy", min_=3, max_=50, cond="COND_NEAR_SUPPORT"),
-    _s("SUPPORT_TOUCH_PCT", "Support proximity (fraction)", "float", "Strategy",
-       min_=0.001, max_=0.10, step=0.001, cond="COND_NEAR_SUPPORT",
-       help_="0.015 = within 1.5% above the swing low."),
-
-    _s("DEPTH_MIN_RATIO", "Min order-book buy ratio", "float", "Strategy",
-       min_=0.0, max_=1.0, step=0.05, cond="COND_DEPTH",
-       help_="Live only — backtests have no order book."),
-
-    _s("MIN_SL_OFFSET", "Min stop distance ₹", "float", "Strategy", min_=0.5, max_=100, step=0.5),
-    _s("RR_RATIO", "Reward : risk ratio", "float", "Strategy", min_=0.5, max_=10, step=0.1),
-    _s("TALIB_LOOKBACK", "Indicator lookback bars", "int", "Strategy", min_=60, max_=290,
-       help_="Tail fed to TA-Lib; must stay under the 300-bar candle buffer."),
-
-    # ── Entry-condition toggles ───────────────────────────────────────────────
-    _s("COND_NEAR_SUPPORT", "Near support", "bool", "Entry Conditions"),
-    _s("COND_BULLISH_PATTERN", "Bullish candle pattern", "bool", "Entry Conditions"),
-    _s("COND_ADX", "ADX trend strength", "bool", "Entry Conditions"),
-    _s("COND_RSI", "RSI ok", "bool", "Entry Conditions"),
-    _s("COND_MACD_CROSS", "MACD bullish cross", "bool", "Entry Conditions"),
-    _s("COND_VOLUME_SURGE", "Volume surge", "bool", "Entry Conditions"),
-    _s("COND_ABOVE_VWAP", "Price above VWAP", "bool", "Entry Conditions"),
-    _s("COND_DEPTH", "Order-book depth bullish", "bool", "Entry Conditions",
-       help_="Live only — the backtest always passes this."),
-
-    # ── Custom entry rules (rendered by the dedicated builder UI) ────────────
-    _s("CUSTOM_ENTRY_RULES", "Custom entry rules", "rules", "Entry Conditions",
-       help_="OR-of-ANDs rule sets over any indicator; 'and' adds to the fixed "
-             "conditions, 'replace' swaps them out (trend gates still apply)."),
-
-    # ── Trend-gate toggles ────────────────────────────────────────────────────
-    _s("GATE_STOCK_DAILY", "Stock daily green", "bool", "Trend Gates"),
-    _s("GATE_STOCK_HOURLY", "Stock hourly green", "bool", "Trend Gates"),
-    _s("GATE_NIFTY_DAILY", "NIFTY daily green", "bool", "Trend Gates"),
-    _s("GATE_NIFTY_VWAP", "NIFTY above VWAP", "bool", "Trend Gates"),
+    # ── BN Options Costs (placeholder rates — confirm current India options
+    # STT/exchange-txn figures before trusting absolute backtest ₹ P&L) ─────
+    _s("BN_COST_BROKERAGE_FLAT", "Brokerage ₹/order (flat)", "float", "BN Options Costs", min_=0, max_=100),
+    _s("BN_COST_STT_SELL_PCT", "STT sell-side (fraction)", "float", "BN Options Costs", min_=0, max_=0.01, step=0.0001),
+    _s("BN_COST_TXN_PCT", "Exchange txn (fraction)", "float", "BN Options Costs", min_=0, max_=0.01, step=0.00001),
+    _s("BN_COST_GST_PCT", "GST (fraction)", "float", "BN Options Costs", min_=0, max_=1, step=0.01),
+    _s("BN_COST_SEBI_PCT", "SEBI fee (fraction)", "float", "BN Options Costs", min_=0, max_=0.001, step=0.000001),
 
     # ── Engine (live only) ───────────────────────────────────────────────────
     _s("TICK_EVAL_INTERVAL_MS", "Tick evaluation interval ms", "int", "Engine",
        min_=0, max_=5000, bt=False, help_="0 = run as fast as the loop allows."),
-    _s("FULL_SCAN_INTERVAL_S", "Full-watchlist scan interval s", "int", "Engine",
-       min_=30, max_=3600, bt=False),
 
-    # ── Backtest & costs ──────────────────────────────────────────────────────
-    _s("BACKTEST_TIMEFRAME", "Backtest timeframe", "choice", "Backtest & Costs",
-       choices=cfg.BACKTEST_TIMEFRAMES,
-       help_="Bar interval a backtest replays (intraday only; per-run overridable on the form)."),
-    _s("BACKTEST_MODE", "Backtest mode", "choice", "Backtest & Costs",
-       choices=cfg.BACKTEST_MODES,
-       help_="intraday = EOD square-off, days independent; delivery = positional "
-             "(overnight holds, square-off at range end). 1d bars are always positional."),
-    _s("BACKTEST_WARMUP_DAYS", "Backtest warmup days", "int", "Backtest & Costs",
-       min_=3, max_=30),
-    _s("SLIPPAGE_BPS", "Slippage (bps)", "float", "Backtest & Costs", min_=0, max_=100, step=0.5),
-    _s("COST_BROKERAGE_PCT", "Brokerage % (fraction)", "float", "Backtest & Costs",
-       min_=0, max_=0.01, step=0.0001),
-    _s("COST_BROKERAGE_CAP", "Brokerage cap ₹/order", "float", "Backtest & Costs",
-       min_=0, max_=100),
-    _s("COST_STT_SELL", "STT sell-side (fraction)", "float", "Backtest & Costs",
-       min_=0, max_=0.01, step=0.00005),
-    _s("COST_TXN_CHARGE", "Exchange txn (fraction)", "float", "Backtest & Costs",
-       min_=0, max_=0.01, step=0.00001),
-    _s("COST_GST", "GST (fraction)", "float", "Backtest & Costs", min_=0, max_=1, step=0.01),
-    _s("COST_STAMP_BUY", "Stamp duty buy-side (fraction)", "float", "Backtest & Costs",
-       min_=0, max_=0.01, step=0.00001),
-    _s("COST_SEBI", "SEBI fee (fraction)", "float", "Backtest & Costs",
-       min_=0, max_=0.001, step=0.000001),
+    # ── Backtest ───────────────────────────────────────────────────────────────
+    _s("BACKTEST_WARMUP_DAYS", "Backtest warmup days", "int", "Backtest", min_=3, max_=30),
+    _s("SLIPPAGE_BPS", "Slippage (bps)", "float", "Backtest", min_=0, max_=100, step=0.5,
+       help_="Applied to the option premium fill."),
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
-GROUP_ORDER = ["AI Pre-market Screen", "Session Timings", "Risk & Capital",
-               "Strategy", "Entry Conditions", "Trend Gates", "Engine",
-               "Backtest & Costs"]
+GROUP_ORDER = ["Session Timings", "BN Strategy", "BN Risk", "BN Options Pricing",
+               "BN Options Costs", "Engine", "Backtest"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.
@@ -225,12 +178,6 @@ def _coerce(spec: Dict[str, Any], raw: Any) -> Any:
             raise ValueError(f"{key}: must be one of {spec['choices']}")
         return val
 
-    if typ == "rules":
-        # Structural whitelist validation lives beside the evaluator so the
-        # two can't drift. (Import here: settings→conditions has no cycle.)
-        from app.engine.conditions import validate_rules
-        return validate_rules(raw)
-
     if typ == "time":
         if not isinstance(raw, str) or not _TIME_RE.match(raw.strip()):
             raise ValueError(f"{key}: expected \"HH:MM\" (24h)")
@@ -276,49 +223,34 @@ def expand_changes(changes: Dict[str, Any], *, bt_only: bool = False) -> Dict[st
 
 # cfg attrs whose value affects an indicator's minimum-bar requirement — the
 # self-heal and reset guards drop/validate this whole set together.
-INDICATOR_PERIOD_KEYS = ("MACD_FAST", "MACD_SLOW", "MACD_SIGNAL", "MACD_CROSS_BARS",
-                         "RSI_PERIOD", "RSI_RISING_BARS", "ADX_PERIOD", "TALIB_LOOKBACK")
+BN_INDICATOR_PERIOD_KEYS = ("BN_MACD_FAST", "BN_MACD_SLOW", "BN_EMA_FAST",
+                           "BN_EMA_SLOW", "BN_RSI_PERIOD", "BN_INDICATOR_LOOKBACK_BARS")
 
 
-def validate_indicator_periods(attr_changes: Dict[str, Any]) -> None:
+def validate_bn_indicator_periods(attr_changes: Dict[str, Any]) -> None:
     """
     Cross-field guards so a period/lookback combo can't leave an indicator
-    all-NaN — which (with its condition enabled) silently blocks EVERY entry in
-    both live and backtest, with no error. Checked against the effective config
-    (changes over current). No-op unless a relevant key changed.
-
-      • MACD: fast < slow (fast≥slow → TA-Lib NaN), and lookback ≥ slow + signal
-        + cross-window (MACD needs slow+signal-1 bars for a first value).
-      • ADX:  lookback ≥ 2·period + 1 (ADX converges around 2·period bars).
-      • RSI:  lookback ≥ period + rising-bars + 1 (need that many valid values
-        to test "rose N bars").
+    all-NaN — which silently blocks the BN composite gate (never bullish/
+    bearish) in both live and backtest, with no error. No-op unless a
+    relevant key changed.
     """
-    if not any(k in attr_changes for k in INDICATOR_PERIOD_KEYS):
+    if not any(k in attr_changes for k in BN_INDICATOR_PERIOD_KEYS):
         return
 
     def eff(k: str) -> int:
         return attr_changes.get(k, getattr(cfg, k))
 
-    lookback = eff("TALIB_LOOKBACK")
-    fast, slow, signal = eff("MACD_FAST"), eff("MACD_SLOW"), eff("MACD_SIGNAL")
+    fast, slow = eff("BN_MACD_FAST"), eff("BN_MACD_SLOW")
     if fast >= slow:
         raise ValueError(
-            f"MACD fast period ({fast}) must be less than the slow period ({slow})")
+            f"BN MACD fast period ({fast}) must be less than the slow period ({slow})")
 
-    need = {
-        "MACD": slow + signal + eff("MACD_CROSS_BARS"),
-        "ADX":  2 * eff("ADX_PERIOD") + 1,
-        "RSI":  eff("RSI_PERIOD") + eff("RSI_RISING_BARS") + 1,
-    }
-    worst = max(need, key=need.get)
-    if lookback < need[worst]:
+    lookback = eff("BN_INDICATOR_LOOKBACK_BARS")
+    need = max(eff("BN_EMA_SLOW"), slow, eff("BN_RSI_PERIOD")) + 1
+    if lookback < need:
         raise ValueError(
-            f"indicator lookback ({lookback}) is too small — {worst} needs "
-            f"≥ {need[worst]} bars; raise TALIB_LOOKBACK or lower the period(s)")
-
-
-# Backwards-compatible alias (older call sites / tests).
-validate_macd_periods = validate_indicator_periods
+            f"BN indicator lookback ({lookback}) is too small — needs "
+            f"≥ {need} bars; raise BN_INDICATOR_LOOKBACK_BARS or lower the period(s)")
 
 
 def _coerce_attr(key: str, raw: Any) -> Any:
@@ -343,8 +275,7 @@ def validate_time_order(attr_changes: Dict[str, Any],
     the full live chain enforces
         premarket ≤ market open ≤ scan start < cutoff ≤ session end,
     while the backtest passes points=("SCAN_START","CUTOFF") since those are
-    the only times a replay uses (comparing against live-only settings would
-    falsely reject valid runs). No-op when attr_changes touches none of the
+    the only times a replay uses. No-op when attr_changes touches none of the
     points. Raises ValueError naming the violated pair.
     """
     if not any(k in attr_changes for p in points
@@ -378,7 +309,6 @@ def _read_value(spec: Dict[str, Any], source: Dict[str, Any]) -> Any:
 # ── Introspection for GET /api/settings ───────────────────────────────────────
 
 def describe() -> Dict[str, Any]:
-    from app.engine.conditions import RULE_FIELDS, RULE_OPS   # no import cycle
     defaults = cfg.dynamic_defaults()
     current = {k: getattr(cfg, k) for k in defaults}
     groups: Dict[str, list] = {g: [] for g in GROUP_ORDER}
@@ -400,12 +330,6 @@ def describe() -> Dict[str, Any]:
             "default":    default,
             "overridden": value != default,
         }
-        if spec["type"] == "rules":
-            # Ship the builder's vocabulary with the setting so the UI can
-            # render field/op pickers without a second endpoint.
-            entry["fields"] = [{"key": k, "label": lbl, "kind": kind}
-                               for k, (lbl, kind, _) in RULE_FIELDS.items()]
-            entry["ops"] = list(RULE_OPS)
         groups.setdefault(spec["group"], []).append(entry)
     return {"groups": [{"name": g, "settings": groups[g]}
                        for g in GROUP_ORDER if groups.get(g)]}
@@ -417,8 +341,7 @@ async def load_and_apply(db) -> None:
     """
     Startup: apply stored overrides from the app_settings table. Every value
     is re-validated against SPEC — a corrupt/out-of-range row (manual edit,
-    schema drift) is skipped with a warning instead of poisoning the engine
-    (e.g. PREMARKET_HOUR=99 would crash the phase driver's time math).
+    schema drift) is skipped with a warning instead of poisoning the engine.
     """
     try:
         stored = await db.get_app_settings()
@@ -448,12 +371,12 @@ async def load_and_apply(db) -> None:
               f"dropped {time_attrs}, using default timings")
 
     # Same self-heal for a stored indicator period/lookback combo that would
-    # leave an indicator all-NaN. Drop ALL indicator-period overrides back to
-    # defaults (which are internally consistent), not just the MACD ones.
+    # leave the BN composite gate all-NaN. Drop ALL indicator-period
+    # overrides back to defaults (which are internally consistent).
     try:
-        validate_indicator_periods(valid)
+        validate_bn_indicator_periods(valid)
     except ValueError as e:
-        dropped = [k for k in INDICATOR_PERIOD_KEYS if k in valid]
+        dropped = [k for k in BN_INDICATOR_PERIOD_KEYS if k in valid]
         for k in dropped:
             valid.pop(k, None)
         print(f"Settings: stored indicator periods invalid ({e}) — "
@@ -472,7 +395,7 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     """
     attr_changes = expand_changes(changes)
     validate_time_order(attr_changes)
-    validate_indicator_periods(attr_changes)
+    validate_bn_indicator_periods(attr_changes)
 
     defaults   = cfg.dynamic_defaults()
     store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
@@ -499,16 +422,12 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
                 raise ValueError(f"unknown setting: {key}")
             attr_keys.extend(_attr_keys(spec))
 
-    # A PARTIAL reset must honor the same cross-field guards as a save: e.g.
-    # resetting only CUTOFF back to default while SCAN_START stays overridden
-    # could invert the window, or resetting one MACD/period key could leave an
-    # indicator all-NaN. Model the post-reset state as {reset key: default} over
-    # current config and run both guards (they no-op if no relevant key touched).
+    # A PARTIAL reset must honor the same cross-field guards as a save.
     # (A full reset is always valid — defaults are internally consistent.)
     defaults = cfg.dynamic_defaults()
     post_reset = {k: defaults[k] for k in attr_keys}
     validate_time_order(post_reset)
-    validate_indicator_periods(post_reset)
+    validate_bn_indicator_periods(post_reset)
 
     await db.delete_app_settings(attr_keys)
     cfg.clear_runtime_overrides(attr_keys)

@@ -3,7 +3,6 @@ uvicorn[standard]
 websockets
 httpx
 asyncpg
-google-genai
 numpy
 TA-Lib
 python-dotenv

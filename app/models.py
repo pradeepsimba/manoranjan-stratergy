@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 
 # ── Enumerations ──────────────────────────────────────────────────────────────
 
 class TradingPhase(Enum):
     PRE_MARKET = "pre_market"   # Before 09:00 — idle
-    WAIT_ZONE  = "wait_zone"    # 09:15–09:45 — init, no scans
-    ACTIVE     = "active"       # 09:45–14:30 — scanning and trading
-    CUTOFF     = "cutoff"       # 14:30–15:30 — no new entries; OCO exits manage positions
+    WAIT_ZONE  = "wait_zone"    # 09:15–09:30 — init, no scans
+    ACTIVE     = "active"       # 09:30–15:00 — scanning and trading
+    CUTOFF     = "cutoff"       # 15:00–15:30 — no new entries; exit management continues
     CLOSED     = "closed"       # After 15:30 — session terminated
 
 
@@ -37,94 +37,83 @@ class Candle:            # cuts per-instance memory ~40% and speeds attribute ac
     def is_bearish(self) -> bool: return self.close < self.open
 
 
-# ── Indicators ────────────────────────────────────────────────────────────────
+# ── Bank Nifty options strategy ───────────────────────────────────────────────
 
-@dataclass(slots=True)   # built on every scan (dozens/sec across the pool)
-class IndicatorResult:
-    # RSI
-    rsi:                Optional[float] = None
-    rsi_above_30:       bool            = False
-    rsi_rising:         bool            = False   # rose each of last 3 bars
-
-    # MACD
-    macd_line:          Optional[float] = None
-    macd_signal_line:   Optional[float] = None
-    macd_histogram:     Optional[float] = None
-    macd_bullish_cross: bool             = False  # line just crossed above signal
-
-    # ADX
-    adx:      Optional[float] = None
-    plus_di:  Optional[float] = None
-    minus_di: Optional[float] = None
-    adx_ok:   bool             = False   # ADX > 20 AND +DI > -DI
-
-    # VWAP
-    vwap:             float = 0.0
-    price_above_vwap: bool  = False
-
-    # Volume
-    avg_volume_20: float = 0.0
-    volume_surge:  bool  = False   # latest bar volume > 1.5× avg
-
-    # Structural support
-    support_level: float = 0.0
-    near_support:  bool  = False   # price within 0.5% of swing low
-
-    # Candlestick
-    candle_pattern:  Optional[str] = None
-    bullish_pattern: bool          = False
-
-    # Raw price/volume context — lets the custom-rule engine express
-    # price-relative clauses (e.g. "within 0.5% of VWAP", "volume 2× average").
-    ltp:          float           = 0.0    # close of the bar the scan ran on
-    volume_ratio: Optional[float] = None   # latest bar volume ÷ volume MA
+@dataclass(slots=True)   # built once per fired entry, live and backtest
+class BNSignal:
+    direction:         str            # "BUY" (-> long ATM CE) | "SELL" (-> long ATM PE)
+    entry_index_price: float          # BankNifty spot at signal
+    bar_time:          str            # start_time of the triggering 5m bar
+    confidence:        float          # 0-100, leader-vote + qty-surge breadth
+    green:             int            # leader stocks closing green
+    red:               int            # leader stocks closing red
+    strong_qty:        int            # leader stocks with a volume-surge bar
+    leader_signal:     str            # "BUY" | "SELL" | "Nobuysell"
+    bn_bull:           float         # composite indicator bull score
+    bn_bear:           float         # composite indicator bear score
+    strike:            int            # ATM strike at signal time
+    expiry:            str            # ISO datetime of the option's weekly expiry
+    entry_premium:     float          # theoretical Black-Scholes premium at signal
+    iv_used:           float          # realized-vol estimate used for the premium
 
 
-@dataclass(slots=True)   # built on every gated scan, live and backtest
-class TrendGate:
-    daily_green:       bool = False   # stock LTP > today's daily open
-    hourly_green:      bool = False   # current 1H candle close > open
-    nifty_daily_green: bool = False   # NIFTY LTP > NIFTY daily open
-    nifty_above_vwap:  bool = False   # NIFTY LTP > NIFTY session VWAP
+@dataclass(slots=True)   # the single active trade — at most one at a time
+class BNTrade:
+    direction:    str             # "BUY" | "SELL"
+    entry_index_price: float
+    entry_time:   str
+    target:       float           # absolute BankNifty index price, frozen at entry
+    current_sl:   float           # absolute BankNifty index price — ratchets over time
+    strike:       int
+    option_type:  str             # "CE" | "PE"
+    expiry:       str             # ISO datetime
+    entry_premium: float
+    # Risk parameters frozen from cfg AT ENTRY — a live Settings change must
+    # never retroactively alter an already-open trade's SL/target economics.
+    stoploss_points:   float = 0.0
+    breakeven_trigger: float = 0.0
+    trail_trigger:     float = 0.0
+    trail_distance:    float = 0.0
+    lot_size:     int             = 30
+    order_id:     str             = ""
+    sl_stage:     str             = "Initial"   # "Initial" | "Breakeven" | "Trail"
+    current_premium: float        = 0.0    # live mark, refreshed every exit-check tick
+    current_iv:      float        = 0.0
+    status:       PositionStatus  = PositionStatus.OPEN
+    exit_index_price: Optional[float] = None
+    exit_time:        Optional[str]   = None
+    exit_premium:     Optional[float] = None
+    pnl:              float           = 0.0     # ₹, from (exit_premium-entry_premium)*lot_size
+    index_pnl_points:  float           = 0.0     # diagnostic only — never used for settlement
+    confidence:        float           = 0.0
+    entry_signal:      Optional[BNSignal] = None
 
-    @property
-    def all_clear(self) -> bool:
-        return (self.daily_green and self.hourly_green
-                and self.nifty_daily_green and self.nifty_above_vwap)
 
-
-# ── Trading ───────────────────────────────────────────────────────────────────
-
-@dataclass(slots=True)
-class EntrySignal:
-    symbol:         str
-    token:          str
-    ltp:            float
-    support:        float
-    sl_offset:      float          # entry − support (stop distance)
-    target_offset:  float          # sl_offset × RR_RATIO (target distance)
-    quantity:       int
-    capital_needed: float          # quantity × entry / LEVERAGE
-    indicators:     IndicatorResult = field(default_factory=IndicatorResult)
-    trend:          TrendGate       = field(default_factory=TrendGate)
-    bar_time:       str             = ""   # "HH:MM" of the triggering 5m bar
-
-
-@dataclass(slots=True)
-class Position:
-    symbol:        str
-    token:         str
-    entry_price:   float
-    entry_time:    str             # ISO timestamp string
-    quantity:      int
-    stop_loss:     float           # absolute price level
-    target:        float           # absolute price level
-    sl_offset:     float           # stop distance from entry
-    target_offset: float           # target distance from entry
-    order_id:      str
-    status:        PositionStatus  = PositionStatus.OPEN
-    exit_price:    Optional[float] = None
-    exit_time:     Optional[str]   = None
-    pnl:           float           = 0.0
-    indicators:    Optional[IndicatorResult] = None
-    trend:         Optional[TrendGate]       = None
+@dataclass(slots=True)   # rebuilt every ~100ms tick for the dashboard's "why didn't it fire" panel
+class BNDiagnostic:
+    time:            str
+    bn_ltp:          float
+    green:           int
+    red:             int
+    strong_qty:      int
+    leader_rows:     List[dict] = field(default_factory=list)
+    leader_signal:   str        = "Nobuysell"
+    sideways_range:  Optional[float] = None
+    momentum_ok:     bool             = False
+    momentum_reason: str              = ""
+    rsi:             Optional[float]  = None
+    macd_dir:        Optional[str]    = None
+    macd_val:        Optional[float]  = None
+    ema_bullish:     Optional[bool]   = None
+    ema_bearish:     Optional[bool]   = None
+    bn_bull:         float            = 0.0
+    bn_bear:         float            = 0.0
+    bn_bullish:      bool             = False
+    bn_bearish:      bool             = False
+    no_trade_reason: Optional[str]    = None
+    candle_close_ok: bool             = True
+    cooldown_ms:     float            = 0.0
+    market_open:     bool             = True
+    atm_strike:      Optional[int]    = None
+    atm_premium:     Optional[float]  = None
+    atm_iv:          Optional[float]  = None

@@ -2,7 +2,7 @@
 
 // ── Shared page utilities ──────────────────────────────────────────────────────
 // Included by every page BEFORE its page script (index/dashboard.js,
-// indicators/indicators.js, settings/settings.js). Keep helpers that must
+// scanner/scanner.js, settings/settings.js). Keep helpers that must
 // behave identically across pages here — duplicating them per page lets a
 // fix land on one page and miss the others.
 

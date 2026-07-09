@@ -3,8 +3,9 @@ from __future__ import annotations
 """
 Configuration — static system settings plus the DYNAMIC tunables layer.
 
-Static values (endpoints, credentials, structural pool/buffer sizes) are plain
-module attributes and require a restart to change.
+Static values (endpoints, credentials, structural pool/buffer sizes, the
+Bank Nifty instrument universe) are plain module attributes and require a
+restart to change.
 
 Everything else lives in _DEFAULTS and is resolved through the module-level
 __getattr__ (PEP 562) with this precedence:
@@ -15,7 +16,7 @@ __getattr__ (PEP 562) with this precedence:
                                  app_settings table and applied at startup
     3. the hard default below
 
-`import app.config as cfg; cfg.RISK_PER_TRADE` therefore always returns the
+`import app.config as cfg; cfg.BN_TARGET_POINTS` therefore always returns the
 CURRENT value. Code must read cfg attributes at call time — never copy them
 into module-level constants or default-argument values, or they freeze at
 import and stop being dynamic.
@@ -36,158 +37,132 @@ WS_URL            = f"ws://{API_HOST}:8083/historical-data"
 CLIENT_STATUS_URL = f"https://{API_HOST}:8000/api/clientstatus/"
 
 # ── Static: credentials / DSN ─────────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-POSTGRES_DSN   = os.getenv(
+POSTGRES_DSN = os.getenv(
     "POSTGRES_DSN",
     "postgresql://postgres:password@localhost/trading_db",
 )
 
-# ── Static: data intervals + NIFTY identity ───────────────────────────────────
-INTERVAL_5M   = "5m"
-# Live 1h store key: kept as "1h" to MATCH the WebSocket's hardcoded "1h" ticks
-# that fill candles_1h during the session. The initial REST load with this id
-# returns nothing (the REST server's hourly id is "60m") and the store is
-# WS-filled — but it must NOT be "60m" here, or REST hourly bars and WS "1h"
-# bars would mix in the same store with possibly misaligned timestamps. The
-# backtest/viewer/MTF use TIMEFRAMES (below) directly, not this constant.
-INTERVAL_1H   = "1h"
-NIFTY50_TOKEN = "99926000"
-NIFTY50_NAME  = "NIFTY 50"
+# ── Static: data intervals ────────────────────────────────────────────────────
+INTERVAL_5M = "5m"
 
-# Supported timeframes for the REST-historical features (indicators viewer/MTF,
-# backtest) — MUST match the market-data REST server's interval ids exactly.
-# PROBED against the live server (2026-07-05): it serves 1m, 3m, 5m, 10m, 15m,
-# 30m, 60m, 1d — and silently returns ZERO candles for any other id ("1h",
-# "1hr", "1hour", "1day", "2m", …), so a wrong name here looks like missing
-# data, not an error. Order = UI display order.
-TIMEFRAMES = ["1m", "3m", "5m", "10m", "15m", "30m", "60m", "1d"]
+# ── Static: Bank Nifty options strategy universe ──────────────────────────────
+# Verified against the live market-data server (2026-07-09): these are the
+# SAME instrument tokens the c.html prototype uses (Kite-style tokens), and
+# they return real 5m OHLCV from this repo's existing historical/WS server —
+# no separate options-chain data source needed anywhere (see bn_pricing.py).
+BN_INDEX_NAME = "BANKNIFTY"
+BN_INDEX_TOKEN = "26009"
 
-# Approximate minutes per bar — for warmup-day math. 1d uses the NSE session
-# length (~375 min) so a "day" of lookback still spans real bars.
-TIMEFRAME_MINUTES = {
-    "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30,
-    "60m": 60, "1d": 375,
+# The 6 stocks that actually drive the trade decision (leader-vote + BN
+# composite indicator gate).
+BN_LEADER_STOCKS: Dict[str, str] = {
+    "HDFC BANK":            "1333",
+    "ICICI BANK":           "4963",
+    "AXIS BANK":            "5900",
+    "STATE BANK OF INDIA":  "3045",
+    "KOTAK BANK":           "1922",   # server's canonical name for this token (NOT "Kotak Mahindra Bank")
+    "INDUSIND BANK":        "5258",
 }
 
+# All 11 stocks fetched/displayed (matches c.html's own universe, 12 tokens
+# total together with the index) — the 6
+# beyond the leaders never feed the entry decision but are kept for display /
+# future use per an explicit user decision, not because they're needed.
+BN_ALL_STOCKS: Dict[str, str] = {
+    **BN_LEADER_STOCKS,
+    "AU SMALL FINANCE BANK": "21238",
+    "FEDERAL BANK":          "1023",
+    "IDFC FIRST BANK":       "11184",
+    "PUNJAB NATIONAL BANK":  "10666",
+    "CANARA BANK":           "10794",
+}
 
-def is_timeframe(tf: str) -> bool:
-    return tf in TIMEFRAMES
-
-
-# Timeframes the backtest engine can replay. Intraday ids (≤60m) use the
-# parallel per-day engine (fresh portfolio, EOD square-off); "1d" uses the
-# POSITIONAL mode (one portfolio across the range, overnight holds, exits on
-# later days' bars, square-off at range end).
-BACKTEST_TIMEFRAMES = list(TIMEFRAMES)
-
-# How a backtest holds positions. "intraday" = per-day engine, EOD square-off.
-# "delivery" = positional: one portfolio across the range, overnight holds,
-# square-off at range end. The "1d" timeframe is positional by construction
-# (its bars ARE days), so it replays as delivery regardless of this choice.
-BACKTEST_MODES = ["intraday", "delivery"]
+# BankNifty exchange lot size — a contract-spec fact, not a user tunable.
+BN_LOT_SIZE = 30
 
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
 HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
-SCAN_WORKERS      = 16    # ThreadPoolExecutor size for the parallel scan
 MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
+
+# Backtest v1 is intraday/5m only — nothing in c.html holds an option position
+# across days, so positional (delivery / 1d) replay is not built.
+BACKTEST_TIMEFRAMES = ["5m"]
+BACKTEST_MODES      = ["intraday"]
+SCAN_WORKERS        = 4    # per-day backtest parallelism (ThreadPoolExecutor)
 
 # ── Dynamic tunables — hard defaults ──────────────────────────────────────────
 _DEFAULTS: Dict[str, Any] = {
-    # AI pre-market screen
-    "GEMINI_ENABLED":    True,
-    "GEMINI_MODEL":      "gemini-2.5-flash",
-    "GEMINI_MAX_STOCKS": 40,     # cap on the bullish shortlist / fallback list
+    # Session timings (IST) — SCAN_START/CUTOFF reproduce c.html's real
+    # 09:30-15:00 trading window using the existing phase-driver machinery.
+    "PREMARKET_HOUR":   9,  "PREMARKET_MIN":   0,
+    "MARKET_OPEN_HOUR": 9,  "MARKET_OPEN_MIN": 15,   # historical load + WS subscribe
+    "SCAN_START_HOUR":  9,  "SCAN_START_MIN":  30,   # entries allowed from here
+    "CUTOFF_HOUR":      15, "CUTOFF_MIN":      0,    # no new entries after this
+    "SESSION_END_HOUR": 15, "SESSION_END_MIN": 30,   # terminate session
 
-    # Timing (IST)
-    "PREMARKET_HOUR":   9,  "PREMARKET_MIN":   0,    # Gemini filter runs here
-    "MARKET_OPEN_HOUR": 9,  "MARKET_OPEN_MIN": 15,   # Wait zone start
-    "SCAN_START_HOUR":  9,  "SCAN_START_MIN":  45,   # Active scanning starts
-    "CUTOFF_HOUR":      14, "CUTOFF_MIN":      30,   # No new entries after this
-    "SESSION_END_HOUR": 15, "SESSION_END_MIN": 30,   # Terminate session
+    # BN Strategy — sideways / momentum / leader-vote / volume-surge gates
+    "BN_SIDEWAYS_RANGE_MIN":   12.0,   # min 5-bar BankNifty close range to trade
+    "BN_MOMENTUM_THRESHOLD":   28.0,   # fixed 5m momentum threshold (points)
+    "BN_ATR_PERIOD":           10,
+    "BN_SAME_DIRECTION_REQUIRED": 3,   # of 6 leaders must agree
+    "BN_QTY_AVG_PERIOD":       20,     # bars averaged for the volume-surge baseline
+    "BN_QTY_SURGE_MULTIPLIER": 1.5,    # latest bar volume must exceed avg × this
+    "BN_ENTRY_COOLDOWN_S":     60,     # no new entry within this long of the last exit
 
-    # Risk & capital
-    "RISK_PER_TRADE":           500.0,     # ₹ fixed risk capital per setup
-    "ACCOUNT_BALANCE":          40_000.0,  # ₹ base capital
-    "INTRADAY_LEVERAGE":        5,         # Standard NSE intraday equity leverage
-    "MAX_CONCURRENT_POSITIONS": 3,         # Hard cap on simultaneous open positions
-    "DAILY_LOSS_LIMIT":         2_000.0,   # ₹ daily drawdown ceiling
+    # BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring)
+    "BN_INDICATOR_LOOKBACK_BARS": 200,
+    "BN_RSI_PERIOD":       14,
+    "BN_EMA_FAST":         20,
+    "BN_EMA_SLOW":         50,
+    "BN_MACD_FAST":        12,
+    "BN_MACD_SLOW":        26,
+    "BN_RSI_BULL_LEVEL":   58,
+    "BN_RSI_BEAR_LEVEL":   42,
+    "BN_RSI_OVERBOUGHT":   72,
+    "BN_RSI_OVERSOLD":     28,
+    "BN_EMA_EXTENSION_PCT": 1.2,
+    "BN_SCORE_MIN":        2.0,
+    "BN_SCORE_MARGIN":     0.9,
 
-    # Strategy parameters
-    "ADX_PERIOD":        14,
-    "ADX_THRESHOLD":     20.0,
-    "RSI_PERIOD":        14,
-    "RSI_OVERSOLD":      30,      # the RSI level ("30") the RSI rule compares against
-    "RSI_RISING_BARS":   3,       # RSI must rise for this many consecutive bars
-    # How the RSI entry condition uses the level above:
-    #   "above_or_rising" — RSI > level OR rising N bars (default / original)
-    #   "above"           — RSI > level only
-    #   "below"           — RSI < level (oversold-bounce entry)
-    "RSI_MODE":          "above_or_rising",
-    "SWING_LOW_BARS":    10,      # Lookback bars for structural support floor
-    "SUPPORT_TOUCH_PCT": 0.015,   # Price within 1.5% of support = "at support"
-    "MIN_SL_OFFSET":     5.0,     # Minimum SL distance in ₹
-    "VOLUME_MA_PERIOD":  20,
-    "VOLUME_MULTIPLIER": 1.5,     # Bar volume must exceed this × the volume MA
-    "RR_RATIO":          1.5,     # target_offset = sl_offset × RR_RATIO
-    "MACD_CROSS_BARS":   3,       # Allow entry up to N bars after a bullish cross
-    "MACD_FAST":         12,      # MACD fast EMA period
-    "MACD_SLOW":         26,      # MACD slow EMA period
-    "MACD_SIGNAL":       9,       # MACD signal EMA period
-    "DEPTH_MIN_RATIO":   0.4,     # Order-book buy-side ratio floor (live only)
-    # Tail length fed to TA-Lib per scan. 120 bars lets RSI(14)/ADX(14)/MACD(26,9)
-    # fully converge (Wilder smoothing) while skipping multi-day warmup history.
-    "TALIB_LOOKBACK":    120,
+    # BN Risk — target/stop/trailing on the underlying BankNifty index (points)
+    "BN_TARGET_POINTS":     35.0,
+    "BN_STOPLOSS_POINTS":   18.0,
+    "BN_BREAKEVEN_TRIGGER": 12.0,
+    "BN_TRAIL_TRIGGER":     18.0,
+    "BN_TRAIL_DISTANCE":    12.0,
+    "BN_STARTING_FUNDS":    100_000.0,   # ₹ — seeds the persisted funds balance once
 
-    # Entry-condition toggles (all 8 required when enabled; disabled = auto-pass)
-    "COND_NEAR_SUPPORT":    True,
-    "COND_BULLISH_PATTERN": True,
-    "COND_ADX":             True,
-    "COND_RSI":             True,
-    "COND_MACD_CROSS":      True,
-    "COND_VOLUME_SURGE":    True,
-    "COND_ABOVE_VWAP":      True,
-    "COND_DEPTH":           True,
+    # BN Options Pricing — synthetic Black-Scholes premium, no real option data
+    "BN_RISK_FREE_RATE": 0.065,
+    "BN_IV_MIN":         0.20,
+    "BN_IV_MAX":         0.70,
+    "BN_IV_DEFAULT":     0.28,
+    "BN_IV_LOOKBACK_BARS": 50,
+    "BN_IV_MANUAL_ENABLED": False,
+    "BN_IV_MANUAL_VALUE":   0.30,
 
-    # Trend-gate toggles (disabled gate = treated as green)
-    "GATE_STOCK_DAILY":  True,
-    "GATE_STOCK_HOURLY": True,
-    "GATE_NIFTY_DAILY":  True,
-    "GATE_NIFTY_VWAP":   True,
-
-    # Custom entry rules (OR-of-ANDs; see app/engine/conditions.py).
-    # mode "and" = extra condition on top of the fixed 8; "replace" = rules
-    # replace the fixed conditions (trend gates still apply). Treat the dict as
-    # IMMUTABLE — validation returns fresh copies; never mutate in place.
-    "CUSTOM_ENTRY_RULES": {"enabled": False, "mode": "and", "groups": []},
+    # BN Options Costs — placeholder rates (India options STT/txn charges
+    # change periodically; confirm current figures before trusting absolute
+    # backtest ₹ P&L — relative signal quality is insensitive to this).
+    "BN_COST_BROKERAGE_FLAT": 20.0,      # ₹ per executed order, flat
+    "BN_COST_STT_SELL_PCT":   0.001,     # STT on sell-side premium value
+    "BN_COST_TXN_PCT":        0.0005,    # exchange transaction charge
+    "BN_COST_GST_PCT":        0.18,      # GST on (brokerage + txn)
+    "BN_COST_SEBI_PCT":       0.000001,  # SEBI turnover fee
 
     # Tick-wise engine
-    "TICK_EVAL_INTERVAL_MS": 100,   # cadence of the ACTIVE evaluation loop
-    "FULL_SCAN_INTERVAL_S":  300,   # full-watchlist indicator refresh cadence
+    "TICK_EVAL_INTERVAL_MS": 100,
 
     # Backtest
-    "BACKTEST_TIMEFRAME":   "5m",   # bar interval the replay steps through
-    "BACKTEST_MODE":  "intraday",   # intraday (EOD square-off) | delivery (overnight holds)
-    "BACKTEST_WARMUP_DAYS": 7,      # extra calendar days fetched for warmup
-    "SLIPPAGE_BPS":         2.0,    # slippage applied to entry and exit fills
-
-    # Realistic intraday-equity round-trip cost model (fractions of turnover)
-    "COST_BROKERAGE_PCT": 0.0003,     # per executed order
-    "COST_BROKERAGE_CAP": 20.0,       # ₹ cap per order
-    "COST_STT_SELL":      0.00025,    # securities txn tax, sell side only
-    "COST_TXN_CHARGE":    0.0000297,  # NSE exchange transaction charge
-    "COST_GST":           0.18,       # GST on (brokerage + txn charge)
-    "COST_STAMP_BUY":     0.00003,    # stamp duty, buy side only
-    "COST_SEBI":          0.000001,   # SEBI turnover fee
+    "BACKTEST_WARMUP_DAYS": 7,
+    "SLIPPAGE_BPS":         2.0,
 }
 
 _runtime_overrides: Dict[str, Any] = {}
 _thread_ctx = threading.local()
 
 # Bumped on every runtime-override mutation (Settings page apply/reset) — the
-# single choke point for "did a dynamic tunable change". Callers that cache
-# results derived from dynamic cfg values (e.g. the indicators-viewer row
-# memo) fold this into their cache key so a settings change invalidates them
-# without needing its own bespoke signal.
+# single choke point for "did a dynamic tunable change".
 _settings_generation = 0
 
 
@@ -253,8 +228,8 @@ def clear_runtime_overrides(keys: Optional[List[str]] = None) -> None:
 def thread_overrides(overrides: Dict[str, Any]) -> Iterator[None]:
     """
     Scope config overrides to the current thread. Used by backtest day-workers
-    so a run's parameters never leak into the live engine, whose scan-pool
-    threads and event loop keep reading the global runtime values.
+    so a run's parameters never leak into the live engine, whose event loop
+    keeps reading the global runtime values.
     """
     prev = getattr(_thread_ctx, "overrides", None)
     merged = dict(prev) if prev else {}

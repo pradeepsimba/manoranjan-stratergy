@@ -148,21 +148,13 @@ async def fetch_today_candles(
     intervals: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, List[Candle]]]:
     if intervals is None:
-        intervals = [cfg.INTERVAL_5M, cfg.INTERVAL_1H]
+        intervals = [cfg.INTERVAL_5M]
     stocks = [{"stockname": sym, "stock_symbol": tok}
               for sym, tok in watchlist.items()]
     if not stocks:
         return {}
     from_date, to_date = _today_range()
     return await _fetch_all(stocks, intervals, from_date, to_date)
-
-
-async def fetch_nifty_candles() -> List[Candle]:
-    """Today's NIFTY 5m session bars (daily gate + session VWAP)."""
-    stocks           = [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}]
-    today_d, today_t = _today_range()
-    today_data       = await _fetch(stocks, [cfg.INTERVAL_5M], today_d, today_t)
-    return today_data.get(cfg.NIFTY50_TOKEN, {}).get(cfg.INTERVAL_5M, [])
 
 
 async def fetch_indicator_history(

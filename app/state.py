@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import threading
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
-from app.models import Candle, Position, TradingPhase
+from app.models import BNDiagnostic, BNTrade, Candle, TradingPhase
 
 
 class AppState:
@@ -11,8 +11,8 @@ class AppState:
     _creation_lock = threading.Lock()
 
     def __new__(cls) -> "AppState":
-        # Double-checked locking: get_state() runs in every scan worker on every
-        # tick, so the steady-state path must not serialize threads on a lock.
+        # Double-checked locking: get_state() runs on the event loop AND from
+        # the WS tick handler, so the steady-state path must not serialize.
         inst = cls._instance
         if inst is None:
             with cls._creation_lock:
@@ -29,73 +29,44 @@ class AppState:
         self.ws_status:  str          = "—"
         self.api_status: str          = "—"
 
-        # ── Universe & Watchlist ──────────────────────────────────────────────
-        # Gemini AI shortlist: list of trading symbols e.g. ["RELIANCE", "TCS"]
-        self.gemini_shortlist: List[str]      = []
-        # Active watchlist (Gemini AI-selected): {symbol: token} — trading subset
+        # ── Scanner universe (Scanner feature ONLY — the BN engine never
+        # writes these; it has its own fixed universe in cfg.BN_*) ───────────
         self.active_watchlist: Dict[str, str] = {}
-        # Full pre-Gemini watchlist: {symbol: token} — all high-volume stocks
         self.full_watchlist:   Dict[str, str] = {}
-        # Reverse map {token: symbol} for the FULL watchlist — lets the tick loop
-        # iterate the dirty-token set directly without scanning the whole dict.
         self.token_to_name:    Dict[str, str] = {}
 
-        # ── Candle stores (symbol → list[Candle], capped at 300 bars) ─────────
+        # ── Candle stores — BankNifty index + the 12 BN stocks, all keyed by
+        # TOKEN. Capped at 300 bars (deque maxlen set on assignment). ─────────
         self.candles_5m: Dict[str, List[Candle]] = {}
-        self.candles_1h: Dict[str, List[Candle]] = {}
-
-        # Monotonic per-token counter, bumped once per accepted 5m candle
-        # upsert (same lock as the mutation — see market_data._process_tick).
-        # Lets a reader cheaply detect "this token's 5m data hasn't changed
-        # since I last looked" without re-walking/re-resampling candles_5m.
         self.tick_version: Dict[str, int] = {}
+        self.bn_index_candles_5m: List[Candle] = []
 
-        # NIFTY 50 session 5m bars — index trend gate + session VWAP
-        self.nifty_candles_5m: List[Candle] = []
+        # ── Live prices (keyed by SYMBOL NAME; BankNifty index kept separately) ─
+        self.ltp:          Dict[str, float] = {}
+        self.bn_index_ltp: float            = 0.0
 
-        # ── Live prices ───────────────────────────────────────────────────────
-        self.ltp:       Dict[str, float] = {}   # symbol → latest LTP
-        self.nifty_ltp: float            = 0.0
-        # Order book depth — written by WS thread, read by scan workers.
-        # GIL-protected dict ops (same pattern as ltp) make this safe in CPython.
-        self.depth: Dict[str, dict] = {}        # symbol → {bid,ask,spread,buy_qty,sell_qty,ratio}
+        # ── The single active Bank Nifty options trade ────────────────────────
+        self.active_trade:   Optional[BNTrade] = None
+        self.closed_trades:  List[BNTrade]     = []   # today's closed trades
+        self.last_trade_candle: Optional[str]  = None  # dedupe same-5m-bar re-entry
+        self.last_exit_time: Optional[str]     = None  # ISO timestamp, 60s cooldown
+        self.daily_pnl:      float             = 0.0
+        # Running paper-account balance — persists ACROSS days (see database's
+        # _BN_FUNDS key), unlike daily_pnl which resets every EOD.
+        self.funds: float = 0.0
 
-        # ── Positions ─────────────────────────────────────────────────────────
-        # `positions` holds ONLY currently-open trades, so len() is a true
-        # concurrent count. Closed trades move to `closed_positions` for the
-        # day's log / dashboard.
-        self.positions:        Dict[str, Position] = {}   # symbol → OPEN Position
-        self.closed_positions: List[Position]      = []   # today's CLOSED trades
-        self.traded_today:     Set[str]            = set()
-        self.daily_pnl:        float               = 0.0
+        # ── Latest entry-loop diagnostic ("why didn't it fire") for the dashboard ─
+        self.bn_diagnostic: Optional[BNDiagnostic] = None
+        self.last_evaluated_bar: Optional[str]     = None   # dedupe: one eval per closed bar
 
-        # ── Scan diagnostics ──────────────────────────────────────────────────
-        # Written by scan worker threads, read by the event loop (dashboard /
-        # API), so all access goes through the lock below to avoid a
-        # "dict changed size during iteration" race.
-        self.last_scan_results: Dict[str, dict] = {}
-        self._scan_results_lock: threading.Lock = threading.Lock()
-        self.last_5m_bar_time:  Optional[str]   = None   # "HH:MM" of last scanned bar
+        # ── Live-price ticker push (100ms delta broadcast) ────────────────────
+        self.dirty_ticks_push: set = set()
 
-        # Per-symbol indicator snapshot — written by scan workers on every tick,
-        # read by the event loop for the WebSocket broadcast. GIL-protected dict
-        # ops make this safe in CPython without an extra lock (same as ltp).
-        self.indicator_snapshot: Dict[str, dict] = {}
-
-        # ── Tick-wise engine ──────────────────────────────────────────────────
-        # Tokens that received a tick since the last evaluation cycle. The WS
-        # thread adds; the tick loop swaps it out and evaluates those stocks.
-        self.dirty_ticks: Set[str] = set()
-        self.dirty_ticks_push: Set[str] = set()
-
-        # Per-token locks: each symbol's candle list gets its own lock so WS
-        # tick writes and ThreadPoolExecutor scan reads don't contend across
-        # unrelated stocks.
+        # Per-token locks: each instrument's candle list gets its own lock so
+        # WS tick writes and the tick loop don't contend across unrelated tokens.
         self._token_locks:      Dict[str, threading.Lock] = {}
         self._token_locks_meta: threading.Lock            = threading.Lock()
-
-        # Separate lock for the shared NIFTY candle lists.
-        self._nifty_lock: threading.Lock = threading.Lock()
+        self._bn_index_lock: threading.Lock = threading.Lock()
 
     def candle_lock(self, token: str) -> threading.Lock:
         """Return (and lazily create) the per-token candle lock."""
@@ -106,27 +77,6 @@ class AppState:
                 if token not in self._token_locks:
                     self._token_locks[token] = threading.Lock()
                 return self._token_locks[token]
-
-    # ── Scan-results access (thread-safe) ──────────────────────────────────────
-    def record_scan(self, symbol: str, result: dict) -> None:
-        """Worker-thread write of a per-stock scan diagnostic."""
-        with self._scan_results_lock:
-            # Pop-then-insert so dict order == recency: re-assigning an existing
-            # key keeps its old position, which would freeze the dashboard's
-            # [-N:] "most recent scans" slice on the first-inserted symbols.
-            self.last_scan_results.pop(symbol, None)
-            self.last_scan_results[symbol] = result
-
-    def scan_snapshot(self) -> list:
-        """Event-loop read: a consistent (symbol, result) list snapshot."""
-        with self._scan_results_lock:
-            return list(self.last_scan_results.items())
-
-    def clear_scan_results(self) -> None:
-        with self._scan_results_lock:
-            self.last_scan_results.clear()
-            self.indicator_snapshot.clear()
-            self.depth.clear()
 
 
 def get_state() -> AppState:

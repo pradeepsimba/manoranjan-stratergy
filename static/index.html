@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NSE Paper Trader</title>
-  <meta name="description" content="Live NSE equity intraday paper-trading dashboard">
+  <title>Bank Nifty Options Paper Trader</title>
+  <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
   <link rel="stylesheet" href="/css/dashboard.css">
   <script>
     (function(){
@@ -13,24 +13,6 @@
     })();
   </script>
   <style>
-    /* Watchlist runtime controls */
-    .wl-controls { display: flex; gap: 8px; margin-bottom: 10px; }
-    .wl-controls .field-input { flex: 1; min-width: 0; }
-    .wl-add-btn {
-      background: var(--prime); color: var(--on-prime); border: none;
-      border-radius: var(--r-sm); font-size: 12px; font-weight: 700;
-      padding: 0 16px; cursor: pointer;
-    }
-    .wl-add-btn:hover { background: #62c5ff; }
-    .stock-chip.removable { padding-right: 4px; }
-    .chip-x {
-      background: none; border: none; color: inherit; opacity: .55;
-      cursor: pointer; font-size: 12px; padding: 0 4px; line-height: 1;
-    }
-    .chip-x:hover { opacity: 1; color: var(--neg); }
-    .chip-ai::before { content: '✦ '; opacity: .8; }
-    .wl-hint { font-size: 10px; color: var(--txt-3); margin-top: 6px; }
-
     /* Backtest per-run overrides */
     .bt-adv { margin: 8px 0 4px; }
     .bt-adv summary {
@@ -44,7 +26,7 @@
     .bt-adv-hint { font-size: 10px; color: var(--txt-3); margin-top: 4px; }
     .bt-adv-hint a { color: var(--prime); }
 
-    /* Backtest run meta: timeframe + which strategy was applied */
+    /* Backtest run meta */
     .bt-meta {
       display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center;
       margin-bottom: 10px;
@@ -56,9 +38,6 @@
       font-size: 11px; color: var(--txt-2);
     }
     .bt-meta .tag b { color: var(--txt); font-weight: 700; }
-    .bt-meta .tag.tf { background: var(--prime-container); border-color: var(--prime-dim); color: var(--prime); }
-    .bt-meta .tag.tf b { color: var(--prime); }
-    .bt-meta .tag.ovr { background: var(--accent-2-bg); border-color: var(--accent-2); color: var(--accent-2); }
     .bt-meta .strat { font-size: 11px; color: var(--txt-2); }
     .bt-meta .strat b { color: var(--txt); }
 
@@ -71,6 +50,31 @@
     }
     .bt-viz-oc { display: flex; flex-direction: column; justify-content: center; }
     @media (max-width: 640px) { .bt-viz { grid-template-columns: 1fr; } }
+
+    /* Trade panel */
+    .trade-card {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 14px;
+      padding: 10px 2px;
+    }
+    .trade-cell { display: flex; flex-direction: column; gap: 2px; }
+    .trade-cell .lbl { font-size: 10px; color: var(--txt-3); text-transform: uppercase; letter-spacing: .03em; }
+    .trade-cell .val { font-size: 14px; font-weight: 700; color: var(--txt); }
+    @media (max-width: 640px) { .trade-card { grid-template-columns: repeat(2, 1fr); } }
+
+    /* Entry loop diagnostics */
+    .gate-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 5px 0; border-bottom: 1px solid var(--edge-soft); font-size: 12px;
+    }
+    .gate-row:last-child { border-bottom: none; }
+    .gate-row .g-lbl { color: var(--txt-2); }
+    .gate-row .g-val { font-weight: 600; }
+    .no-trade-reason {
+      margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm);
+      background: var(--surf); border: 1px solid var(--edge-soft);
+      font-size: 12px; color: var(--txt-2);
+    }
+    .no-trade-reason.ready { color: var(--pos); border-color: var(--pos); }
   </style>
 </head>
 <body>
@@ -84,7 +88,7 @@
         stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <div class="brand-text">
-      <span class="brand-name">NSE Paper Trader</span>
+      <span class="brand-name">Bank Nifty Options</span>
       <span class="brand-sub" id="last-bar-time">Live</span>
     </div>
   </div>
@@ -102,18 +106,16 @@
 
   <nav class="nav-seg" aria-label="Pages">
     <a href="/" class="active">Dashboard</a>
-    <a href="/indicators">Indicators</a>
+    <a href="/scanner">Scanner</a>
     <a href="/settings">Settings</a>
   </nav>
 
   <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" aria-label="Toggle theme">
-    <!-- Sun: shown in dark mode to switch to light -->
     <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
       <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
         stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
     </svg>
-    <!-- Moon: shown in light mode to switch to dark -->
     <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -124,60 +126,53 @@
 <!-- ── Stat strip ──────────────────────────────────────────────────────────── -->
 <div class="stat-strip">
   <div class="stat-card">
-    <span class="stat-label">NIFTY 50</span>
-    <span class="stat-value" id="stat-nifty">—</span>
+    <span class="stat-label">BANKNIFTY</span>
+    <span class="stat-value" id="stat-bnltp">—</span>
   </div>
   <div class="stat-card" id="card-pnl">
     <span class="stat-label">Daily P&amp;L</span>
     <span class="stat-value" id="stat-pnl">—</span>
   </div>
   <div class="stat-card">
-    <span class="stat-label">Open Positions</span>
-    <span class="stat-value" id="stat-open">—</span>
+    <span class="stat-label">Funds</span>
+    <span class="stat-value" id="stat-funds">—</span>
   </div>
   <div class="stat-card">
-    <span class="stat-label">Watchlist</span>
-    <span class="stat-value" id="stat-watch">—</span>
+    <span class="stat-label">Active Trade</span>
+    <span class="stat-value" id="stat-active">—</span>
   </div>
 </div>
 
 <!-- ── Main grid ───────────────────────────────────────────────────────────── -->
 <div class="main-grid">
 
-  <!-- LEFT: Positions + Scans ──────────────────────────────────────────────── -->
+  <!-- LEFT: Trade + Closed trades ──────────────────────────────────────────── -->
   <div class="col">
 
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Positions</span>
-        <span id="pos-count" class="badge gray">0</span>
+        <span class="panel-title">Active Trade</span>
+        <span id="trade-badge" class="badge gray">none</span>
       </div>
-      <div class="tbl-wrap">
-        <table class="cardify">
-          <thead><tr>
-            <th>Symbol</th><th>Status</th><th>Entry</th><th>Time</th>
-            <th>Qty</th><th>SL</th><th>Target</th><th>LTP</th><th>P&amp;L ₹</th>
-          </tr></thead>
-          <tbody id="positions-tbody">
-            <tr><td colspan="9" class="empty-cell">No positions yet</td></tr>
-          </tbody>
-        </table>
+      <div class="panel-body">
+        <div id="trade-empty" class="empty-cell">No active trade</div>
+        <div id="trade-card" class="trade-card" style="display:none"></div>
       </div>
     </div>
 
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Scan Results</span>
-        <div class="scan-meta">
-          <span class="scan-pass" id="scan-pass">0 signals</span>
-          <span class="scan-skip" id="scan-skip">0 skipped</span>
-        </div>
+        <span class="panel-title">Today's Trades</span>
+        <span id="closed-count" class="badge gray">0</span>
       </div>
       <div class="tbl-wrap">
-        <table>
-          <thead><tr><th>Symbol</th><th>Result</th><th>Detail</th></tr></thead>
-          <tbody id="scans-tbody">
-            <tr><td colspan="3" class="empty-cell">Waiting for scans…</td></tr>
+        <table class="cardify">
+          <thead><tr>
+            <th>Dir</th><th>Option</th><th>Entry Idx</th><th>Exit Idx</th>
+            <th>Entry Prem</th><th>Exit Prem</th><th>Outcome</th><th>P&amp;L ₹</th>
+          </tr></thead>
+          <tbody id="closed-tbody">
+            <tr><td colspan="8" class="empty-cell">No trades yet today</td></tr>
           </tbody>
         </table>
       </div>
@@ -185,26 +180,25 @@
 
   </div>
 
-  <!-- RIGHT: AI Watchlist + Backtest ───────────────────────────────────────── -->
+  <!-- RIGHT: Entry Loop Monitor + Backtest ─────────────────────────────────── -->
   <div class="col">
 
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Tradeable Watchlist</span>
-        <span id="gemini-count" class="badge gray">0</span>
+        <span class="panel-title">Entry Loop Monitor</span>
+        <span id="entry-time" class="badge gray">—</span>
       </div>
       <div class="panel-body">
-        <div class="wl-controls">
-          <input class="field-input" id="wl-input" list="wl-options"
-                 placeholder="Add symbol from today's universe…"
-                 onfocus="loadUniverse()" onkeydown="if(event.key==='Enter')wlAdd()">
-          <datalist id="wl-options"></datalist>
-          <button class="wl-add-btn" onclick="wlAdd()">Add</button>
+        <div class="tbl-wrap">
+          <table class="cardify">
+            <thead><tr><th>Leader</th><th>Open</th><th>Close</th><th>Volume</th><th>Surge</th></tr></thead>
+            <tbody id="leader-tbody">
+              <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
+            </tbody>
+          </table>
         </div>
-        <div class="chip-cloud" id="gemini-list">
-          <span class="muted-text">Building at 09:00 IST…</span>
-        </div>
-        <div class="wl-hint">✦ = picked by the AI screen · × removes a stock (blocked while it has an open position)</div>
+        <div id="gate-rows"></div>
+        <div id="no-trade-reason" class="no-trade-reason">—</div>
       </div>
     </div>
 
@@ -219,7 +213,6 @@
         </div>
       </div>
       <div class="panel-body">
-        <!-- Past run history strip -->
         <div id="bt-history" class="bt-hist-wrap" style="display:none">
           <div class="bt-hist-label">Recent Runs</div>
           <div id="bt-hist-list" class="bt-hist-list"></div>
@@ -235,52 +228,24 @@
             <input class="field-input" id="bt-to" type="date">
           </div>
           <div class="field">
-            <label class="field-label" for="bt-capital">Capital ₹</label>
-            <input class="field-input" id="bt-capital" type="number"
-              min="1000" step="1000" value="40000" style="width:110px">
-          </div>
-          <div class="field">
             <label class="field-label" for="bt-slip">Slippage bps</label>
             <input class="field-input" id="bt-slip" type="number"
               min="0" step="0.5" value="2" style="width:90px">
           </div>
-          <div class="field">
-            <label class="field-label" for="bt-tf">Timeframe</label>
-            <!-- Static intraday fallbacks so the dropdown is never blank even if
-                 /api/timeframes is unavailable; dashboard.js refreshes it.
-                 Values = the data server's REAL interval ids (hourly is 60m). -->
-            <select class="field-input" id="bt-tf" style="width:90px">
-              <option value="1m">1m</option>
-              <option value="3m">3m</option>
-              <option value="5m" selected>5m</option>
-              <option value="10m">10m</option>
-              <option value="15m">15m</option>
-              <option value="30m">30m</option>
-              <option value="60m">60m</option>
-              <option value="1d">1d</option>
-            </select>
-          </div>
-          <div class="field">
-            <label class="field-label" for="bt-mode">Mode</label>
-            <!-- intraday = EOD square-off, days independent; delivery = one
-                 portfolio, overnight holds, square-off at range end.
-                 1d bars are always positional → dashboard.js locks this to
-                 delivery when the 1d timeframe is selected. -->
-            <select class="field-input" id="bt-mode" style="width:100px">
-              <option value="intraday" selected>Intraday</option>
-              <option value="delivery">Delivery</option>
-            </select>
-          </div>
           <button class="btn-run" onclick="runBacktest()">Run</button>
+        </div>
+        <div class="bt-adv-hint" style="margin-bottom:6px">
+          BankNifty history is self-recorded day by day as the live engine runs
+          (the market-data server has no historical archive for the index itself) —
+          the runnable date range grows over time.
         </div>
         <details class="bt-adv">
           <summary>Strategy overrides for this run (optional)</summary>
           <textarea id="bt-overrides" class="field-input bt-ovr" rows="3"
-            placeholder='{"RR_RATIO": 2.0, "ADX_THRESHOLD": 25, "COND_MACD_CROSS": false}'></textarea>
+            placeholder='{"BN_TARGET_POINTS": 40, "BN_SAME_DIRECTION_REQUIRED": 4}'></textarea>
           <div class="bt-adv-hint">
             JSON of setting keys → values, applied to this run only (live trading is untouched).
-            Keys are the same as on the <a href="/settings">Settings page</a> — strategy, risk,
-            conditions, gates, costs, scan window.
+            Keys are the same as on the <a href="/settings">Settings page</a>.
           </div>
         </details>
         <div id="bt-meta" class="bt-meta" style="display:none"></div>
@@ -298,15 +263,12 @@
         <div class="tbl-wrap bt-tbl">
           <table>
             <thead><tr>
-              <th>Symbol</th><th>Entry ₹</th><th>Entry Time</th>
-              <th>Exit ₹</th><th>Exit Time</th>
-              <th>Qty</th><th>Outcome</th>
-              <th>RSI</th><th>ADX</th><th>MACD</th>
-              <th>Support ₹</th><th>Pattern</th>
-              <th>Net ₹</th><th>R</th>
+              <th>Dir</th><th>Option</th><th>Entry Idx</th><th>Entry Time</th>
+              <th>Exit Idx</th><th>Exit Time</th><th>Outcome</th>
+              <th>Entry Prem</th><th>Exit Prem</th><th>Net ₹</th><th>R</th>
             </tr></thead>
             <tbody id="bt-trades">
-              <tr><td colspan="14" class="empty-cell">No trades yet</td></tr>
+              <tr><td colspan="11" class="empty-cell">No trades yet</td></tr>
             </tbody>
           </table>
         </div>

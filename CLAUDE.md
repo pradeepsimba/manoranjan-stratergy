@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An **NSE equity intraday paper-trading** app (FastAPI). It screens stocks pre-market with Gemini, streams live 5-minute data over WebSocket, evaluates a multi-signal long-only strategy **tick-by-tick** (8 conditions live, 7 in backtest — see parity caveat below), simulates fills (no real broker), and persists everything to PostgreSQL. It also has a **backtest** engine that replays the identical strategy on historical data.
+A **Bank Nifty options paper-trading** app (FastAPI), ported from a standalone JS prototype (`c.html`). It streams live 5-minute BankNifty + 6 leader-stock data over WebSocket, evaluates a leader-momentum + composite-indicator strategy **tick-by-tick**, decides BUY (long ATM Call) / SELL (long ATM Put), simulates the option leg's premium via **synthetic Black-Scholes pricing** (no real options-chain data anywhere — see "Options pricing" below), and persists everything to PostgreSQL. It also has a **backtest** engine that replays the identical strategy on historical data.
 
-Single process, single Uvicorn worker by design — all state lives in one in-process singleton (`AppState`).
+Single process, single Uvicorn worker by design — all state lives in one in-process singleton (`AppState`). At most **one active trade** at a time (matches the source prototype — no concurrent positions).
 
-**Everything strategy-related is runtime-dynamic.** All tunables (risk, strategy params, entry-condition/trend-gate toggles, session timings, costs, Gemini screen, tick cadence) are editable live from the `/settings` page — no restart — persisted in the `app_settings` table and re-applied on startup. The tradeable watchlist is editable mid-session from the dashboard. Backtests accept per-run strategy overrides that never touch live values. See "Dynamic settings layer" below.
+**Everything strategy-related is runtime-dynamic.** All tunables (gates, risk, pricing, costs, session timings, tick cadence) are editable live from the `/settings` page — no restart — persisted in the `app_settings` table and re-applied on startup. Backtests accept per-run strategy overrides that never touch live values. See "Dynamic settings layer" below.
 
 ## Run
 
 ```bash
 # Docker (recommended — builds the TA-Lib C library)
-cp .env.example .env          # set GEMINI_API_KEY + POSTGRES_DSN
+cp .env.example .env          # set POSTGRES_DSN
 docker compose up -d --build
 docker compose logs -f app    # watch the phase driver
 
@@ -23,7 +23,7 @@ pip install -r requirements.txt
 python main.py                # serves http://0.0.0.0:8080
 ```
 
-- Dashboard: `http://localhost:8080` (live status, positions, scans, backtest runner).
+- Dashboard: `http://localhost:8080` (live status, active trade, entry-loop diagnostics, backtest runner).
 - `TA-Lib` (the Python pkg) needs the **native C library** present at build time — the Dockerfile compiles it; for a local venv install it on the host first (`brew install ta-lib`, or build from source).
 - There is **no test suite**. Validate changes with `python -m compileall -q app main.py` and by reading the flow.
 
@@ -31,120 +31,112 @@ python main.py                # serves http://0.0.0.0:8080
 
 - **Market data server** `35.234.219.141` (self-signed cert, `verify=False`):
   - REST `:8000/api/historical-data/` — historical candles (POST, batched 100/req).
-  - REST `:8000/api/clientstatus/` — the day's high-volume stock list `[[rank, name, token], ...]`.
-  - WebSocket `:8083/historical-data` — live 5m + 1h ticks.
-- **Gemini** (`google-genai` SDK) — pre-market news screen with Google-Search grounding.
+  - REST `:8000/api/clientstatus/` — the day's high-volume stock list `[[rank, name, token], ...]` (used only by the independent Scanner feature — see below).
+  - WebSocket `:8083/historical-data` — live 5m ticks.
+  - **Matching quirk:** the server matches a historical-data request by **`stockname` text**, not solely by `stock_symbol` token — an exact-token-but-wrong-name request silently returns zero candles (bit us for Kotak: the client-status canonical name is `"Kotak Bank"`, not `"Kotak Mahindra Bank"`). If a stock in `cfg.BN_ALL_STOCKS` ever starts returning empty history, check its name against `/api/clientstatus/` first.
+  - **No historical archive for the BankNifty index itself** (confirmed empirically — every `from_date`/`to_date` range returns only the CURRENT day's partial session), unlike NIFTY 50 and every individual stock, which both return full multi-day history. This is why BankNifty history is **self-recorded** into our own `bn_index_bars` table instead of fetched live for backtests — see "Options pricing" / "Self-recorded BankNifty history" below. Don't "fix" the backtest data loader to fetch BankNifty from the REST API over a date range — it will silently return only today, every time.
 - **PostgreSQL** via `asyncpg`.
 
 ## Architecture / daily flow
 
 Driven by `scheduler.SchedulerService._phase_driver` (IST wall clock):
 
-1. **09:00 PRE_MARKET** — `fetch_active_watchlist()` (client status) → `full_watchlist = {name: token}` (ALL high-volume stocks). `analyse_stocks()` (Gemini) returns bullish names → `active_watchlist` = the **tradeable** subset. Empty/failed Gemini ⇒ fall back to the first `GEMINI_MAX_STOCKS` of the full list (capped so the WS subscription can't overflow the server buffer).
-2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h + NIFTY, fetched concurrently via `asyncio.gather`), then `market_data.start()` opens the WS — subscribed to the **active** (tradeable) subset only.
-3. **09:45–15:30 ACTIVE** — `_run_active_phase()` is a **tick-wise loop** every `TICK_EVAL_INTERVAL_MS` (default 100ms):
-   - `_tick_exits` — every open position's live price vs SL/target.
-   - `_tick_entries` — re-scan stocks that ticked since last cycle (`dirty_ticks`), on the **forming** 5m bar; fill those whose signals all align. Entries stop at 14:30 (CUTOFF); exits continue to 15:30.
-   - `_full_scan_all` — at entry and every 5 min, scans the **entire** `full_watchlist` to populate `indicator_snapshot` (for the `/indicators` page). Only `active_watchlist` stocks are `tradeable` and can fire signals; `scan_stock(..., tradeable=False)` updates indicators but never returns a signal. Non-Gemini stocks get no WS ticks, so this 5-min scan is their only indicator source.
-   - Heavy indicator math (`scan_stock`) runs in `_SCAN_POOL` (ThreadPoolExecutor); fills/exits/DB stay on the event loop.
-   - **Mid-session restart recovery:** if `active_watchlist` is empty on entering ACTIVE/CUTOFF, premarket + historical load run on the fly (retrying every 60s if the watchlist fetch fails). Today's positions/`traded_today`/`daily_pnl`/closed trades are then restored from the DB (`_restore_positions_from_db`) *before* the WS starts, and restored open symbols are force-added to the watchlists so their SL/target monitoring resumes. `_run_eod` performs the same restore so a restart after 15:30 still squares off orphaned OPEN rows and writes correct stats.
-4. **15:30 CLOSED** — `_run_eod()` squares off survivors, writes `daily_stats`, resets all daily state, then sleeps to the next premarket.
+1. **09:00 PRE_MARKET** — no-op. The universe is a static config constant (`cfg.BN_INDEX_TOKEN` + `cfg.BN_ALL_STOCKS`), not fetched — there's nothing that can fail here (unlike the deleted equity engine's Gemini/watchlist screen).
+2. **09:15 WAIT_ZONE** — `_load_all_historical()`: fetches 5 days of 5m history for the 11 BN stocks (fully archived, works fine) and MERGES (never replaces) today's BankNifty bars into whatever's already accumulated in `st.bn_index_candles_5m` from prior live sessions — see the historical-archive note above. Then `market_data.start()` opens a single WS connection subscribed to all 12 tokens (well under the server's ~40-entries-per-connection buffer limit, so no split connections needed like the old equity engine).
+3. **09:30–15:00 ACTIVE** (then 15:00–15:30 CUTOFF, exits only) — `_run_active_phase()` is a **tick-wise loop** every `TICK_EVAL_INTERVAL_MS` (default 100ms), running directly on the event loop (no thread pool — only 12 instruments, unlike the equity engine's hundreds):
+   - `_tick_exits` — if a trade is open, ratchet the trailing/breakeven stop and check target/stop against the live BankNifty price every cycle (this is also where the live option-premium mark is refreshed for the dashboard — Black-Scholes is closed-form, cheap enough to recompute every 100ms).
+   - `_tick_entries` — wall-clock bar-close detection: tracks `st.last_evaluated_bar`; the instant the BankNifty 5m candle list's last bar changes to a NEW bar, evaluates exactly once against that just-closed bar (`bn_entry_exit.evaluate_entry`). No polling/pending-signal latch needed (the deleted JS prototype needed one because it only polled every 3s; 100ms is fast enough to catch a bar close directly).
+4. **15:30 CLOSED** — `_run_eod()` squares off any survivor, writes `daily_stats`, **saves today's accumulated BankNifty bars to `bn_index_bars`** (the self-recording archive), persists `funds`, and resets per-day state. **`st.bn_index_candles_5m` is NOT cleared** — see below.
 
-Strategy core (shared by live **and** backtest, keep it that way): `check_trend` → `compute_indicators` → entry conditions → `calc_quantity`.
+Strategy core (shared by live **and** backtest, keep it that way): `bn_signals.*` (gates) → `bn_entry_exit.evaluate_entry` / `evaluate_exit` → `bn_pricing.*` (strike/expiry/premium).
 
-**Backtest fast path (same function, same math):** `compute_indicators` accepts keyword-only `ohlcv_window` (precomputed float64 array views that MUST end on the same bar as `candles_5m` — built once per symbol in `SymbolSeries.index_days`; when given, `candles_5m` only feeds the 3-bar pattern check, so the backtest passes just the last 3 bars), `session_vwap` (O(1) prefix-sum VWAP via `session_vwap_from_cumsums`), and `entry_short_circuit=True` (evaluates the cheap gates — support/pattern/VWAP/volume — first and skips the TA-Lib calls when one already vetoes the conjunctive entry; the returned `IndicatorResult` is then partial, which is fine because the caller rejects it). Live always calls with defaults so the dashboard gets the full snapshot. Don't reimplement any condition outside `compute_indicators` to "optimize" the backtest — pass precomputed inputs in instead.
+**c.html has no working backtest** (`runBacktest()` there is a confirmed empty stub) — this repo's backtest engine is a fresh design, not a port of anything, but it drives the exact same `evaluate_entry`/`evaluate_exit` functions the live scheduler calls. One deliberate improvement over what a literal port of the source's `checkExit` would have done: the backtest resolves SL/target touches with gap-at-open + intrabar high/low (see `app/backtest/fills.resolve_index_touch`), not a close-only check — there's no reference implementation to preserve fidelity with, so it follows this repo's own existing (equity-era) convention instead.
 
-**Entry conditions:** near_support, bullish_pattern, adx_ok, rsi_ok (>30 or rising 3 bars), macd_bullish_cross, volume_surge, price_above_vwap — **plus** `depth_bullish` (order-book buy-side ratio ≥ 0.4, i.e. not sell-skewed). Plus a 4-gate trend filter: stock daily-green, stock hourly-green, NIFTY daily-green, NIFTY above session-VWAP.
+**Entry gates (all must align):** sideways-range filter (BankNifty's last 5 closes must span ≥ `BN_SIDEWAYS_RANGE_MIN` points) → momentum filter (single strong candle, 2-candle combo, or ATR-relative impulsive move) → leader-stock direction vote (≥ `BN_SAME_DIRECTION_REQUIRED` of 6 leaders agree) → per-leader volume-surge count (≥ same threshold) → composite BN indicator gate (RSI level + MACD zero-cross + leader candle-pattern tally + EMA20/50 stack, scored bull vs bear). BUY → long ATM Call; SELL → long ATM Put. Always exactly 1 lot (`cfg.BN_LOT_SIZE = 30`) — no position sizing formula, unlike the old equity engine's risk-based `calc_quantity`.
 
-**Live = 8 conditions, backtest = 7 (parity caveat):** `depth_bullish` uses live order-book depth parsed from the WS `snap` field (`st.depth[symbol] = {bid, ask, spread, buy_qty, sell_qty, ratio}`). It defaults to **pass** when no snap data has arrived, so it only vetoes a clearly bearish book. Historical data has no order book, so the **backtest omits `depth_bullish`** — live is therefore slightly stricter than backtest.
+**Ported-but-adapted "strong quantity" gate:** the source (`c.html`) used a fixed absolute per-stock threshold on a raw per-tick trade-quantity feed this repo's WS protocol doesn't carry. This repo instead uses a **relative volume-surge** test — a leader's latest 5m bar volume vs. its own recent average (`BN_QTY_AVG_PERIOD`/`BN_QTY_SURGE_MULTIPLIER`) — verified against real historical volumes (hundreds of thousands/bar) before choosing this design; the source's absolute numbers (tens/hundreds) don't transfer across feeds.
 
-**Risk guards (`can_enter`):** max 3 concurrent open positions, no same-day re-entry, ₹2000 daily loss limit, ₹500 risk/trade.
+**Exit:** target/stop/breakeven/trailing on the underlying BankNifty index price (points, frozen at entry from `cfg.BN_TARGET_POINTS`/`BN_STOPLOSS_POINTS`/`BN_BREAKEVEN_TRIGGER`/`BN_TRAIL_TRIGGER`/`BN_TRAIL_DISTANCE` — a later Settings change never retroactively alters an already-open trade). Settlement is the **option premium P&L × lot size**, not raw index points (`(exit_premium - entry_premium) * 30`) — index points are kept on the trade only as a diagnostic (`index_pnl_points`).
+
+**Options pricing — fully synthetic, no real option-chain data:** ATM strike = `round(spot/100)*100`; expiry = next weekly Thursday 15:30 IST; premium = standard Black-Scholes off BankNifty spot + a realized-volatility estimate from its own 5m bar-close log-returns (annualized via 75 bars/day × 252 days/year — a deliberate deviation from the source's tick-based estimator, required so live and backtest can share one `estimate_iv` implementation; backtest has no tick stream to replay). Risk-free rate, IV bounds, and default IV are all dynamic settings. See `app/engine/bn_pricing.py`.
+
+**Self-recorded BankNifty history:** because the market-data server never returns more than "today" for the BankNifty index (see above), `scheduler._run_eod` writes the day's accumulated `bn_index_candles_5m` buffer into the `bn_index_bars` table every day (idempotent upsert by `start_time`). `app/backtest/data.load_backtest_data` reads BankNifty history **from this table**, not from the REST API — the runnable backtest date range grows by one day at a time as the live engine runs. The 11 BN stocks ARE fully archived on the external server, so they're still fetched directly for every backtest run.
 
 ## Dynamic settings layer
 
-- `app/config.py` holds **static** system values (endpoints, DSN, pool/buffer sizes) as plain attributes, and **dynamic** tunables in `_DEFAULTS`, resolved via module `__getattr__` with precedence: *thread-local overrides (backtest run) → runtime overrides (Settings page / DB) → default*. `cfg.X` therefore always returns the current value.
-- **Never copy a dynamic `cfg.X` into a module-level constant or default-argument value** — it freezes at import and silently stops being dynamic. Use `None` defaults resolved inside the function (see `calc_quantity`, backtest engine).
-- **Adding a tunable = two places:** a default in `config._DEFAULTS` **and** a SPEC entry in `app/services/settings.py` (label/type/bounds/group/`bt` flag). Time-of-day settings are virtual `"HH:MM"` SPEC keys expanded to their `*_HOUR`/`*_MIN` config pairs.
-- `cfg.thread_overrides(...)` may only be entered in **backtest worker threads** (`_simulate_day`), never on the event loop — live scan-pool threads must keep reading global values. Warmup days is passed explicitly into `load_backtest_data` for the same reason.
-- Entry-condition toggles live in `app/engine/conditions.py` — one `_CONDITIONS` table drives `build_entry_checks`/`failed_entry_checks` (live, full diagnostics) and `entry_ok` (backtest short-circuit); a disabled condition auto-passes.
-- **Custom entry rules** (`CUSTOM_ENTRY_RULES`, settings type `rules`): OR-of-ANDs clause groups over the `RULE_FIELDS` registry in `conditions.py`, validated by `validate_rules` (whitelists live beside the evaluator). Mode `and` = extra condition; `replace` = swaps out the fixed 8 (trend gates unaffected) **and disables `cheap_gates_veto`** — the short-circuit would wrongly reject rule sets that don't require the cheap conditions. Missing numeric data fails a clause EXCEPT `depth_ratio` (None→pass, live-only). It's a normal dynamic setting: persisted, resettable, self-healing, and per-run backtest-overridable. The Settings page renders it with a dedicated builder UI (`renderRuleBuilder` in settings.js), not the generic control. Trend-gate toggles are applied in `trend_filter.trend_blockers` (shared live + backtest); `check_trend` records the ACTUAL gate states so `Position.trend` / the DB `daily_green`/`hourly_green` columns stay honest diagnostics. The `entry_short_circuit` veto in `compute_indicators` calls `conditions.cheap_gates_veto`, which reads the same `_CONDITIONS` table — there is no separate copy to keep in sync.
-- Session timings are dynamic: the phase driver sleeps in **≤30s chunks** (`_sleep_toward`) and re-evaluates; premarket/EOD are deduplicated per date via `self._premarket_date` / `self._eod_date` — do not remove these guards or premarket (Gemini calls) and EOD (stats overwrite) re-run every 30s.
-- Manual watchlist edits (`POST /api/watchlist/add|remove`) mutate `active_watchlist`, restart the market-data WS (subscription filters are rebuilt on connect), and persist day-scoped under the `_WATCHLIST_OVERRIDES` key in `app_settings`; `_run_premarket` re-applies them after recovery/restart. Removal is refused (409) while the symbol has an open position.
+- `app/config.py` holds **static** system values (endpoints, DSN, the BN instrument universe, pool/buffer sizes, lot size) as plain attributes, and **dynamic** tunables in `_DEFAULTS`, resolved via module `__getattr__` with precedence: *thread-local overrides (backtest run) → runtime overrides (Settings page / DB) → default*. `cfg.X` therefore always returns the current value.
+- **Never copy a dynamic `cfg.X` into a module-level constant or default-argument value** — it freezes at import and silently stops being dynamic. This is why `BNTrade`/`BTPosition` **freeze** their risk parameters (target/stoploss/breakeven/trail) from cfg exactly once, at entry (`bn_entry_exit.open_trade_from_signal`) — that's a deliberate snapshot for correctness (an open trade's economics must not shift under it), not the anti-pattern the rule above warns about.
+- **Adding a tunable = two places:** a default in `config._DEFAULTS` **and** a SPEC entry in `app/services/settings.py` (label/type/bounds/group/`bt` flag). Time-of-day settings are virtual `"HH:MM"` SPEC keys expanded to their `*_HOUR`/`*_MIN` config pairs. An import-time assertion in `settings.py` raises `RuntimeError` if the two ever drift.
+- `cfg.thread_overrides(...)` may only be entered in **backtest worker threads** (`_simulate_day`), never on the event loop.
 - Backtest per-run overrides: `POST /api/backtest {overrides: {SPEC_KEY: value}}`, validated with `expand_changes(bt_only=True)` (only `bt: True` SPEC entries), recorded in `backtest_runs.params`, applied via `cfg.thread_overrides` inside each day worker.
-- Settings API: `GET /api/settings` (grouped describe), `PUT /api/settings {changes}` (validate → persist atomically (`replace_app_settings`, one transaction) → apply; a value equal to its default deletes the override row), `POST /api/settings/reset {keys?}`. Session-time changes are cross-validated (`validate_time_order`) on save, on partial reset, at startup load (self-heals to default timings), and — scoped to the scan/cutoff pair only — on backtest overrides.
+- Settings API: `GET /api/settings` (grouped describe), `PUT /api/settings {changes}` (validate → persist atomically (`replace_app_settings`, one transaction) → apply; a value equal to its default deletes the override row), `POST /api/settings/reset {keys?}`. Session-time changes are cross-validated (`validate_time_order`); indicator-period combos are cross-validated (`validate_bn_indicator_periods`, e.g. MACD fast < slow, lookback ≥ what RSI/EMA/MACD need to converge) on save, on partial reset, and at startup load (self-heals to defaults).
 
 ## Hard conventions — get these wrong and it breaks
 
-- **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today`, `depth` (order-book snap) are keyed by **SYMBOL NAME**. `full_watchlist` (all high-volume) and `active_watchlist` (Gemini-tradeable subset) are both `{name: token}`; `token_to_name` (all tokens → name) is the reverse bridge the tick loop iterates. Always map correctly.
-- **`positions` holds OPEN trades only.** Closing moves a position to `closed_positions` (in `paper_trade._finalize`). `len(positions)` is therefore a true *concurrent* count — do not reintroduce closed positions into it.
-- **Locking:** candle lists are mutated by the WS thread and read by pool workers — every shared-candle access goes through `st.candle_lock(token)`; NIFTY lists through `st._nifty_lock`. Positions/`daily_pnl`/`dirty_ticks` are mutated only on the event-loop thread (no lock needed); pool workers only *read* them.
-- **Candle lists are strictly chronological.** `market_data._upsert/_upsert_list` update the in-progress bar on an equal `start_time`, append on a newer one, and **drop** stale out-of-order bars (reconnect replays) — the day-suffix walk in `scan_stock` and the pattern checks depend on this ordering; don't remove the guard.
-- **`last_scan_results` order == recency.** `record_scan` pops-then-reinserts so the dashboard's `scan_snapshot()[-N:]` slices really are the N most recent scans; a plain key re-assignment would freeze them on first-inserted symbols.
-- **TA-Lib inputs:** pass raw NumPy `float64` arrays (built from candle slices), never DataFrames or `.ta` chains, into worker threads. Only the minimum lookback tail (`TALIB_LOOKBACK`) is materialized; session VWAP is the exception and uses today's bars.
-- **Session VWAP = today only.** `compute_indicators` must receive today's bars as `session_candles_5m` (live derives this in `scan_stock`); passing the multi-day buffer computes a wrong multi-day VWAP.
-- **No look-ahead in backtest:** at bar `t` an entry uses only bars `[..t]` and fills at `close[t]`; a position opened at `t` exits only on bars `> t`. Backtests have a **mode** (`BACKTEST_MODE` / per-run `mode`, UI "Mode"): `intraday` = days are independent (fresh portfolio, EOD square-off) and run in parallel, trades merge in day order; `delivery` = **positional** (`_simulate_range_intraday`): one portfolio across the range, chronological, overnight holds (gaps resolve at the open via `_try_exit`), square-off at each symbol's last in-range bar. The `1d` timeframe is always positional (`_simulate_range_daily`) — its bars ARE days. In both positional modes `traded_today` = no re-entry per run and `DAILY_LOSS_LIMIT` = run-level loss stop. The per-bar exits→entries loop is shared (`_replay_day`) — don't fork it.
+- **Keying:** `candles_5m` is keyed by **TOKEN** (numeric string) — the 11 BN stocks only; the BankNifty index has its OWN dedicated field, `bn_index_candles_5m` (a plain list, not a dict), with its own lock `st._bn_index_lock`. `ltp` is keyed by **SYMBOL NAME**; the index's live price is the separate `st.bn_index_ltp` float. Don't conflate the two — there is deliberately no "13th entry" in `candles_5m`/`ltp` for BankNifty.
+- **`st.bn_index_candles_5m` is never cleared at EOD** (unlike everything else, which resets daily) — it's the ONLY source of multi-day BankNifty depth (the composite indicator gate needs `BN_INDICATOR_LOOKBACK_BARS`, default 200, bars to converge; the external server can never supply more than ~75 bars/day). It persists and grows across real trading days within one long-running process, capped at `MAX_CANDLE_BUFFER` (300 bars, ~4 sessions). A restart loses it; `_load_all_historical`'s merge-not-replace logic (via `MarketDataService._upsert_list`) is what lets it survive a same-process day rollover.
+- **Single active trade.** `st.active_trade: Optional[BNTrade]` — not a dict. Closing sets it to `None` and appends to `st.closed_trades`. There is no concurrent-position concept anywhere in this engine (deliberately, matching the source).
+- **Locking:** `candles_5m` token locks and `_bn_index_lock` guard the WS-thread-vs-event-loop boundary — `MarketDataService._process_tick` (WS callback context) and the scheduler's tick loop are the only two touchpoints, and both go through `st.candle_lock(token)` / `st._bn_index_lock`.
+- **Candle lists are strictly chronological.** `market_data._upsert`/`_upsert_list` update the in-progress bar on an equal `start_time`, append on a newer one, and **drop** stale out-of-order bars (reconnect replays). `_load_all_historical`'s catch-up merge reuses `MarketDataService._upsert_list` directly (not a second copy) so there's exactly one implementation of "how a BankNifty bar gets folded in," whether it arrives via WS tick or REST catch-up.
+- **TA-Lib inputs:** pass raw NumPy `float64` arrays, never DataFrames, into `bn_signals.py`'s RSI/EMA calls. `bn_signals.bn_composite_indicator`'s MACD is **not** `talib.MACD`(which would force a signal line) — it's two plain `talib.EMA` calls subtracted, matching the source's raw EMA12-EMA26 zero-cross with no signal line at all.
+- **Shared decision core, not just shared formulas:** `bn_entry_exit.evaluate_exit` reads risk parameters (target/breakeven/trail) FROM THE TRADE OBJECT it's given, not from `cfg` — and it's called with either a live `BNTrade` (`app/models.py`) or a backtest `BTPosition` (`app/backtest/portfolio.py`) interchangeably, because the two dataclasses share the exact field names `evaluate_exit` touches (`direction`, `entry_index_price`, `current_sl`, `sl_stage`, `target`, `trail_trigger`, `trail_distance`, `breakeven_trigger`, `strike`, `option_type`, `expiry`). Don't rename a field on one without the other — this duck-typing is how backtest and live stay provably in sync without a shared decision function needing two call signatures.
+- **No look-ahead in backtest:** at bar `t` an entry uses only bars `[..t]`; IV/expiry/premium are computed from bar `t`'s own timestamp and closes `[..t]` only. A position opened at bar `t` exits only on bars `> t`. Backtest is **intraday-only** (fresh portfolio per day, EOD square-off, days run in parallel) — there is no positional/delivery/1d mode (nothing in the source ever holds an option position overnight).
+- **Options are cash-only, always exactly 1 lot** — there is no leverage/margin concept and no quantity-sizing formula anywhere in this engine (unlike the deleted equity engine's `calc_quantity`/`INTRADAY_LEVERAGE`).
 
 ## Layout
 
 ```
-main.py                      FastAPI app + lifespan (DB init → settings load → scheduler.start); serves /, /indicators, /settings
-app/config.py                static system config + dynamic tunables (defaults, runtime overrides, thread-local backtest overrides)
-app/state.py                 AppState singleton (candles, ltp, depth, positions, full/active watchlist, token_to_name, indicator_snapshot, locks, dirty_ticks)
-app/models.py                Candle (slots), Position, EntrySignal, IndicatorResult, TrendGate, enums
+main.py                      FastAPI app + lifespan (DB init → settings load → scheduler.start); serves /, /scanner, /settings
+app/config.py                static system config (incl. BN_INDEX_TOKEN/BN_ALL_STOCKS/BN_LEADER_STOCKS/BN_LOT_SIZE) + dynamic tunables
+app/state.py                 AppState singleton (candles_5m by token, bn_index_candles_5m, ltp, bn_index_ltp, active_trade, closed_trades, funds, bn_diagnostic, locks)
+app/models.py                Candle (slots), BNSignal, BNTrade, BNDiagnostic, enums
 app/engine/
-  entry_engine.py            scan_stock — the per-stock decision (live)
-  conditions.py              build_entry_checks / failed_entry_checks — 8 conditions + runtime toggles (shared live + backtest)
-  indicator_engine.py        compute_indicators (TA-Lib), session_vwap_candles, patterns
-  trend_filter.py            check_trend (gate toggles applied here), compute_nifty_gates
-  position_manager.py        calc_quantity, can_enter (state injected, used by live + backtest)
+  bn_pricing.py               ATM strike/expiry/Black-Scholes/normal_cdf/estimate_iv — pure, no state
+  bn_signals.py                sideways/momentum/leader-vote/candle-pattern/EMA-stack/composite-indicator gates
+  bn_entry_exit.py            evaluate_entry/evaluate_exit — the shared live+backtest decision core; open_trade_from_signal/finalize_exit helpers
+  watchlist.py                fetch_active_watchlist — client status → full_watchlist (Scanner feature ONLY, untouched by the BN engine)
+  dynamic_zone.py             run_dynamic_zone_scan — independent equity ADR/dynamic-zone scanner (Scanner feature, unrelated to the BN strategy)
 app/services/
-  scheduler.py               phase driver + tick-wise engine + EOD + dashboard payload
-  market_data.py             WebSocket client; _process_tick updates candles/ltp/depth(snap)/dirty_ticks
-  historical_data.py         REST client (batched parallel fetch, persistent httpx; JSON decode + Candle build run via asyncio.to_thread — keep them off the event loop)
-  gemini_filter.py           analyse_stocks (google-genai, Search grounding; JSON array parsed from text)
-  paper_trade.py             place_paper_order, check_tick_exit, force_close, _finalize
-  settings.py                SPEC registry (labels/types/bounds/groups/bt flag), validation, override persistence
-  snapshot.py                stub_entry / apply_depth — shared snapshot-entry helpers (STATE_UPDATE, INDICATOR_UPDATE, /api/indicators)
-  database.py                asyncpg pool + schema + positions/daily_stats/backtest/app_settings tables
-app/backtest/                data.py (SymbolSeries + per-symbol numpy mirrors/prefix sums), engine.py, portfolio.py, fills.py, metrics.py
-app/api/dashboard.py         REST + WS endpoints (/api/status, /api/indicators, /api/backtest[/{id}/trades|export.csv], /ws/dashboard, …)
-app/ws/dashboard_ws.py       browser WS broadcast manager
-static/                      index.html, indicators.html, settings.html, js/dashboard.js, js/indicators.js, js/settings.js, css/
-app/engine/watchlist.py      fetch_active_watchlist — client status → full_watchlist (normalises non-breaking spaces)
+  scheduler.py                phase driver + tick-wise engine + EOD + dashboard payload
+  market_data.py              single WS connection (BankNifty + 11 stocks); _process_tick updates candles_5m/bn_index_candles_5m/ltp/bn_index_ltp
+  historical_data.py          REST client (batched parallel fetch, persistent httpx)
+  bn_trade.py                 place_paper_order, check_tick_exit, force_close — paper-order lifecycle + funds/daily_pnl bookkeeping
+  settings.py                 SPEC registry (labels/types/bounds/groups/bt flag), validation, override + funds persistence (BN_FUNDS_KEY)
+  database.py                 asyncpg pool + schema + positions/daily_stats/backtest/app_settings/bn_index_bars tables
+app/backtest/                 data.py (SymbolSeries + BankNifty from bn_index_bars), engine.py (evaluate_entry/evaluate_exit-driven replay), portfolio.py, fills.py, metrics.py (unchanged, instrument-agnostic)
+app/api/dashboard.py          REST + WS endpoints (/api/status, /api/backtest[/{id}/trades|export.csv], /api/scanner/scan, /ws/dashboard, …)
+app/ws/dashboard_ws.py        browser WS broadcast manager
+static/                       index.html, settings.html, scanner.html, js/dashboard.js, js/settings.js, js/scanner.js, css/
+scripts/bn_smoke_test.py      throwaway dev tool — NOT shipped functionality; feeds real historical bars through evaluate_entry/evaluate_exit outside the app
 ```
 
-Backtest is triggered from the dashboard: `POST /api/backtest {from_date, to_date, slippage_bps?, capital?, overrides?}` runs in a background task and is polled via `GET /api/backtest/{id}`; results export at `…/export.csv`.
+Backtest is triggered from the dashboard: `POST /api/backtest {from_date, to_date, slippage_bps?, overrides?}` runs in a background task and is polled via `GET /api/backtest/{id}`; results export at `…/export.csv`. There is no `timeframe`/`mode`/`capital` field — backtest is always 5m/intraday/1-lot.
 
 ## WebSocket broadcast types
 
-The `/ws/dashboard` endpoint broadcasts two distinct message shapes — **both pages connect to the same endpoint**:
+The `/ws/dashboard` endpoint broadcasts two distinct message shapes — **the page filters to `STATE_UPDATE` only**:
 
 | `type` | Cadence | Payload |
 |--------|---------|---------|
-| `STATE_UPDATE` | 1 s | Full dashboard payload: `clock`, `phase`, `wsStatus`, `niftyLtp`, `positions`, `scanResults`, `geminiList`, `watchlist`; `indicatorSnapshot` rides along only every 10th push (`_SNAPSHOT_EVERY_N_PUSHES`) — the deltas keep ticking symbols fresh |
-| `INDICATOR_UPDATE` | ~100 ms (per dirty tick) | Only `indicatorSnapshot` — all other fields absent |
-
-**Critical:** `dashboard.js` (main page) filters to `STATE_UPDATE` only — rendering on `INDICATOR_UPDATE` would blank every scalar field (nifty, clock, watchlist, etc.). `indicators.js` accepts both types and merges `indicatorSnapshot` into its local `rowsMap`.
+| `STATE_UPDATE` | 1 s | Full dashboard payload: `clock`, `phase`, `wsStatus`, `apiStatus`, `bnLtp`, `dailyPnl`, `funds`, `activeTrade`, `closedTrades`, `entryLoop` (the `BNDiagnostic` — the "why didn't it fire" panel) |
+| `TICK_UPDATE` | ~100 ms | `{prices: {name: ltp, ...}}` — a live-price delta only; not rendered by the current dashboard.js (present for future use), but must not be treated as a `STATE_UPDATE` |
 
 ## Gotchas & known limitations
 
-- **Mid-session recovery phase restoration:** `_run_premarket()` sets `st.phase = PRE_MARKET` and `_run_wait_zone()` sets `st.phase = WAIT_ZONE` as side-effects, even when called from mid-session recovery inside `_phase_driver`. After each recovery sub-call, explicitly restore `st.phase` to the correct running phase (ACTIVE/CUTOFF) or the dashboard will show the wrong state for minutes.
-- **`_build_indicator_snapshot` on `SchedulerService`:** the STATE_UPDATE payload's `indicatorSnapshot` comes from this static method, which fills in LTP stubs for `full_watchlist` stocks that haven't been scanned yet. The stub shape and order-book merge are shared helpers in `app/services/snapshot.py` (also used by the INDICATOR_UPDATE push and `/api/indicators`) — if you add new snapshot fields, extend `stub_entry`/`apply_depth` there.
-- **Pure tick-wise on the forming bar** (by design): RSI/MACD/ADX/volume are recomputed on the *incomplete* 5m bar each cycle, so they jitter and signals can appear/vanish within a bar. Volume-surge naturally fires late in each bar.
-- **`GEMINI_MODEL`** — must be a real `google-genai` model id (currently `gemini-2.5-flash`). On any failure the screen returns `[]` and silently falls back to the (capped) full watchlist, so a bad id disables the AI filter without an error. Note: Google-Search grounding and a `response_schema` are **mutually exclusive** — `gemini_filter` uses grounding and parses the JSON array out of the text (`_find_json_array`); do not re-add `response_schema`.
-- **Daily-green gate** uses today's open = the open of today's first 5m bar (derived in `scan_stock` / `compute_nifty_gates`). The 1d series is no longer fetched or used; if you re-add it, remember it is not updated by the WS.
-- **The NIFTY feed has volume=0 on every bar (all timeframes — verified against the live server).** A pure session VWAP for the index is therefore always 0, and the `GATE_NIFTY_VWAP` gate would never pass. `session_vwap_candles` / `session_vwap_from_cumsums(…, cum_tp)` degrade to the session **TWAP** (mean typical price) when volume is absent — do not remove that fallback or the default-gated strategy silently stops trading.
-- **Backtest hourly gate** buckets by clock-hour from 5m data, which may not match the server's real 1h candle boundaries — possible live/backtest parity drift.
+- **The BankNifty history-archive limitation (see "External dependencies" above) is the single most important thing to remember when touching backtest or the historical loader.** If a backtest run fails with "no self-recorded BankNifty history," that's expected until the live engine has run at least one full day in this environment — it is NOT a bug to "fix" by fetching a date range from the REST API.
+- **Kotak Bank naming:** `cfg.BN_ALL_STOCKS["KOTAK BANK"] = "1922"` — NOT `"KOTAK MAHINDRA BANK"`. The market-data server matches by exact stockname text; confirmed by direct testing that the "Mahindra" variant silently returns zero candles for the identical, correct token.
+- **Pure tick-wise on the forming bar** (by design, inherited intentionally from the source): the composite indicator gate is recomputed on the *incomplete* forming 5m bar each cycle if you feed it partial data — but `evaluate_entry` is only ever called once per bar (on the just-closed bar, via `last_evaluated_bar` dedup), so this repo's BN engine does NOT re-fire mid-bar the way the old equity engine's tick loop did.
+- **`BNTrade.current_premium`/`current_iv`** are refreshed on every `_tick_exits` cycle (even when not exiting) purely for the live dashboard mark — don't confuse this with `entry_premium`/`exit_premium`, which are the two values that actually determine `pnl`.
 - **JSONB reads:** asyncpg returns `jsonb` columns as strings — decode with `_decode_jsonb` (see `database.py`) on any new read path.
-- **Position rows are day-scoped in SQL:** `update_position_exit` and `get_today_positions` both filter on `(created_at AT TIME ZONE 'Asia/Kolkata')::date` (backed by an expression index). Keep new position queries on that same expression — a rolling `NOW() - INTERVAL` window can touch the previous day's orphaned rows.
-- **`calc_quantity` floors at 1 share** even when a single share risks more than `RISK_PER_TRADE` (stops wider than ₹500 on very high-priced stocks). Deliberate "always tradeable" choice — changing it alters live behavior and all backtest results.
-- **Concurrent positions share the account.** Sizing uses *available* capital = `ACCOUNT_BALANCE − Σ(open value ÷ INTRADAY_LEVERAGE)` (live: computed in `scan_stock` + re-checked at fill in `_tick_entries`; backtest: `Portfolio.margin_used()` + per-fill re-check). Without this, each of the `MAX_CONCURRENT_POSITIONS` could consume the FULL leveraged buying power. Position value may still exceed raw capital by up to `INTRADAY_LEVERAGE`× — that's margin, not a bug; set leverage to 1 for cash-only sizing.
-- **Frontend DOM diffing:** both `dashboard.js` and `indicators.js` maintain a `_rowEls` / `_posRowEls` cache (symbol → `<tr>`) and patch cells in-place via `_setCell(td, html, cls)` which no-ops when content is unchanged. Reorder uses `DocumentFragment` appended once (atomic). `scheduleRender()` + `requestAnimationFrame` coalesces rapid WS ticks into one paint. Do not replace this pattern with `tbody.innerHTML = ...` — it re-introduces flash.
-- **Secrets:** `.env` is gitignored; never put real keys in `config.py` defaults or `.env.example` (GitHub push-protection will block, and it has happened here).
+- **Position rows are day-scoped in SQL:** `get_today_positions` filters on `(created_at AT TIME ZONE 'Asia/Kolkata')::date` (backed by an expression index); `update_position_exit` now keys on `order_id` (not `symbol` — every row's symbol is just `"BANKNIFTY"`, so `order_id` is the only thing that disambiguates same-day trades).
+- **Options cost model rates are placeholders** (`BN_COST_*` settings) — not verified against current India options STT/exchange-txn figures. Safe for relative backtest signal quality (win rate, R-multiple), not yet for trusting absolute ₹ P&L.
+- **Frontend DOM diffing:** `dashboard.js` maintains cell-level diffing via `_setCell(td, html, cls)` (no-ops when content is unchanged) and coalesces WS pushes into one paint per animation frame (`scheduleRender` + `requestAnimationFrame`). Do not replace this pattern with `tbody.innerHTML = ...` — it re-introduces flash.
+- **Secrets:** `.env` is gitignored; never put real keys in `config.py` defaults or `.env.example`.
+- **The Scanner feature (`/scanner`, `app/engine/{watchlist,dynamic_zone}.py`) is entirely independent of the BN options strategy** — it's a separate ADR/dynamic-zone screener over the full equity high-volume universe, predates this port, and must keep working. Never repurpose `st.full_watchlist`/`active_watchlist`/`token_to_name` for BN engine state — they are Scanner's fields exclusively.
 
 ## Conventions for edits
 
 - Keep `git` commits/pushes only when asked. `.env` must never be committed.
 - Match the existing style: keyword-only dataclass construction, module-level `import app.config as cfg`, IST via `ZoneInfo("Asia/Kolkata")`.
 - After changes, run `python3 -m py_compile` over the touched files (no test suite exists).
-- Live and backtest **must** share the strategy core (`check_trend`/`compute_indicators`/`calc_quantity`); don't fork the decision logic.
+- Live and backtest **must** share the strategy core (`bn_entry_exit.evaluate_entry`/`evaluate_exit`, `bn_pricing.*`, `bn_signals.*`); don't fork the decision logic. If live and backtest need different treatment of the same moment (e.g. intrabar SL/target touch resolution), do it at the CALLER level (the scheduler vs. the backtest replay loop), never by branching inside the shared functions themselves.

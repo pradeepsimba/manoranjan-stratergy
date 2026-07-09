@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="NSE Equity Paper Trader", lifespan=lifespan)
+app = FastAPI(title="Bank Nifty Options Paper Trader", lifespan=lifespan)
 
 app.include_router(router)
 
@@ -58,14 +58,15 @@ def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
-@app.get("/indicators")
-def indicators_page() -> FileResponse:
-    return FileResponse("static/indicators.html")
-
-
 @app.get("/settings")
 def settings_page() -> FileResponse:
     return FileResponse("static/settings.html")
+
+
+@app.get("/scanner")
+def scanner_page() -> FileResponse:
+    return FileResponse("static/scanner.html")
+
 
 
 if __name__ == "__main__":

@@ -3,21 +3,18 @@ from __future__ import annotations
 """
 Live WebSocket feed from the custom market data server.
 
-Three concurrent WS connections share the same tick processor so every stock
-gets per-tick indicator updates without exceeding the server's ~32 KB per-
-connection output buffer (which closes with 1009 when too many symbols are
-subscribed at once):
-
-  primary-5m  — active_watchlist at 5m + NIFTY 5m      (≤~40 entries)
-  primary-1h  — active_watchlist at 1h only             (≤~40 entries)
-  secondary   — non-Gemini full_watchlist stocks at 5m  (≤~40 entries)
+Fixed, small universe (BankNifty index + 11 stocks = 12 symbol-interval
+pairs, well under the server's ~40-entries-per-connection output buffer), so
+a SINGLE WS connection covers everything — no need for the equity engine's
+split primary-5m/primary-1h/secondary connections (BN never uses 1h data or
+a "non-Gemini" secondary universe).
 """
 
 import asyncio
 import json
 import re
 from collections import deque as _deque
-from typing import Callable, Dict, List, Optional
+from typing import Optional
 
 import websockets
 import websockets.exceptions
@@ -26,113 +23,53 @@ import app.config as cfg
 from app.models import Candle, TradingPhase
 from app.state import get_state
 
-_LTP_PAT     = re.compile(r"LTP\s*([\d.]+)")
-_BUYQTY_PAT  = re.compile(r"BuyQty\s+(\d+)\s+SellQty\s+(\d+)")
-_BID1_PAT    = re.compile(r"Bids[^:]*:.*?(?<!\d)1\)\s+([\d.]+)\s+x\s+(\d+)", re.DOTALL)
-_ASK1_PAT    = re.compile(r"Asks[^:]*:.*?(?<!\d)1\)\s+([\d.]+)\s+x\s+(\d+)", re.DOTALL)
+_LTP_PAT = re.compile(r"LTP\s*([\d.]+)")
 
 _MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
 
 
-def _parse_depth(snap: str) -> dict:
-    """Extract order-book data from the snap string in a WS tick."""
-    out: dict = {}
-    m = _BUYQTY_PAT.search(snap)
-    if m:
-        buy_qty  = int(m.group(1))
-        sell_qty = int(m.group(2))
-        total    = buy_qty + sell_qty
-        out["buy_qty"]  = buy_qty
-        out["sell_qty"] = sell_qty
-        out["ratio"]    = round(buy_qty / total, 3) if total > 0 else 0.5
-    m = _BID1_PAT.search(snap)
-    if m:
-        bid_p = float(m.group(1))
-        if bid_p > 0:
-            out["bid"] = bid_p
-    m = _ASK1_PAT.search(snap)
-    if m:
-        ask_p = float(m.group(1))
-        if ask_p > 0:
-            out["ask"] = ask_p
-    if "bid" in out and "ask" in out:
-        out["spread"] = max(0.0, round(out["ask"] - out["bid"], 2))
-    return out
-
-
 class MarketDataService:
     def __init__(self) -> None:
-        self._running   = False
-        self._task:     Optional[asyncio.Task] = None   # primary-5m
-        self._task_1h:  Optional[asyncio.Task] = None   # primary-1h
-        self._task2:    Optional[asyncio.Task] = None   # secondary
-        self.state      = get_state()
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self.state = get_state()
 
     def start(self) -> None:
-        self._running  = True
-        # primary-5m: active_watchlist (5m) + NIFTY (5m)
-        self._task    = asyncio.create_task(
-            self._connect_loop(self._build_filters_5m, "primary-5m")
-        )
-        # primary-1h: active_watchlist (1h) — separate connection to stay
-        # under the server's per-connection output-buffer limit
-        self._task_1h = asyncio.create_task(
-            self._connect_loop(self._build_filters_1h, "primary-1h")
-        )
-        # secondary: non-Gemini stocks (5m only for indicator display)
-        self._task2   = asyncio.create_task(
-            self._connect_loop(self._build_filters_secondary, "secondary")
-        )
+        self._running = True
+        self._task = asyncio.create_task(self._connect_loop())
 
     async def stop(self) -> None:
         self._running = False
-        tasks = [t for t in (self._task, self._task_1h, self._task2) if t]
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if self._task:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
         # Cancellation skips _run_ws's post-loop status update — set it here so
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
 
     async def restart(self) -> None:
-        """
-        Tear down and reopen all three connections so the subscription filters
-        are rebuilt from the CURRENT watchlists — used after runtime watchlist
-        add/remove. No-op unless already running.
-        """
         if not self._running:
             return
         await self.stop()
-        # stop() advertises "WS Stopped" — overwrite so the dashboard doesn't
-        # flash a scary status during an intentional resubscribe.
         self.state.ws_status = "WS Resubscribing…"
         self.start()
 
-    # ── WebSocket connection loops ─────────────────────────────────────────────
+    # ── WebSocket connection loop ───────────────────────────────────────────────
 
-    async def _connect_loop(
-        self,
-        filter_fn: Callable[[], List[dict]],
-        label:     str,
-    ) -> None:
+    async def _connect_loop(self) -> None:
         while self._running:
             try:
-                filters = filter_fn()
-                if not filters:
-                    # Nothing to subscribe to yet (e.g. secondary before premarket)
-                    await asyncio.sleep(10)
-                    continue
-                await self._run_ws(filters, label)
+                await self._run_ws(self._build_filters())
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.state.ws_status = f"WS Error ({label}): {e}"
-                print(f"WS error ({label}): {e}")
+                self.state.ws_status = f"WS Error: {e}"
+                print(f"WS error: {e}")
             if self._running:
                 await asyncio.sleep(5)
 
-    async def _run_ws(self, filters: List[dict], label: str) -> None:
+    async def _run_ws(self, filters: list) -> None:
         async with websockets.connect(
             cfg.WS_URL,
             ping_interval=20,
@@ -140,15 +77,14 @@ class MarketDataService:
             open_timeout=15,
             max_size=_WS_MAX_SIZE,
         ) as ws:
-            if label == "primary-5m":
-                self.state.ws_status = "WS Connected"
+            self.state.ws_status = "WS Connected"
 
             await ws.send(json.dumps({
                 "type":       "LIVE_FEED_INIT",
                 "filters":    filters,
                 "latestOnly": True,
             }))
-            print(f"WS [{label}] subscribed: {len(filters)} symbol-interval pairs")
+            print(f"WS subscribed: {len(filters)} symbol-interval pairs")
 
             async for message in ws:
                 if not self._running:
@@ -159,59 +95,24 @@ class MarketDataService:
                     for item in items:
                         self._process_tick(item)
                 except Exception as e:
-                    print(f"Tick parse error ({label}): {e}")
+                    print(f"Tick parse error: {e}")
 
-        if label == "primary-5m":
-            self.state.ws_status = "WS Disconnected"
-        elif label == "primary-1h":
-            self.state.ws_status = "WS 1h Disconnected"
+        self.state.ws_status = "WS Disconnected"
 
-    # ── Subscription filter builders ──────────────────────────────────────────
+    # ── Subscription filter builder ────────────────────────────────────────────
 
-    def _build_filters_5m(self) -> List[dict]:
-        """
-        Active_watchlist at 5m + NIFTY 5m.
-        Kept as a separate connection from 1h so each stays under the server's
-        per-connection output-buffer limit (~32 KB / ~40 ticks).
-        """
-        st      = get_state()
-        filters = [
-            {"stock_symbol": token, "stockname": sym, "interval": "5m"}
-            for sym, token in st.active_watchlist.items()
-        ]
-        filters.append({
-            "stock_symbol": cfg.NIFTY50_TOKEN,
-            "stockname":    cfg.NIFTY50_NAME,
+    def _build_filters(self) -> list:
+        """BankNifty index + the 11 BN stocks, all at 5m — the fixed strategy universe."""
+        filters = [{
+            "stock_symbol": cfg.BN_INDEX_TOKEN,
+            "stockname":    cfg.BN_INDEX_NAME,
             "interval":     "5m",
-        })
-        return filters
-
-    def _build_filters_1h(self) -> List[dict]:
-        """
-        Active_watchlist at 1h only — needed for the hourly trend gate.
-        Separate connection so the combined 5m+1h subscription doesn't overflow
-        the server buffer.
-        """
-        st = get_state()
-        return [
-            {"stock_symbol": token, "stockname": sym, "interval": "1h"}
-            for sym, token in st.active_watchlist.items()
-        ]
-
-    def _build_filters_secondary(self) -> List[dict]:
-        """
-        Non-Gemini stocks at 5m only — gives the indicators page per-tick
-        updates for every high-volume stock without needing 1h data.
-        Returns [] when full_watchlist is not yet populated (before premarket).
-        """
-        st     = get_state()
-        active = set(st.active_watchlist.values())   # set of tokens
-        extra  = [
+        }]
+        filters += [
             {"stock_symbol": token, "stockname": sym, "interval": "5m"}
-            for sym, token in st.full_watchlist.items()
-            if token not in active
+            for sym, token in cfg.BN_ALL_STOCKS.items()
         ]
-        return extra
+        return filters
 
     # ── Tick processing ───────────────────────────────────────────────────────
 
@@ -219,7 +120,7 @@ class MarketDataService:
         symbol    = n.get("stock_symbol", "")
         stockname = n.get("stockname",    "")
         interval  = n.get("interval",     "")
-        if not symbol or not interval:
+        if not symbol or interval != "5m":
             return
 
         candle = Candle(
@@ -241,63 +142,32 @@ class MarketDataService:
             except (ValueError, AttributeError):
                 pass
 
-        # Per-token lock for regular stocks; separate nifty lock for the shared
-        # NIFTY candle lists so scan workers never contend across unrelated tokens.
-        if symbol == cfg.NIFTY50_TOKEN:
-            with self.state._nifty_lock:
-                if interval == "5m":
-                    self._upsert_list(self.state.nifty_candles_5m, candle)
+        if symbol == cfg.BN_INDEX_TOKEN:
+            with self.state._bn_index_lock:
+                self._upsert_list(self.state.bn_index_candles_5m, candle)
         else:
             with self.state.candle_lock(symbol):
-                if interval == "5m":
-                    self._upsert(self.state.candles_5m, symbol, candle)
-                    # Bumped under the SAME lock, right after the mutation, so
-                    # any reader observing the new version is guaranteed to
-                    # also see the updated candle list (see AppState.tick_version).
-                    self.state.tick_version[symbol] = self.state.tick_version.get(symbol, 0) + 1
-                elif interval == "1h":
-                    self._upsert(self.state.candles_1h, symbol, candle)
-
-        # Dashboard "last bar" clock — only for accepted STOCK 5m bars, and never
-        # move it backwards (a reconnect-replayed stale bar is dropped by _upsert
-        # but must not rewind this display; NIFTY's own cadence isn't "the" bar).
-        if interval == "5m" and symbol != cfg.NIFTY50_TOKEN:
-            bt = candle.start_time[11:16]
-            if self.state.last_5m_bar_time is None or bt >= self.state.last_5m_bar_time:
-                self.state.last_5m_bar_time = bt
+                self._upsert(self.state.candles_5m, symbol, candle)
+                # Bumped under the SAME lock, right after the mutation, so any
+                # reader observing the new version also sees the updated candle list.
+                self.state.tick_version[symbol] = self.state.tick_version.get(symbol, 0) + 1
 
         if ltp > 0:
-            if symbol == cfg.NIFTY50_TOKEN:
-                self.state.nifty_ltp = ltp
+            if symbol == cfg.BN_INDEX_TOKEN:
+                self.state.bn_index_ltp = ltp
             elif stockname:
                 self.state.ltp[stockname] = ltp
 
-        # Parse order-book depth from the snap field (stocks only; NIFTY has no
-        # real order book — its snap shows -0.01 sentinels which _parse_depth
-        # discards via the bid_p > 0 guard).
-        snap = n.get("snap", "")
-        if snap and stockname and symbol != cfg.NIFTY50_TOKEN and interval == "5m":
-            depth = _parse_depth(snap)
-            if depth:
-                # MERGE, don't replace: a partial snap (e.g. bid/ask present but
-                # no BuyQty/SellQty line) would otherwise drop the last-known
-                # `ratio`, silently turning depth_bullish into an auto-pass and
-                # letting a sell-skewed book through. New dict = atomic swap for
-                # lock-free readers (same GIL-safe pattern as ltp).
-                prev = self.state.depth.get(stockname)
-                self.state.depth[stockname] = {**prev, **depth} if prev else depth
-
-        # Tick-wise engine: flag this stock for re-evaluation on the next loop
-        # cycle. Only 5m ticks update the forming bar; 1h ticks must not enqueue
-        # dirty_ticks or they trigger scans on stale 5m bars. Only while ACTIVE.
-        if interval == "5m" and symbol != cfg.NIFTY50_TOKEN and self.state.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
-            self.state.dirty_ticks.add(symbol)
+        # Live-price ticker push — every 5m tick (index or stock) refreshes the
+        # dashboard delta; the BN engine's entry/exit evaluation runs on its own
+        # tick-wise loop timer, not off a per-tick dirty flag.
+        if self.state.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
             self.state.dirty_ticks_push.add(symbol)
 
     # ── Candle upsert helpers ─────────────────────────────────────────────────
 
     @staticmethod
-    def _upsert(store: Dict[str, list], symbol: str, candle: Candle) -> None:
+    def _upsert(store: dict, symbol: str, candle: Candle) -> None:
         lst = store.get(symbol)
         if lst is None:
             store[symbol] = _deque([candle], maxlen=_MAX_CANDLES)

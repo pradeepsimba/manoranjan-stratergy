@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dynamic Zone Scanner · NSE Paper Trader</title>
+  <meta name="description" content="Scanner for bullish and bearish dynamic range zones using ADR and first 5-minute candles">
+  <link rel="stylesheet" href="/css/dashboard.css">
+  <script>
+    (function(){
+      var t = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    
+    .scanner-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 12px 18px;
+      background: var(--surf);
+      border-bottom: 1px solid var(--edge-soft);
+    }
+
+    .btn-scan {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 32px;
+      padding: 0 20px;
+      background: var(--prime);
+      color: var(--on-prime);
+      border: none;
+      border-radius: var(--r-sm);
+      font-size: 12px;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      letter-spacing: .04em;
+      transition: background .15s, transform .1s;
+    }
+    .btn-scan:hover { background: #62c5ff; }
+    .btn-scan:active { transform: scale(.96); }
+    .btn-scan:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .scanner-description {
+      font-size: 11px;
+      color: var(--txt-2);
+      max-width: 600px;
+    }
+
+    .scanner-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      padding: 16px 18px;
+      align-items: start;
+      flex: 1;
+    }
+
+    @media (max-width: 1024px) {
+      .scanner-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .scan-badge {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 2px 8px;
+      border-radius: var(--r-pill);
+    }
+    .scan-badge.bullish {
+      background: var(--pos-bg);
+      color: var(--pos);
+      border: 1px solid var(--pos-edge);
+    }
+    .scan-badge.bearish {
+      background: var(--neg-bg);
+      color: var(--neg);
+      border: 1px solid var(--neg-edge);
+    }
+    
+    .loading-spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 0.8s linear infinite;
+      margin-right: 8px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── App Bar ──────────────────────────────────────────────────────────────── -->
+<header class="app-bar">
+  <div class="brand">
+    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <polyline points="3,17 8,10 12,14 17,7 21,11"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-name">NSE Paper Trader</span>
+      <span class="brand-sub">Dynamic Zone Scanner</span>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:10px;align-items:center">
+    <nav class="nav-seg" aria-label="Pages">
+      <a href="/">Dashboard</a>
+      <a href="/indicators">Indicators</a>
+      <a href="/scanner" class="active">Scanner</a>
+      <a href="/settings">Settings</a>
+    </nav>
+    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<!-- ── Toolbar ──────────────────────────────────────────────────────────────── -->
+<div class="scanner-toolbar">
+  <div class="scanner-description">
+    This scanner calculates the <b>Average Daily Range (ADR 10)</b> from daily candles (using yesterday's value) and screens the first 5-minute candle of each day.
+    <br>
+    <b>Bullish Setup</b>: Open = Low AND High > Daily Open + (ADR 10 / 2)
+    <br>
+    <b>Bearish Setup</b>: Open = High AND Low < Daily Open - (ADR 10 / 2)
+  </div>
+  <button id="btn-scan" class="btn-scan" onclick="triggerScan()">
+    Run Scan
+  </button>
+</div>
+
+<!-- ── Summary Cards ────────────────────────────────────────────────────────── -->
+<div class="stat-strip">
+  <div class="stat-card">
+    <span class="stat-label">Stocks Scanned</span>
+    <span class="stat-value" id="stat-scanned">—</span>
+  </div>
+  <div class="stat-card" id="card-bull-setups">
+    <span class="stat-label">Bullish Setups</span>
+    <span class="stat-value pnl-pos" id="stat-bullish">—</span>
+  </div>
+  <div class="stat-card" id="card-bear-setups">
+    <span class="stat-label">Bearish Setups</span>
+    <span class="stat-value pnl-neg" id="stat-bearish">—</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">Last Ran</span>
+    <span class="stat-value" id="stat-time">—</span>
+  </div>
+</div>
+
+<!-- ── Main Grid ───────────────────────────────────────────────────────────── -->
+<div class="scanner-grid">
+  <!-- Left Column: Bullish Setups -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title" style="color: var(--pos);">Bullish Setups</span>
+      <span id="bullish-count" class="badge green">0</span>
+    </div>
+    <div class="tbl-wrap" style="max-height: 500px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Date</th>
+            <th>Open / Low</th>
+            <th>High</th>
+            <th>ADR 10</th>
+            <th>ADR High 10</th>
+          </tr>
+        </thead>
+        <tbody id="bullish-tbody">
+          <tr><td colspan="6" class="empty-cell">Click "Run Scan" to start scanning</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Right Column: Bearish Setups -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title" style="color: var(--neg);">Bearish Setups</span>
+      <span id="bearish-count" class="badge red">0</span>
+    </div>
+    <div class="tbl-wrap" style="max-height: 500px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Date</th>
+            <th>Open / High</th>
+            <th>Low</th>
+            <th>ADR 10</th>
+            <th>ADR Low 10</th>
+          </tr>
+        </thead>
+        <tbody id="bearish-tbody">
+          <tr><td colspan="6" class="empty-cell">Click "Run Scan" to start scanning</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="/js/util.js"></script>
+<script src="/js/scanner.js"></script>
+</body>
+</html>

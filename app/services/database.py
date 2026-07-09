@@ -16,7 +16,7 @@ _IST = ZoneInfo("Asia/Kolkata")
 import asyncpg
 
 import app.config as cfg
-from app.models import IndicatorResult, Position, TrendGate
+from app.models import BNTrade, Candle
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS positions (
@@ -97,12 +97,47 @@ CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
 CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
 
--- Add indicator columns to existing tables (idempotent)
+-- Legacy equity-indicator columns (inert under the BN options strategy — left
+-- in place, nullable, rather than destructively dropped).
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS rsi            NUMERIC(6,2);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS adx            NUMERIC(6,2);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS candle_pattern VARCHAR(50);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS macd           NUMERIC(12,4);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS support_level  NUMERIC(12,2);
+
+-- Bank Nifty options columns (idempotent) — added to both live positions and
+-- backtest_trades so the two share the same option-leg shape.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS direction      VARCHAR(4);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS strike         INTEGER;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS option_type    VARCHAR(2);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS expiry         TEXT;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_premium  NUMERIC(10,2);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_premium   NUMERIC(10,2);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS iv_used        NUMERIC(6,4);
+
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS direction      VARCHAR(4);
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS strike         INTEGER;
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS option_type    VARCHAR(2);
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS expiry         TEXT;
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS entry_premium  NUMERIC(10,2);
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS exit_premium   NUMERIC(10,2);
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS iv_used        NUMERIC(6,4);
+
+-- Self-recorded BankNifty 5m history. The market-data server has NO
+-- historical archive for the BankNifty index itself (confirmed empirically —
+-- every from_date/to_date range returns only the current day, unlike NIFTY 50
+-- and individual stocks, which both return full multi-day history). This
+-- table is our own growing archive, written once per day at EOD from the
+-- live-accumulated candle buffer, so a real multi-day backtest becomes
+-- possible over time without depending on the external server for it.
+CREATE TABLE IF NOT EXISTS bn_index_bars (
+    start_time TEXT PRIMARY KEY,
+    open       NUMERIC(10,2),
+    high       NUMERIC(10,2),
+    low        NUMERIC(10,2),
+    close      NUMERIC(10,2),
+    volume     NUMERIC(14,2)
+);
 """
 
 
@@ -120,48 +155,40 @@ class DatabaseService:
         if self._pool:
             await self._pool.close()
 
-    # ── Positions ─────────────────────────────────────────────────────────────
+    # ── Positions (the single Bank Nifty options trade) ────────────────────────
 
-    async def save_position(self, pos: Position) -> None:
-        ind = pos.indicators or IndicatorResult()
-        gate = pos.trend or TrendGate()
+    async def save_position(self, trade: BNTrade) -> None:
+        target_offset = abs(trade.target - trade.entry_index_price)
+        iv_used = trade.entry_signal.iv_used if trade.entry_signal else None
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO positions
                     (symbol, token, entry_price, entry_time, quantity,
                      stop_loss, target, sl_offset, target_offset, order_id,
-                     status, rsi, macd_line, adx, plus_di, minus_di,
-                     vwap, candle_pattern, daily_green, hourly_green)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+                     status, direction, strike, option_type, expiry,
+                     entry_premium, iv_used)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                 """,
-                pos.symbol, pos.token,
-                pos.entry_price, pos.entry_time,
-                pos.quantity, pos.stop_loss, pos.target,
-                pos.sl_offset, pos.target_offset,
-                pos.order_id, pos.status.value,
-                ind.rsi, ind.macd_line, ind.adx,
-                ind.plus_di, ind.minus_di, ind.vwap,
-                ind.candle_pattern,
-                gate.daily_green, gate.hourly_green,
+                cfg.BN_INDEX_NAME, cfg.BN_INDEX_TOKEN,
+                trade.entry_index_price, trade.entry_time, trade.lot_size,
+                trade.current_sl, trade.target, trade.stoploss_points, target_offset,
+                trade.order_id, trade.status.value, trade.direction,
+                trade.strike, trade.option_type, trade.expiry,
+                trade.entry_premium, iv_used,
             )
 
-    async def update_position_exit(self, symbol: str, exit_price: float,
-                                   exit_time: str, pnl: float) -> None:
-        # Scope to TODAY's row (IST calendar date, matching get_today_positions
-        # and the expression index). A rolling NOW()-1day window would also
-        # close yesterday's orphaned OPEN row for the same symbol with today's
-        # exit price — the UPDATE has no row limit.
-        today = datetime.now(_IST).date()
+    async def update_position_exit(self, order_id: str, exit_price: float,
+                                   exit_time: str, pnl: float,
+                                   exit_premium: Optional[float] = None) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE positions
-                SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3
-                WHERE symbol=$4 AND status='OPEN'
-                AND (created_at AT TIME ZONE 'Asia/Kolkata')::date = $5
+                SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3, exit_premium=$4
+                WHERE order_id=$5 AND status='OPEN'
                 """,
-                exit_price, exit_time, pnl, symbol, today,
+                exit_price, exit_time, pnl, exit_premium, order_id,
             )
 
     async def get_today_positions(self) -> List[Dict[str, Any]]:
@@ -178,6 +205,46 @@ class DatabaseService:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM positions ORDER BY id DESC LIMIT 500")
         return [dict(r) for r in rows]
+
+    # ── Self-recorded BankNifty index history ──────────────────────────────────
+
+    async def save_bn_index_bars(self, candles: List[Candle]) -> None:
+        """
+        Upsert today's (or any) BankNifty bars into our own growing archive.
+        Idempotent — safe to call every EOD with the whole in-memory buffer
+        (up to MAX_CANDLE_BUFFER bars); already-stored bars just no-op update.
+        """
+        if not candles:
+            return
+        rows = [(c.start_time, c.open, c.high, c.low, c.close, c.volume) for c in candles]
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO bn_index_bars (start_time, open, high, low, close, volume)
+                VALUES ($1,$2,$3,$4,$5,$6)
+                ON CONFLICT (start_time) DO UPDATE
+                    SET open=$2, high=$3, low=$4, close=$5, volume=$6
+                """,
+                rows,
+            )
+
+    async def get_bn_index_bars(self, from_iso: str, to_iso: str) -> List[Candle]:
+        """Our self-recorded BankNifty bars in [from_iso, to_iso), chronological."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM bn_index_bars WHERE start_time >= $1 AND start_time < $2 "
+                "ORDER BY start_time",
+                from_iso, to_iso,
+            )
+        return [
+            Candle(
+                start_time=r["start_time"],
+                open=float(r["open"] or 0), high=float(r["high"] or 0),
+                low=float(r["low"] or 0), close=float(r["close"] or 0),
+                volume=float(r["volume"] or 0),
+            )
+            for r in rows
+        ]
 
     # ── Daily stats ───────────────────────────────────────────────────────────
 
@@ -306,8 +373,8 @@ class DatabaseService:
             (run_id, t.symbol, t.token, t.entry_time, t.entry_price,
              t.exit_time, t.exit_price, t.qty, t.stop_loss, t.target,
              t.outcome, t.gross_pnl, t.costs, t.net_pnl, t.r_multiple,
-             t.entry_rsi, t.entry_adx, t.entry_pattern,
-             t.entry_macd, t.entry_support)
+             t.direction, t.strike, t.option_type, t.expiry,
+             t.entry_premium, t.exit_premium, t.iv_used)
             for t in trades
         ]
         async with self._pool.acquire() as conn:
@@ -317,9 +384,10 @@ class DatabaseService:
                     (run_id, symbol, token, entry_time, entry_price, exit_time,
                      exit_price, quantity, stop_loss, target, outcome,
                      gross_pnl, costs, net_pnl, r_multiple,
-                     rsi, adx, candle_pattern, macd, support_level)
+                     direction, strike, option_type, expiry,
+                     entry_premium, exit_premium, iv_used)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                        $16,$17,$18,$19,$20)
+                        $16,$17,$18,$19,$20,$21,$22)
                 """,
                 rows,
             )
