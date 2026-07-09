@@ -3,14 +3,19 @@ from __future__ import annotations
 """
 Live WebSocket feed from the custom market data server.
 
-Three concurrent WS connections share the same tick processor so every stock
-gets per-tick indicator updates without exceeding the server's ~32 KB per-
-connection output buffer (which closes with 1009 when too many symbols are
-subscribed at once):
+Multiple concurrent WS connections share the same tick processor so every
+stock gets per-tick indicator updates without exceeding the server's ~32 KB
+per-connection output buffer (which closes with 1009 when too many symbols
+are subscribed at once):
 
-  primary-5m  — active_watchlist at 5m + NIFTY 5m      (≤~40 entries)
-  primary-1h  — active_watchlist at 1h only             (≤~40 entries)
-  secondary   — non-Gemini full_watchlist stocks at 5m  (≤~40 entries)
+  primary-5m    — active_watchlist at 5m + NIFTY 5m      (≤~40 entries)
+  primary-1h    — active_watchlist at 1h only             (≤~40 entries)
+  secondary-N   — non-Gemini full_watchlist stocks at 5m, split into
+                  chunks of ≤_MAX_SYMBOLS_PER_WS entries each — full_watchlist
+                  is uncapped (every high-volume stock from the client-status
+                  feed), so a single secondary connection can easily exceed
+                  the buffer limit once there are more than ~40 non-Gemini
+                  stocks.
 """
 
 import asyncio
@@ -33,6 +38,7 @@ _ASK1_PAT    = re.compile(r"Asks[^:]*:.*?(?<!\d)1\)\s+([\d.]+)\s+x\s+(\d+)", re.
 
 _MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
+_MAX_SYMBOLS_PER_WS = 40   # server's per-connection output buffer supports ~40 subscriptions
 
 
 def _parse_depth(snap: str) -> dict:
@@ -66,7 +72,7 @@ class MarketDataService:
         self._running   = False
         self._task:     Optional[asyncio.Task] = None   # primary-5m
         self._task_1h:  Optional[asyncio.Task] = None   # primary-1h
-        self._task2:    Optional[asyncio.Task] = None   # secondary
+        self._tasks2:   List[asyncio.Task] = []          # secondary-0, secondary-1, ...
         self.state      = get_state()
 
     def start(self) -> None:
@@ -80,14 +86,26 @@ class MarketDataService:
         self._task_1h = asyncio.create_task(
             self._connect_loop(self._build_filters_1h, "primary-1h")
         )
-        # secondary: non-Gemini stocks (5m only for indicator display)
-        self._task2   = asyncio.create_task(
-            self._connect_loop(self._build_filters_secondary, "secondary")
-        )
+        # secondary-N: non-Gemini stocks (5m only for indicator display),
+        # chunked so no single connection exceeds _MAX_SYMBOLS_PER_WS —
+        # full_watchlist has no cap, so this can be far more than one
+        # connection's worth once Gemini has filtered out most of it.
+        st          = get_state()
+        extra_count = max(0, len(st.full_watchlist) - len(st.active_watchlist))
+        n_chunks    = max(1, -(-extra_count // _MAX_SYMBOLS_PER_WS))  # ceil div
+        self._tasks2 = [
+            asyncio.create_task(
+                self._connect_loop(
+                    lambda i=i: self._build_filters_secondary_chunk(i),
+                    f"secondary-{i}",
+                )
+            )
+            for i in range(n_chunks)
+        ]
 
     async def stop(self) -> None:
         self._running = False
-        tasks = [t for t in (self._task, self._task_1h, self._task2) if t]
+        tasks = [t for t in (self._task, self._task_1h, *self._tasks2) if t]
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -97,9 +115,9 @@ class MarketDataService:
 
     async def restart(self) -> None:
         """
-        Tear down and reopen all three connections so the subscription filters
-        are rebuilt from the CURRENT watchlists — used after runtime watchlist
-        add/remove. No-op unless already running.
+        Tear down and reopen all connections so the subscription filters
+        (and secondary chunk count) are rebuilt from the CURRENT watchlists —
+        used after runtime watchlist add/remove. No-op unless already running.
         """
         if not self._running:
             return
@@ -198,20 +216,29 @@ class MarketDataService:
             for sym, token in st.active_watchlist.items()
         ]
 
-    def _build_filters_secondary(self) -> List[dict]:
+    def _build_filters_secondary_chunk(self, chunk_index: int) -> List[dict]:
         """
-        Non-Gemini stocks at 5m only — gives the indicators page per-tick
-        updates for every high-volume stock without needing 1h data.
-        Returns [] when full_watchlist is not yet populated (before premarket).
+        One slice (≤_MAX_SYMBOLS_PER_WS entries) of the non-Gemini stocks at
+        5m only — gives the indicators page per-tick updates for every
+        high-volume stock without needing 1h data. Split across multiple
+        connections (one per chunk_index) since full_watchlist is uncapped
+        and a single connection would overflow the server's output buffer.
+        Returns [] when full_watchlist is not yet populated (before premarket)
+        or this chunk_index has nothing left to subscribe to.
         """
         st     = get_state()
         active = set(st.active_watchlist.values())   # set of tokens
         extra  = [
-            {"stock_symbol": token, "stockname": sym, "interval": "5m"}
+            (sym, token)
             for sym, token in st.full_watchlist.items()
             if token not in active
         ]
-        return extra
+        start = chunk_index * _MAX_SYMBOLS_PER_WS
+        chunk = extra[start:start + _MAX_SYMBOLS_PER_WS]
+        return [
+            {"stock_symbol": token, "stockname": sym, "interval": "5m"}
+            for sym, token in chunk
+        ]
 
     # ── Tick processing ───────────────────────────────────────────────────────
 
