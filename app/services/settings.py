@@ -46,7 +46,8 @@ SPEC: List[Dict[str, Any]] = [
     _s("GEMINI_MODEL", "Gemini model id", "str", "AI Pre-market Screen",
        help_="Must be a real google-genai model id; a bad id silently disables the screen.", bt=False),
     _s("GEMINI_MAX_STOCKS", "Max tradeable stocks", "int", "AI Pre-market Screen",
-       min_=1, max_=100, help_="Cap on the shortlist / fallback list (WS buffer limit).", bt=False),
+       min_=1, max_=100, help_="Cap on the shortlist / fallback list "
+       "(the WS feed chunks across connections, so any value here is safe).", bt=False),
 
     # ── Session timings ───────────────────────────────────────────────────────
     _s("PREMARKET_TIME", "Pre-market screen", "time", "Session Timings",
@@ -268,7 +269,11 @@ def _coerce(spec: Dict[str, Any], raw: Any) -> Any:
         h, m = raw.strip().split(":")
         return int(h), int(m)
 
-    # int / float
+    # int / float — reject bools explicitly: float(True) == 1.0, so a client
+    # type mix-up (true sent for a numeric key) would otherwise silently set
+    # the value to 1/0 (e.g. INTRADAY_LEVERAGE: true → 1× leverage, in-bounds).
+    if isinstance(raw, bool):
+        raise ValueError(f"{key}: expected a number")
     try:
         val = float(raw)
     except (TypeError, ValueError):

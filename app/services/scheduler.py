@@ -33,7 +33,7 @@ from app.services.historical_data import (
 from app.services.paper_trade import check_tick_exit, force_close, place_paper_order
 from app.services.settings import WATCHLIST_OVERRIDES_KEY
 from app.services.snapshot import apply_depth, stub_entry
-from app.state import get_state
+from app.state import get_state, spawn
 
 if TYPE_CHECKING:
     from app.services.database import DatabaseService
@@ -115,6 +115,10 @@ class SchedulerService:
         # Serializes the read-modify-write of the persisted watchlist-override
         # blob — two rapid dashboard edits would otherwise lose one update.
         self._wl_lock = asyncio.Lock()
+        # Exit rows whose DB UPDATE failed (see _write_exit) — retried every
+        # tick cycle and at EOD so the row can't stay OPEN in Postgres after
+        # the position already closed in memory.
+        self._pending_exit_writes: List[dict] = []
 
     async def start(self) -> None:
         self._tasks = [
@@ -285,7 +289,7 @@ class SchedulerService:
 
         # Seed indicator_snapshot for ALL stocks immediately after loading history
         loop = asyncio.get_running_loop()
-        asyncio.create_task(self._full_scan_all(loop))
+        spawn(self._full_scan_all(loop))
 
     async def _run_active_phase(self) -> None:
         """
@@ -304,7 +308,7 @@ class SchedulerService:
         loop = asyncio.get_running_loop()
 
         # Seed indicator_snapshot for ALL stocks immediately on entry.
-        asyncio.create_task(self._full_scan_all(loop))
+        spawn(self._full_scan_all(loop))
         last_full_scan = loop.time()
 
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
@@ -322,7 +326,7 @@ class SchedulerService:
                 # Refresh all stocks periodically (non-Gemini stocks only update here)
                 now_ts = loop.time()
                 if now_ts - last_full_scan >= cfg.FULL_SCAN_INTERVAL_S:
-                    asyncio.create_task(self._full_scan_all(loop))
+                    spawn(self._full_scan_all(loop))
                     last_full_scan = now_ts
             except Exception as e:
                 # Never let one bad cycle kill the engine for the rest of the day.
@@ -378,24 +382,48 @@ class SchedulerService:
         ])
         return [sig for chunk_res in results for sig in chunk_res]
 
+    async def _write_exit(self, closed: Position) -> None:
+        """
+        Persist a close. In memory the position is ALREADY closed — if this
+        UPDATE were only printed-and-dropped, the row would stay OPEN in
+        Postgres and a same-day restart would resurrect (and re-manage) the
+        finished trade with understated daily P&L. Failures queue for retry.
+        """
+        kw = dict(symbol=closed.symbol, exit_price=closed.exit_price,
+                  exit_time=closed.exit_time, pnl=closed.pnl)
+        try:
+            await self._db.update_position_exit(**kw)
+        except Exception as e:
+            self._pending_exit_writes.append(kw)
+            print(f"Exit DB write failed ({closed.symbol}) — queued for retry: {e}")
+
+    async def _flush_exit_writes(self) -> None:
+        """Retry queued exit writes; stop at the first failure (DB still down)."""
+        while self._pending_exit_writes:
+            kw = self._pending_exit_writes[0]
+            try:
+                await self._db.update_position_exit(**kw)
+            except Exception as e:
+                print(f"Exit-write retry failed ({kw['symbol']}): {e}")
+                return
+            self._pending_exit_writes.pop(0)
+
     async def _tick_exits(self) -> None:
         """Tick-wise SL/target check against the live price for open positions."""
         st = get_state()
+        if self._pending_exit_writes:
+            await self._flush_exit_writes()
         for symbol in list(st.positions.keys()):
             ltp = st.ltp.get(symbol)
             if not ltp:
                 continue
             try:
                 closed = check_tick_exit(symbol, ltp)
-                if closed:
-                    await self._db.update_position_exit(
-                        symbol     = closed.symbol,
-                        exit_price = closed.exit_price,
-                        exit_time  = closed.exit_time,
-                        pnl        = closed.pnl,
-                    )
             except Exception as e:
                 print(f"Tick exit error ({symbol}): {e}")
+                continue
+            if closed:
+                await self._write_exit(closed)
 
     async def _tick_entries(self, loop) -> None:
         """Re-evaluate every stock that ticked since the last cycle; fill aligned signals."""
@@ -473,13 +501,16 @@ class SchedulerService:
 
         Idempotent by guard: callers only invoke it on a fresh state
         (no traded_today, no positions).
+
+        A DB failure here must PROPAGATE, not be swallowed: both callers sit
+        inside the phase driver's try/backoff loop, and the fresh-state guard
+        can only retry while the state is still empty. Swallowing the error
+        would enter the session with empty traded_today/daily_pnl (re-entering
+        symbols, ignoring a breached loss limit) or let _run_eod mark the day
+        done (_eod_date) without squaring off orphaned OPEN rows.
         """
         st = get_state()
-        try:
-            rows = await self._db.get_today_positions()
-        except Exception as e:
-            print(f"Recovery: could not reload today's positions: {e}")
-            return
+        rows = await self._db.get_today_positions()
         if not rows:
             return
 
@@ -649,15 +680,11 @@ class SchedulerService:
             exit_price = st.ltp.get(symbol, pos.entry_price)
             closed     = force_close(symbol, exit_price)
             if closed:
-                try:
-                    await self._db.update_position_exit(
-                        symbol     = closed.symbol,
-                        exit_price = closed.exit_price,
-                        exit_time  = closed.exit_time,
-                        pnl        = closed.pnl,
-                    )
-                except Exception as e:
-                    print(f"EOD square-off DB error ({symbol}): {e}")
+                await self._write_exit(closed)
+        # Last chance today to land queued exit rows — an OPEN row surviving
+        # into tomorrow can never be squared off by the day-scoped queries.
+        if self._pending_exit_writes:
+            await self._flush_exit_writes()
 
         await self._mkt.stop()
 
@@ -710,6 +737,11 @@ class SchedulerService:
                                       # on the overnight dashboard
         st.daily_pnl = 0.0
         st.ltp.clear()
+        # Yesterday's NIFTY close must not survive the reset: if tomorrow's
+        # index feed is delayed, compute_nifty_gates would evaluate both NIFTY
+        # gates on the stale price all day. 0.0 makes its ltp>0 guards block
+        # until real data arrives.
+        st.nifty_ltp = 0.0
         st.candles_5m.clear()
         st.candles_1h.clear()
         st.nifty_candles_5m.clear()

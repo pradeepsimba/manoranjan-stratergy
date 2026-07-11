@@ -49,10 +49,16 @@ def _parse_candles(arr: list) -> List[Candle]:
 # ── Date helpers ───────────────────────────────────────────────────────────────
 
 def _today_range() -> Tuple[str, str]:
+    # Session bounds are DYNAMIC settings — read at call time, not hardcoded
+    # 09:15/15:30, or a user-edited MARKET_OPEN/SESSION_END would desync this
+    # fetch window from the rest of the app (e.g. the "today's open" bar the
+    # daily-green gate uses would be the wrong bar after a recovery load).
     today     = datetime.now(IST).date()
-    from_date = datetime(today.year, today.month, today.day, 9, 15,
+    from_date = datetime(today.year, today.month, today.day,
+                         cfg.MARKET_OPEN_HOUR, cfg.MARKET_OPEN_MIN,
                          tzinfo=IST).strftime("%Y-%m-%dT%H:%M:%S")
-    to_date   = datetime(today.year, today.month, today.day, 15, 30,
+    to_date   = datetime(today.year, today.month, today.day,
+                         cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN,
                          tzinfo=IST).strftime("%Y-%m-%dT%H:%M:%S")
     return from_date, to_date
 
@@ -64,7 +70,16 @@ async def _fetch(
     intervals: List[str],
     from_date: str,
     to_date:   str,
+    errors:    Optional[list] = None,
 ) -> Dict[str, Dict[str, List[Candle]]]:
+    """
+    `errors` — when _fetch_all runs several batches concurrently it passes a
+    shared list: each failing batch appends its error and the AGGREGATE status
+    is written once by _fetch_all. Without it (single direct call) this
+    function owns api_status itself. Otherwise a later-completing healthy
+    batch would overwrite a concurrent batch's error with "API OK" and a day
+    running on a partial universe would show a green API status.
+    """
     url     = cfg.API_URL_TEMPLATE.format(cfg.API_HOST, from_date, to_date)
     payload = [
         {"stockname": s["stockname"], "stock_symbol": s["stock_symbol"],
@@ -79,14 +94,21 @@ async def _fetch(
         # a worker thread so the event loop (dashboard WS, tick loop) never
         # stalls behind a big fetch.
         data   = await asyncio.to_thread(resp.json)
-        get_state().api_status = "API OK"
+        if errors is None:
+            get_state().api_status = "API OK"
     except Exception as e:
-        get_state().api_status = f"API Error: {e}"
+        if errors is not None:
+            errors.append(str(e))
+        else:
+            get_state().api_status = f"API Error: {e}"
         print(f"Historical fetch error: {e}")
         return {}
 
     if not isinstance(data, list):
-        get_state().api_status = "API Error: unexpected response shape"
+        if errors is not None:
+            errors.append("unexpected response shape")
+        else:
+            get_state().api_status = "API Error: unexpected response shape"
         print(f"Historical fetch: expected a list, got {type(data).__name__}: {data!r:.200}")
         return {}
 
@@ -128,16 +150,25 @@ async def _fetch_all(
     if len(stocks) <= cfg.HIST_BATCH_SIZE:
         return await _fetch(stocks, intervals, from_date, to_date)
 
-    batches   = [stocks[i : i + cfg.HIST_BATCH_SIZE]
-                 for i in range(0, len(stocks), cfg.HIST_BATCH_SIZE)]
+    batches = [stocks[i : i + cfg.HIST_BATCH_SIZE]
+               for i in range(0, len(stocks), cfg.HIST_BATCH_SIZE)]
+    errors: list = []
     responses = await asyncio.gather(
-        *[_fetch(b, intervals, from_date, to_date) for b in batches],
+        *[_fetch(b, intervals, from_date, to_date, errors) for b in batches],
         return_exceptions=True,
     )
     merged: Dict[str, Dict[str, List[Candle]]] = {}
     for r in responses:
-        if isinstance(r, dict):
+        if isinstance(r, Exception):
+            errors.append(str(r))
+        elif isinstance(r, dict):
             merged.update(r)
+    # One aggregate status for the whole round — a partial universe must not
+    # read as healthy just because the last batch to finish succeeded.
+    get_state().api_status = (
+        f"API partial: {len(errors)}/{len(batches)} batches failed ({errors[0]})"
+        if errors else "API OK"
+    )
     return merged
 
 

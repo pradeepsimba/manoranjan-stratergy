@@ -20,7 +20,7 @@ from app.engine.watchlist import fetch_active_watchlist
 from app.models import Candle
 from app.services.historical_data import IST, fetch_indicator_history
 from app.services.snapshot import apply_depth, stub_entry
-from app.state import get_state
+from app.state import get_state, spawn
 from app.ws.dashboard_ws import ws_manager
 
 router = APIRouter()
@@ -247,7 +247,7 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         {"slippage_bps": slippage, "capital": capital,
          "timeframe": timeframe, "mode": mode, "overrides": attr_overrides},
     )
-    asyncio.create_task(
+    spawn(
         run_backtest(_db, run_id, req.from_date, req.to_date,
                      slippage, capital, overrides=attr_overrides,
                      timeframe=timeframe, mode=mode)
@@ -432,7 +432,7 @@ async def _cached_tf_history(wl: Dict[str, str], timeframe: str) -> tuple:
                 finally:
                     _tf_refreshing.discard(timeframe)
 
-            asyncio.create_task(_bg())
+            spawn(_bg())
         return ent["hist"], ent["ts"]                # stale but instant
     # Cold cache (or watchlist changed): block on the fetch once.
     return await _refetch_tf_history(wl, timeframe, sig)

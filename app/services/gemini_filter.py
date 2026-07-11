@@ -16,7 +16,7 @@ import asyncio
 import json
 import re
 from datetime import date
-from typing import List
+from typing import List, Optional
 
 import app.config as cfg
 
@@ -25,19 +25,32 @@ import app.config as cfg
 _JSON_ARRAY = re.compile(r"\[.*?\]", re.DOTALL)
 
 
-def _find_json_array(text: str) -> list:
-    """Return the last valid JSON string-array from a grounded model response.
+def _find_json_array(text: str, known: Optional[set] = None) -> list:
+    """Return the answer JSON string-array from a grounded model response.
 
-    Tries each `[...]` match in reverse (last match is most likely the answer)
-    so citation arrays like `[1]` or table arrays are skipped gracefully.
+    Grounded responses can contain several `[...]` string arrays — the answer,
+    but also source-domain lists or (if the model editorializes) a second
+    "bearish" array. Position alone can't disambiguate, so when `known` (the
+    input symbol set, uppercased) is given, the FIRST candidate that actually
+    intersects it wins — the prompt asks for the bullish list first, so a
+    trailing bearish/sources array can never displace it. Falls back to the
+    last valid string-array (skips citation arrays like [1]) when nothing
+    intersects.
     """
-    for candidate in reversed(_JSON_ARRAY.findall(text)):
+    candidates = []
+    for candidate in _JSON_ARRAY.findall(text):
         try:
             parsed = json.loads(candidate)
-            if isinstance(parsed, list) and all(isinstance(s, str) for s in parsed):
-                return parsed
         except json.JSONDecodeError:
             continue
+        if isinstance(parsed, list) and all(isinstance(s, str) for s in parsed):
+            candidates.append(parsed)
+    if known:
+        for parsed in candidates:
+            if any(s.strip().upper() in known for s in parsed):
+                return parsed
+    if candidates:
+        return candidates[-1]
     raise ValueError("no valid JSON string-array in grounded response")
 
 
@@ -97,7 +110,7 @@ def _grounded_screen(stocknames: List[str]) -> List[str]:
         )
 
         raw     = (response.text or "").strip()
-        symbols = _find_json_array(raw)
+        symbols = _find_json_array(raw, {s.strip().upper() for s in stocknames})
 
         clean = [
             s.strip().upper()

@@ -218,10 +218,17 @@ def compute_indicators(
     # Session VWAP (full session bars, not the lookback slice)
     if session_vwap is not None:
         ind.vwap = session_vwap
-    else:
-        sess = session_candles_5m if session_candles_5m else candles_5m
-        if sess:
-            ind.vwap = session_vwap_candles(sess)
+    elif session_candles_5m:
+        ind.vwap = session_vwap_candles(session_candles_5m)
+    elif ohlcv_window is not None:
+        # With ohlcv_window, candles_5m may be just the 3-bar pattern slice —
+        # a VWAP over it would be silently wrong. Fail loudly instead.
+        raise ValueError(
+            "compute_indicators: ohlcv_window requires session_vwap "
+            "(or session_candles_5m) — candles_5m may be only the pattern slice"
+        )
+    elif candles_5m:
+        ind.vwap = session_vwap_candles(candles_5m)
     ind.price_above_vwap = ind.vwap > 0 and ltp > ind.vwap
 
     # Volume surge

@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import Dict, List, Optional, Set
 
 from app.models import Candle, Position, TradingPhase
+
+# Strong references to fire-and-forget tasks. The event loop keeps only WEAK
+# refs to tasks, so an unreferenced create_task() result can be garbage-
+# collected mid-flight (per the asyncio docs) — e.g. a long backtest silently
+# stopping with its DB row stuck on 'running'. spawn() pins the task until done.
+_bg_tasks: Set[asyncio.Task] = set()
+
+
+def spawn(coro) -> asyncio.Task:
+    """create_task + keep a strong reference until the task completes."""
+    task = asyncio.get_running_loop().create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
 
 
 class AppState:

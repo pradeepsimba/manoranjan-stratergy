@@ -6,16 +6,21 @@ Live WebSocket feed from the custom market data server.
 Multiple concurrent WS connections share the same tick processor so every
 stock gets per-tick indicator updates without exceeding the server's ~32 KB
 per-connection output buffer (which closes with 1009 when too many symbols
-are subscribed at once):
+are subscribed at once). EVERY group is chunked to ≤_MAX_SYMBOLS_PER_WS
+entries per connection — active_watchlist is not bounded by that limit
+(GEMINI_MAX_STOCKS may exceed it, and manual adds / restored positions grow
+it further), so the primaries must chunk exactly like the secondaries:
 
-  primary-5m    — active_watchlist at 5m + NIFTY 5m      (≤~40 entries)
-  primary-1h    — active_watchlist at 1h only             (≤~40 entries)
-  secondary-N   — non-Gemini full_watchlist stocks at 5m, split into
-                  chunks of ≤_MAX_SYMBOLS_PER_WS entries each — full_watchlist
-                  is uncapped (every high-volume stock from the client-status
-                  feed), so a single secondary connection can easily exceed
-                  the buffer limit once there are more than ~40 non-Gemini
-                  stocks.
+  primary-5m-N  — active_watchlist at 5m (+ NIFTY 5m in the last chunk)
+  primary-1h-N  — active_watchlist at 1h only
+  secondary-N   — non-Gemini full_watchlist stocks at 5m (display only)
+
+Reconnect gap-fill: on every REconnect of a 5m connection the day's bars are
+re-fetched over REST and merged through the chronological upsert, so an
+outage doesn't leave a silent splice in the candle series (TA-Lib would treat
+it as contiguous). 1h is NOT backfilled — the REST server's hourly id ("60m")
+may not align with the WS "1h" bars and the hourly gate only reads the last
+bar anyway.
 """
 
 import asyncio
@@ -29,6 +34,7 @@ import websockets.exceptions
 
 import app.config as cfg
 from app.models import Candle, TradingPhase
+from app.services.historical_data import fetch_today_candles
 from app.state import get_state
 
 _LTP_PAT     = re.compile(r"LTP\s*([\d.]+)")
@@ -70,45 +76,67 @@ def _parse_depth(snap: str) -> dict:
 class MarketDataService:
     def __init__(self) -> None:
         self._running   = False
-        self._task:     Optional[asyncio.Task] = None   # primary-5m
-        self._task_1h:  Optional[asyncio.Task] = None   # primary-1h
-        self._tasks2:   List[asyncio.Task] = []          # secondary-0, secondary-1, ...
+        self._tasks:    List[asyncio.Task] = []   # all connection loops
         self.state      = get_state()
+        # Per-connection health, label → "connected" | "disconnected" | "error: …".
+        # ws_status is DERIVED from this (primary-5m-* first) — a single string
+        # written by whichever of N connections last changed would let one
+        # flapping display-only secondary mask a dead tradeable feed, and
+        # vice versa.
+        self._conn_status: Dict[str, str] = {}
+        # Labels that have connected at least once THIS PROCESS — a later
+        # connect for such a label is a REconnect and triggers the 5m backfill.
+        # Deliberately not cleared on stop()/restart(): the watchlist-edit
+        # restart is itself an outage that can cross a bar boundary.
+        self._seen_labels: set = set()
 
     def start(self) -> None:
-        self._running  = True
-        # primary-5m: active_watchlist (5m) + NIFTY (5m)
-        self._task    = asyncio.create_task(
-            self._connect_loop(self._build_filters_5m, "primary-5m")
-        )
-        # primary-1h: active_watchlist (1h) — separate connection to stay
-        # under the server's per-connection output-buffer limit
-        self._task_1h = asyncio.create_task(
-            self._connect_loop(self._build_filters_1h, "primary-1h")
-        )
-        # secondary-N: non-Gemini stocks (5m only for indicator display),
-        # chunked so no single connection exceeds _MAX_SYMBOLS_PER_WS —
-        # full_watchlist has no cap, so this can be far more than one
-        # connection's worth once Gemini has filtered out most of it.
-        st          = get_state()
+        self._running = True
+        st = get_state()
+        self._conn_status.clear()
+
+        # primary-5m-N: active_watchlist at 5m + NIFTY (last chunk). Chunked
+        # like everything else — GEMINI_MAX_STOCKS / manual adds / restored
+        # positions can push the active list past one connection's buffer,
+        # and this is the feed SL/target exits depend on.
+        n_5m = max(1, -(-(len(st.active_watchlist) + 1) // _MAX_SYMBOLS_PER_WS))
+        tasks = [
+            asyncio.create_task(
+                self._connect_loop(lambda i=i: self._build_filters_5m_chunk(i),
+                                   f"primary-5m-{i}")
+            )
+            for i in range(n_5m)
+        ]
+        # primary-1h-N: active_watchlist at 1h only (hourly trend gate)
+        n_1h = max(1, -(-len(st.active_watchlist) // _MAX_SYMBOLS_PER_WS))
+        tasks += [
+            asyncio.create_task(
+                self._connect_loop(lambda i=i: self._build_filters_1h_chunk(i),
+                                   f"primary-1h-{i}")
+            )
+            for i in range(n_1h)
+        ]
+        # secondary-N: non-Gemini stocks (5m only for indicator display)
         extra_count = max(0, len(st.full_watchlist) - len(st.active_watchlist))
-        n_chunks    = max(1, -(-extra_count // _MAX_SYMBOLS_PER_WS))  # ceil div
-        self._tasks2 = [
+        n_sec       = max(1, -(-extra_count // _MAX_SYMBOLS_PER_WS))  # ceil div
+        tasks += [
             asyncio.create_task(
                 self._connect_loop(
                     lambda i=i: self._build_filters_secondary_chunk(i),
                     f"secondary-{i}",
                 )
             )
-            for i in range(n_chunks)
+            for i in range(n_sec)
         ]
+        self._tasks = tasks
 
     async def stop(self) -> None:
         self._running = False
-        tasks = [t for t in (self._task, self._task_1h, *self._tasks2) if t]
-        for t in tasks:
+        for t in self._tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks = []
+        self._conn_status.clear()
         # Cancellation skips _run_ws's post-loop status update — set it here so
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
@@ -129,6 +157,27 @@ class MarketDataService:
 
     # ── WebSocket connection loops ─────────────────────────────────────────────
 
+    def _note_conn(self, label: str, status: str) -> None:
+        """
+        Record one connection's health and re-derive the dashboard ws_status.
+        The tradeable feed (primary-5m-*) decides the headline — exits stop
+        working without it — with degraded aux connections noted as a suffix.
+        """
+        self._conn_status[label] = status
+        primaries = {l: s for l, s in self._conn_status.items()
+                     if l.startswith("primary-5m")}
+        bad_p = {l: s for l, s in primaries.items() if s != "connected"}
+        if bad_p:
+            l, s = next(iter(bad_p.items()))
+            derived = f"WS {s} ({l})"
+        elif primaries:
+            aux_down = sum(1 for l, s in self._conn_status.items()
+                           if not l.startswith("primary-5m") and s != "connected")
+            derived = f"WS Connected ({aux_down} aux down)" if aux_down else "WS Connected"
+        else:
+            derived = "WS Connecting…"
+        self.state.ws_status = derived
+
     async def _connect_loop(
         self,
         filter_fn: Callable[[], List[dict]],
@@ -145,7 +194,7 @@ class MarketDataService:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.state.ws_status = f"WS Error ({label}): {e}"
+                self._note_conn(label, f"error: {e}")
                 print(f"WS error ({label}): {e}")
             if self._running:
                 await asyncio.sleep(5)
@@ -158,15 +207,22 @@ class MarketDataService:
             open_timeout=15,
             max_size=_WS_MAX_SIZE,
         ) as ws:
-            if label == "primary-5m":
-                self.state.ws_status = "WS Connected"
-
             await ws.send(json.dumps({
                 "type":       "LIVE_FEED_INIT",
                 "filters":    filters,
                 "latestOnly": True,
             }))
             print(f"WS [{label}] subscribed: {len(filters)} symbol-interval pairs")
+
+            # Reconnect (or restart) — bars may have completed during the
+            # outage, and latestOnly resumes at the newest one. Merge today's
+            # REST bars through the chronological upsert BEFORE consuming live
+            # ticks (which are buffered on the socket meanwhile), or the series
+            # keeps a silent splice that TA-Lib would treat as contiguous.
+            if label in self._seen_labels:
+                await self._backfill_5m(filters, label)
+            self._seen_labels.add(label)
+            self._note_conn(label, "connected")
 
             async for message in ws:
                 if not self._running:
@@ -179,18 +235,53 @@ class MarketDataService:
                 except Exception as e:
                     print(f"Tick parse error ({label}): {e}")
 
-        if label == "primary-5m":
-            self.state.ws_status = "WS Disconnected"
-        elif label == "primary-1h":
-            self.state.ws_status = "WS 1h Disconnected"
+        self._note_conn(label, "disconnected")
+
+    async def _backfill_5m(self, filters: List[dict], label: str) -> None:
+        """
+        Re-fetch today's 5m bars for this connection's symbols and merge them
+        through the same chronological upsert the live feed uses (idempotent:
+        equal start_time replaces, older is dropped). 1h filters are skipped —
+        the REST server's hourly id ("60m") may not align with WS "1h" bars
+        and must not mix into the same store.
+        """
+        wl = {f["stockname"]: f["stock_symbol"]
+              for f in filters if f.get("interval") == "5m"}
+        if not wl:
+            return
+        try:
+            data = await fetch_today_candles(wl, [cfg.INTERVAL_5M])
+        except Exception as e:
+            print(f"WS [{label}] reconnect backfill failed: {e}")
+            return
+        st = self.state
+        filled = 0
+        for token, per_iv in data.items():
+            candles = per_iv.get(cfg.INTERVAL_5M) or []
+            if not candles:
+                continue
+            filled += 1
+            if token == cfg.NIFTY50_TOKEN:
+                with st._nifty_lock:
+                    for c in candles:
+                        self._upsert_list(st.nifty_candles_5m, c)
+            else:
+                with st.candle_lock(token):
+                    for c in candles:
+                        self._upsert(st.candles_5m, token, c)
+        print(f"WS [{label}] reconnect backfill: merged {filled} symbols")
 
     # ── Subscription filter builders ──────────────────────────────────────────
 
-    def _build_filters_5m(self) -> List[dict]:
+    def _build_filters_5m_chunk(self, chunk_index: int) -> List[dict]:
         """
-        Active_watchlist at 5m + NIFTY 5m.
-        Kept as a separate connection from 1h so each stays under the server's
-        per-connection output-buffer limit (~32 KB / ~40 ticks).
+        One ≤_MAX_SYMBOLS_PER_WS slice of (active_watchlist at 5m + NIFTY).
+        NIFTY rides at the END of the combined list, so it lands in the last
+        chunk. The active list is NOT bounded by the per-connection limit
+        (GEMINI_MAX_STOCKS may exceed it; manual adds and restored positions
+        grow it further) — an unchunked subscription would overflow the
+        server's output buffer, 1009-close in a loop, and silently stop every
+        SL/target exit.
         """
         st      = get_state()
         filters = [
@@ -202,19 +293,22 @@ class MarketDataService:
             "stockname":    cfg.NIFTY50_NAME,
             "interval":     "5m",
         })
-        return filters
+        start = chunk_index * _MAX_SYMBOLS_PER_WS
+        return filters[start:start + _MAX_SYMBOLS_PER_WS]
 
-    def _build_filters_1h(self) -> List[dict]:
+    def _build_filters_1h_chunk(self, chunk_index: int) -> List[dict]:
         """
-        Active_watchlist at 1h only — needed for the hourly trend gate.
-        Separate connection so the combined 5m+1h subscription doesn't overflow
-        the server buffer.
+        One ≤_MAX_SYMBOLS_PER_WS slice of active_watchlist at 1h — needed for
+        the hourly trend gate. Separate connections so the combined 5m+1h
+        subscription doesn't overflow the server buffer.
         """
-        st = get_state()
-        return [
+        st      = get_state()
+        filters = [
             {"stock_symbol": token, "stockname": sym, "interval": "1h"}
             for sym, token in st.active_watchlist.items()
         ]
+        start = chunk_index * _MAX_SYMBOLS_PER_WS
+        return filters[start:start + _MAX_SYMBOLS_PER_WS]
 
     def _build_filters_secondary_chunk(self, chunk_index: int) -> List[dict]:
         """

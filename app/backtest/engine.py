@@ -320,7 +320,7 @@ def _fill_signals(port: Portfolio, signals: List[BTPosition],
         port.open_position(sig)
 
 
-def _delivery_overrides() -> Dict[str, Any]:
+def _delivery_overrides(user_overrides: Optional[Dict] = None) -> Dict[str, Any]:
     """
     Map the DELIVERY_* dynamic settings onto the plain keys the shared strategy
     core reads (calc_quantity, can_enter, conditions.py, trend_filter.py), so a
@@ -328,8 +328,13 @@ def _delivery_overrides() -> Dict[str, Any]:
     profile WITHOUT forking any of that shared logic. Resolved via cfg (not a
     literal dict) so a request's own DELIVERY_* overrides — already applied by
     the caller's outer thread_overrides — flow through.
+
+    A plain key the request EXPLICITLY overrode (e.g. {"RR_RATIO": 3.0}) is
+    dropped from the shadow map so the user's value wins — otherwise the run
+    would record the override in backtest_runs.params yet silently trade the
+    delivery default instead.
     """
-    return {
+    shadow = {
         "MIN_SL_OFFSET":            cfg.DELIVERY_MIN_SL_OFFSET,
         "RR_RATIO":                 cfg.DELIVERY_RR_RATIO,
         "RISK_PER_TRADE":           cfg.DELIVERY_RISK_PER_TRADE,
@@ -348,6 +353,9 @@ def _delivery_overrides() -> Dict[str, Any]:
         "GATE_NIFTY_DAILY":         cfg.DELIVERY_GATE_NIFTY_DAILY,
         "GATE_NIFTY_VWAP":          cfg.DELIVERY_GATE_NIFTY_VWAP,
     }
+    for key in (user_overrides or {}):
+        shadow.pop(key, None)
+    return shadow
 
 
 def _square_off_range_end(port: Portfolio, symbols: Dict[str, SymbolSeries],
@@ -389,7 +397,7 @@ def _simulate_range_intraday(
     as a run-level loss stop. Sequential by construction (the portfolio
     persists across days), so no day-level parallelism here.
     """
-    with cfg.thread_overrides(overrides or {}), cfg.thread_overrides(_delivery_overrides()):
+    with cfg.thread_overrides(overrides or {}), cfg.thread_overrides(_delivery_overrides(overrides)):
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
         days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
         if not days:
@@ -434,7 +442,7 @@ def _simulate_range_daily(
     degenerates to the same signal) and the single-bar session VWAP is the
     bar's typical price, so above_vwap = close > (H+L+C)/3.
     """
-    with cfg.thread_overrides(overrides or {}), cfg.thread_overrides(_delivery_overrides()):
+    with cfg.thread_overrides(overrides or {}), cfg.thread_overrides(_delivery_overrides(overrides)):
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
         days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
         if not days:
@@ -535,6 +543,13 @@ def simulate(
         for day_trades in per_day:
             trades.extend(day_trades)
         ndays = len(days)
+
+    # Square-offs are appended in ENTRY order and a symbol whose data ends early
+    # (halt / missing days) exits at ITS last bar — both can land trades in the
+    # list after trades that closed later in wall-clock time. Sort by exit_time
+    # (ISO strings) so the equity curve / max-drawdown are computed over the
+    # true chronological P&L sequence; stable sort keeps same-timestamp order.
+    trades.sort(key=lambda t: t.exit_time)
 
     # Rebuild the running-equity curve from the merged, time-ordered trade stream.
     cum = 0.0

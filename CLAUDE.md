@@ -40,8 +40,8 @@ python main.py                # serves http://0.0.0.0:8080
 
 Driven by `scheduler.SchedulerService._phase_driver` (IST wall clock):
 
-1. **09:00 PRE_MARKET** — `fetch_active_watchlist()` (client status) → `full_watchlist = {name: token}` (ALL high-volume stocks). `analyse_stocks()` (Gemini) returns bullish names → `active_watchlist` = the **tradeable** subset. Empty/failed Gemini ⇒ fall back to the first `GEMINI_MAX_STOCKS` of the full list (capped so the WS subscription can't overflow the server buffer).
-2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h + NIFTY, fetched concurrently via `asyncio.gather`), then `market_data.start()` opens the WS — subscribed to the **active** (tradeable) subset only.
+1. **09:00 PRE_MARKET** — `fetch_active_watchlist()` (client status) → `full_watchlist = {name: token}` (ALL high-volume stocks). `analyse_stocks()` (Gemini) returns bullish names → `active_watchlist` = the **tradeable** subset. Empty/failed Gemini ⇒ fall back to the first `GEMINI_MAX_STOCKS` of the full list.
+2. **09:15 WAIT_ZONE** — `_load_all_historical()` (5 days of 5m + today's 1h + NIFTY, fetched concurrently via `asyncio.gather`), then `market_data.start()` opens the WS — subscribed to the **active** (tradeable) subset only. Every WS group (primaries included) is chunked to ≤40 symbols per connection (server buffer limit); on any REconnect the day's 5m bars are REST-backfilled through the chronological upsert so an outage can't leave a splice in the candle series.
 3. **09:45–15:30 ACTIVE** — `_run_active_phase()` is a **tick-wise loop** every `TICK_EVAL_INTERVAL_MS` (default 100ms):
    - `_tick_exits` — every open position's live price vs SL/target.
    - `_tick_entries` — re-scan stocks that ticked since last cycle (`dirty_ticks`), on the **forming** 5m bar; fill those whose signals all align. Entries stop at 14:30 (CUTOFF); exits continue to 15:30.

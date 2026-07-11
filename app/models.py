@@ -86,11 +86,9 @@ class TrendGate:
     hourly_green:      bool = False   # current 1H candle close > open
     nifty_daily_green: bool = False   # NIFTY LTP > NIFTY daily open
     nifty_above_vwap:  bool = False   # NIFTY LTP > NIFTY session VWAP
-
-    @property
-    def all_clear(self) -> bool:
-        return (self.daily_green and self.hourly_green
-                and self.nifty_daily_green and self.nifty_above_vwap)
+    # NOTE: gate PASS/FAIL decisions live in trend_filter.trend_blockers(),
+    # which applies the runtime GATE_* toggles — don't add a hard-coded
+    # conjunction here; it would silently re-enable disabled gates.
 
 
 # ── Trading ───────────────────────────────────────────────────────────────────
