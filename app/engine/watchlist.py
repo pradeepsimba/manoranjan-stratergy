@@ -36,10 +36,28 @@ async def fetch_active_watchlist() -> Dict[str, str]:
         print(f"Client status fetch failed: {e}")
         return {}
 
+    # A JSON error object ({"detail": ...}) would iterate its KEYS here, fail
+    # every length-3 check, and read as a healthy-but-empty universe with
+    # api_status already set to "API OK" above — surface it as an error.
+    if not isinstance(data, list):
+        st.api_status = "Client status error: unexpected response shape"
+        print(f"Client status: expected a list, got {type(data).__name__}")
+        return {}
+
+    # Sort by rank (entry[0]) — the Gemini-failure fallback trades "the first
+    # GEMINI_MAX_STOCKS of the full list", which is only meaningful if the
+    # dict is built in rank order; don't trust raw server ordering.
+    def _rank(entry):
+        try:
+            return float(entry[0])
+        except (TypeError, ValueError, IndexError):
+            return float("inf")
+
+    rows = sorted((e for e in data if isinstance(e, (list, tuple)) and len(e) >= 3),
+                  key=_rank)
+
     watchlist: Dict[str, str] = {}
-    for entry in data:
-        if not isinstance(entry, (list, tuple)) or len(entry) < 3:
-            continue
+    for entry in rows:
         # Normalise non-breaking spaces: Gemini echoes names back with regular
         # spaces, so a raw \xa0 in the name would never map to a token again.
         stockname = str(entry[1]).replace("\xa0", " ").strip()
@@ -47,6 +65,10 @@ async def fetch_active_watchlist() -> Dict[str, str]:
         if not stockname or not token:
             continue
         if stockname.upper() in _INDEX_NAMES:
+            continue
+        if stockname in watchlist and watchlist[stockname] != token:
+            print(f"Client status: duplicate name '{stockname}' "
+                  f"({watchlist[stockname]} vs {token}) — keeping the first")
             continue
         watchlist[stockname] = token
 

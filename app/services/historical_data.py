@@ -139,36 +139,45 @@ async def _fetch_all(
     intervals: List[str],
     from_date: str,
     to_date:   str,
+    errors:    Optional[list] = None,
 ) -> Dict[str, Dict[str, List[Candle]]]:
     """
     Split stocks into HIST_BATCH_SIZE chunks and POST all chunks concurrently.
     For 500 stocks with batch=100: 5 parallel requests instead of one giant one.
     Failed batches are silently dropped so healthy batches still populate state.
-    """
-    if not stocks:
-        return {}
-    if len(stocks) <= cfg.HIST_BATCH_SIZE:
-        return await _fetch(stocks, intervals, from_date, to_date)
 
-    batches = [stocks[i : i + cfg.HIST_BATCH_SIZE]
-               for i in range(0, len(stocks), cfg.HIST_BATCH_SIZE)]
-    errors: list = []
-    responses = await asyncio.gather(
-        *[_fetch(b, intervals, from_date, to_date, errors) for b in batches],
-        return_exceptions=True,
-    )
+    `errors` — when the CALLER runs several _fetch_all's concurrently (e.g. the
+    scheduler's session load: 5m + today's 1h + NIFTY in one gather), each call
+    writing its own aggregate status would race: a healthy fetch finishing last
+    overwrites a concurrent fetch's "API partial". Passing a shared list makes
+    the caller the single status writer.
+    """
+    own_status = errors is None
+    if errors is None:
+        errors = []
     merged: Dict[str, Dict[str, List[Candle]]] = {}
-    for r in responses:
-        if isinstance(r, Exception):
-            errors.append(str(r))
-        elif isinstance(r, dict):
-            merged.update(r)
+    if stocks:
+        if len(stocks) <= cfg.HIST_BATCH_SIZE:
+            merged = await _fetch(stocks, intervals, from_date, to_date, errors)
+        else:
+            batches = [stocks[i : i + cfg.HIST_BATCH_SIZE]
+                       for i in range(0, len(stocks), cfg.HIST_BATCH_SIZE)]
+            responses = await asyncio.gather(
+                *[_fetch(b, intervals, from_date, to_date, errors) for b in batches],
+                return_exceptions=True,
+            )
+            for r in responses:
+                if isinstance(r, Exception):
+                    errors.append(str(r))
+                elif isinstance(r, dict):
+                    merged.update(r)
     # One aggregate status for the whole round — a partial universe must not
     # read as healthy just because the last batch to finish succeeded.
-    get_state().api_status = (
-        f"API partial: {len(errors)}/{len(batches)} batches failed ({errors[0]})"
-        if errors else "API OK"
-    )
+    if own_status:
+        get_state().api_status = (
+            f"API partial: {len(errors)} batch(es) failed ({errors[0]})"
+            if errors else "API OK"
+        )
     return merged
 
 
@@ -177,6 +186,7 @@ async def _fetch_all(
 async def fetch_today_candles(
     watchlist: Dict[str, str],
     intervals: Optional[List[str]] = None,
+    errors:    Optional[list] = None,
 ) -> Dict[str, Dict[str, List[Candle]]]:
     if intervals is None:
         intervals = [cfg.INTERVAL_5M, cfg.INTERVAL_1H]
@@ -185,14 +195,14 @@ async def fetch_today_candles(
     if not stocks:
         return {}
     from_date, to_date = _today_range()
-    return await _fetch_all(stocks, intervals, from_date, to_date)
+    return await _fetch_all(stocks, intervals, from_date, to_date, errors)
 
 
-async def fetch_nifty_candles() -> List[Candle]:
+async def fetch_nifty_candles(errors: Optional[list] = None) -> List[Candle]:
     """Today's NIFTY 5m session bars (daily gate + session VWAP)."""
     stocks           = [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}]
     today_d, today_t = _today_range()
-    today_data       = await _fetch(stocks, [cfg.INTERVAL_5M], today_d, today_t)
+    today_data       = await _fetch(stocks, [cfg.INTERVAL_5M], today_d, today_t, errors)
     return today_data.get(cfg.NIFTY50_TOKEN, {}).get(cfg.INTERVAL_5M, [])
 
 
@@ -200,6 +210,7 @@ async def fetch_indicator_history(
     watchlist: Dict[str, str],
     interval:  str = cfg.INTERVAL_5M,
     days_back: int = 5,
+    errors:    Optional[list] = None,
 ) -> Dict[str, List[Candle]]:
     today     = datetime.now(IST).date()
     from_date = (today - timedelta(days=days_back)).isoformat()
@@ -208,5 +219,5 @@ async def fetch_indicator_history(
                  for sym, tok in watchlist.items()]
     if not stocks:
         return {}
-    data = await _fetch_all(stocks, [interval], from_date, to_date)
+    data = await _fetch_all(stocks, [interval], from_date, to_date, errors)
     return {tok: node.get(interval, []) for tok, node in data.items()}

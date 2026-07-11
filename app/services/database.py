@@ -7,7 +7,7 @@ and daily P&L summary.
 """
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -96,6 +96,11 @@ CREATE TABLE IF NOT EXISTS app_settings (
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
 CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
+-- Unique per paper order — makes save_position's INSERT idempotent
+-- (ON CONFLICT (order_id) DO NOTHING), so a crash-after-commit retry can't
+-- create a duplicate row. NULLs (pre-existing rows without an id) don't
+-- collide under a UNIQUE index.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_order_id ON positions(order_id);
 
 -- Add indicator columns to existing tables (idempotent)
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS rsi            NUMERIC(6,2);
@@ -123,6 +128,14 @@ class DatabaseService:
     # ── Positions ─────────────────────────────────────────────────────────────
 
     async def save_position(self, pos: Position) -> None:
+        # Persists the FULL position state including exit fields: a queued
+        # entry-save retried after the position already closed in memory
+        # (DB outage spanning both events) must land as a complete CLOSED row
+        # — inserting it without exit_price/pnl would permanently record a
+        # phantom ₹0 trade that restart-restore then trusts.
+        # ON CONFLICT ON the order_id unique index makes the retry idempotent:
+        # a crash-after-commit re-INSERT is a no-op instead of a duplicate row
+        # (which the day-scoped exit UPDATE would close in bulk).
         ind = pos.indicators or IndicatorResult()
         gate = pos.trend or TrendGate()
         async with self._pool.acquire() as conn:
@@ -132,8 +145,11 @@ class DatabaseService:
                     (symbol, token, entry_price, entry_time, quantity,
                      stop_loss, target, sl_offset, target_offset, order_id,
                      status, rsi, macd_line, adx, plus_di, minus_di,
-                     vwap, candle_pattern, daily_green, hourly_green)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+                     vwap, candle_pattern, daily_green, hourly_green,
+                     exit_price, exit_time, pnl)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                        $16,$17,$18,$19,$20,$21,$22,$23)
+                ON CONFLICT (order_id) DO NOTHING
                 """,
                 pos.symbol, pos.token,
                 pos.entry_price, pos.entry_time,
@@ -144,25 +160,37 @@ class DatabaseService:
                 ind.plus_di, ind.minus_di, ind.vwap,
                 ind.candle_pattern,
                 gate.daily_green, gate.hourly_green,
+                pos.exit_price, pos.exit_time, pos.pnl,
             )
 
     async def update_position_exit(self, symbol: str, exit_price: float,
-                                   exit_time: str, pnl: float) -> None:
-        # Scope to TODAY's row (IST calendar date, matching get_today_positions
+                                   exit_time: str, pnl: float,
+                                   day: Optional[date] = None) -> int:
+        # Scope to the CLOSE's IST calendar date (matching get_today_positions
         # and the expression index). A rolling NOW()-1day window would also
         # close yesterday's orphaned OPEN row for the same symbol with today's
         # exit price — the UPDATE has no row limit.
-        today = datetime.now(_IST).date()
+        # `day` is passed by the retry queue: a write queued before midnight
+        # and retried after it must still target the CLOSE's date, not "today
+        # at retry time" (which would match 0 rows and read as success).
+        # Returns the matched-row count — 0 means the row is missing (e.g. the
+        # entry save failed); callers must not treat that as a landed write.
+        if day is None:
+            day = datetime.now(_IST).date()
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            tag = await conn.execute(
                 """
                 UPDATE positions
                 SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3
                 WHERE symbol=$4 AND status='OPEN'
                 AND (created_at AT TIME ZONE 'Asia/Kolkata')::date = $5
                 """,
-                exit_price, exit_time, pnl, symbol, today,
+                exit_price, exit_time, pnl, symbol, day,
             )
+        try:
+            return int(tag.rsplit(" ", 1)[-1])   # "UPDATE n"
+        except (ValueError, AttributeError):
+            return -1
 
     async def get_today_positions(self) -> List[Dict[str, Any]]:
         today = datetime.now(_IST).date()

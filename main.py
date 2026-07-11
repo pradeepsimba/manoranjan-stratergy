@@ -40,6 +40,10 @@ async def lifespan(app: FastAPI):
     yield
 
     await scheduler.stop()
+    # The market-data connection loops are separate tasks the scheduler does
+    # not own — stop them before the DB closes so nothing is left running
+    # against a torn-down process (no-op when the WS never started).
+    await mkt_service.stop()
     await db_service.close()
 
 

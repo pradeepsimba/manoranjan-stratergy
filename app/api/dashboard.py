@@ -116,7 +116,11 @@ async def watchlist_full() -> List[Dict[str, Any]]:
             uni = {}
         if uni:
             st.full_watchlist = uni
-            st.token_to_name  = {tok: name for name, tok in uni.items()}
+            # UPDATE, don't replace: restored open positions may carry tokens
+            # that are NOT in today's client-status universe — wholesale
+            # reassignment would break their tick->symbol bridge and stop
+            # their SL/target monitoring.
+            st.token_to_name.update({tok: name for name, tok in uni.items()})
     universe = dict(st.full_watchlist)
     # Restored open positions can be active without being in today's universe.
     for sym, tok in st.active_watchlist.items():
@@ -208,12 +212,33 @@ class BacktestRequest(BaseModel):
     overrides:    Optional[Dict[str, Any]] = None
 
 
+# Max replay range per timeframe (days) — a 500-symbol universe at 1m over
+# years would materialize tens of millions of Candle objects inside the SAME
+# process that runs live trading (OOM risk). Bounds scale with bar coarseness.
+_BT_MAX_RANGE_DAYS = {"1m": 60, "3m": 120, "5m": 250, "10m": 365, "15m": 365,
+                      "30m": 730, "60m": 730, "1d": 3650}
+# In-flight run ids — each run spawns a worker-thread pool; unbounded parallel
+# runs would oversubscribe the CPU under a live session.
+_BT_RUNNING: set = set()
+_BT_MAX_CONCURRENT = 2
+
+
+async def _run_backtest_tracked(run_id: str, *args, **kwargs) -> None:
+    try:
+        await run_backtest(*args, **kwargs)
+    finally:
+        _BT_RUNNING.discard(run_id)
+
+
 @router.post("/api/backtest")
 async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
     if _db is None:
         raise HTTPException(503, "Database not ready")
     if req.from_date > req.to_date:
         raise HTTPException(400, "from_date must be on or before to_date")
+    if len(_BT_RUNNING) >= _BT_MAX_CONCURRENT:
+        raise HTTPException(409, f"{_BT_MAX_CONCURRENT} backtests already running — "
+                                 "wait for one to finish")
 
     try:
         attr_overrides = settings.expand_changes(req.overrides or {}, bt_only=True)
@@ -241,16 +266,31 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
     if timeframe == "1d":
         mode = "delivery"   # 1d bars are days — positional by construction
 
+    max_days = _BT_MAX_RANGE_DAYS.get(timeframe, 250)
+    if (req.to_date - req.from_date).days > max_days:
+        raise HTTPException(
+            400, f"range too long for {timeframe}: max {max_days} days "
+                 f"(the replay materializes every bar for ~500 symbols in memory)")
+
     run_id = uuid.uuid4().hex[:12]
-    await _db.create_backtest_run(
-        run_id, req.from_date, req.to_date,
-        {"slippage_bps": slippage, "capital": capital,
-         "timeframe": timeframe, "mode": mode, "overrides": attr_overrides},
-    )
+    # Reserve the slot BEFORE the awaited DB insert — two concurrent POSTs
+    # would otherwise both pass the len() check above during the await and
+    # exceed the cap. Released by the tracked wrapper (or on create failure).
+    _BT_RUNNING.add(run_id)
+    try:
+        await _db.create_backtest_run(
+            run_id, req.from_date, req.to_date,
+            {"slippage_bps": slippage, "capital": capital,
+             "timeframe": timeframe, "mode": mode, "overrides": attr_overrides},
+        )
+    except Exception:
+        _BT_RUNNING.discard(run_id)
+        raise
     spawn(
-        run_backtest(_db, run_id, req.from_date, req.to_date,
-                     slippage, capital, overrides=attr_overrides,
-                     timeframe=timeframe, mode=mode)
+        _run_backtest_tracked(
+            run_id, _db, run_id, req.from_date, req.to_date,
+            slippage, capital, overrides=attr_overrides,
+            timeframe=timeframe, mode=mode)
     )
     return {"run_id": run_id, "status": "running", "timeframe": timeframe, "mode": mode}
 
@@ -502,7 +542,17 @@ def _live_patched(cached: list, timeframe: str, tok: str, sym: str,
                      low=min(c.low for c in live5),
                      volume=sum(c.volume for c in live5))
         if has_today:
-            out[-1] = bar                # replace today's (stale) daily bar
+            # MERGE with the fetched daily bar, same reason as the intraday
+            # branch below: the live 5m buffer may span only part of the day
+            # (mid-day restart, failed morning batch) — its first bar's open
+            # is then a MID-DAY price and its volume a partial sum; the
+            # server's bar holds the true open/high/low.
+            prev = out[-1]
+            out[-1] = Candle(start_time=prev.start_time, open=prev.open,
+                             high=max(prev.high, bar.high),
+                             low=min(prev.low, bar.low),
+                             close=bar.close,
+                             volume=max(prev.volume, bar.volume))
         else:
             out.append(bar)
     elif live5:
@@ -582,9 +632,14 @@ _mtf_sig_memo: Dict[tuple, tuple] = {}  # (tf, tok) → (fingerprint, signal dic
 
 
 def _evict_tf_memos(timeframe: str) -> None:
+    # These memos are WRITTEN from to_thread workers while this sweep runs on
+    # the event loop — iterate an atomic snapshot (bare list(dict) is one
+    # C-level op) or a concurrent insert raises "dict changed size during
+    # iteration" and 500s the request that triggered the sweep.
     for memo in (_tf_row_memo, _mtf_sig_memo, _patched_cache):
-        for key in [k for k in memo if k[0] == timeframe]:
-            del memo[key]
+        for key in list(memo):
+            if key[0] == timeframe:
+                memo.pop(key, None)
 
 
 def _bar_fingerprint(candles: list) -> Optional[tuple]:
@@ -731,7 +786,7 @@ def _mtf_tf_signals(watchlist: Dict[str, str], hist: Dict[str, list],
 
 
 @router.get("/api/indicators/mtf", response_model=None)
-async def indicators_mtf(tfs: str = "5m,15m,1h") -> Dict[str, Any]:
+async def indicators_mtf(tfs: str = "5m,15m,60m") -> Dict[str, Any]:
     # Validate + dedupe (preserve order) + cap at 4 to bound compute.
     chosen: List[str] = []
     for t in tfs.split(","):

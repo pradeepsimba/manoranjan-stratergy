@@ -18,7 +18,20 @@ var _rafPending = false;   // coalesce rapid WS updates into one paint frame
 // Pre-instantiated formatter for maximum performance (en-IN format with 2 dp)
 var _formatter2dp = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-// ── Market hours (IST) ────────────────────────────────────────────────────────
+// ── Market phase badge ────────────────────────────────────────────────────────
+// The SERVER'S phase is authoritative — session timings are runtime-editable
+// settings, so a hardcoded 09:15/09:45/15:30 clock heuristic lies the moment
+// the user changes them. The heuristic below is only the pre-first-message
+// fallback.
+var _lastPhase = null;   // last STATE_UPDATE's phase field
+var _PHASE_BADGE = {
+  pre_market: ['Pre-Market', false],
+  wait_zone:  ['Wait Zone',  true],
+  active:     ['Active',     true],
+  cutoff:     ['Cutoff',     true],
+  closed:     ['Market Closed', false],
+};
+
 function marketStatus() {
   var ist  = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
   if (ist.getDay() === 0 || ist.getDay() === 6) {
@@ -32,8 +45,9 @@ function marketStatus() {
 }
 
 function updateMarketBadge() {
-  var s  = marketStatus();
   var el = document.getElementById('mkt-badge');
+  var p  = _lastPhase && _PHASE_BADGE[_lastPhase];
+  var s  = p ? { open: p[1], label: p[0] } : marketStatus();
   el.textContent = s.label;
   el.className   = 'badge ' + (s.open ? 'green' : 'gray');
 }
@@ -115,6 +129,7 @@ function connect() {
       // carries indicatorSnapshot only every 10th push, so gating these behind
       // snapshot presence would freeze them between snapshots outside market
       // hours (when no ~100ms INDICATOR_UPDATE deltas flow).
+      if (d.type === 'STATE_UPDATE' && d.phase) _lastPhase = d.phase;
       updateMarketBadge();
       // Compare mode is fully polled — ignore live 5m WS updates.
       if (mtfMode) return;
@@ -150,6 +165,22 @@ function connect() {
         'Live · ' + now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       var snap = d.indicatorSnapshot;
       if (!snap || typeof snap !== 'object') return;
+      // A STATE_UPDATE snapshot is the FULL universe (stubs included for
+      // unscanned symbols) — drop rows it no longer contains, or a tab kept
+      // open across a day boundary keeps yesterday-only symbols forever,
+      // frozen at stale prices. INDICATOR_UPDATE snapshots are deltas (dirty
+      // symbols only) and must never trigger removal. The sanity floor
+      // guards the restart-recovery window: right after a server restart the
+      // "universe" may be only the few RESTORED open symbols — a 2-symbol
+      // snapshot must not wipe ~500 cached rows (and then persist the gutted
+      // map to the day cache via _saveCache).
+      var snapCount = Object.keys(snap).length;
+      if (d.type === 'STATE_UPDATE' &&
+          snapCount >= Math.max(20, Object.keys(rowsMap).length / 2)) {
+        Object.keys(rowsMap).forEach(function(sym) {
+          if (!(sym in snap)) { delete rowsMap[sym]; _needFull = true; }
+        });
+      }
       // Merge fresher WS data; always force entry.symbol = the JSON key
       // so search never accidentally sees a token string instead of a name.
       Object.keys(snap).forEach(function(sym) {
@@ -164,6 +195,11 @@ function connect() {
         // only then is the O(n log n) full render needed.
         if (sortKey !== 'symbol' && sortKey in source) _needFull = true;
         Object.keys(source).forEach(function(key) {
+          // ltp/bar_time are handled ONLY by the guarded copies below —
+          // copying them here would overwrite a real price with a stub's
+          // 0.0 / '—' (neither is null/undefined) before the guards run,
+          // making them dead code and poisoning the day-cache with zeros.
+          if (key === 'ltp' || key === 'bar_time') return;
           if (source[key] !== null && source[key] !== undefined) {
             target[key] = source[key];
           } else if (target[key] === undefined) {
@@ -176,7 +212,9 @@ function connect() {
         // mid-session restart), and overwriting real prices with 0.00 would
         // also poison the localStorage day-cache via the next _saveCache.
         if ('ltp' in source && source.ltp > 0) target.ltp = source.ltp;
+        else if (target.ltp === undefined) target.ltp = null;
         if ('bar_time' in source && source.bar_time !== '—') target.bar_time = source.bar_time;
+        else if (target.bar_time === undefined) target.bar_time = null;
         if ('spread' in source) target.spread = source.spread;
         if ('bid' in source) target.bid = source.bid;
         if ('ask' in source) target.ask = source.ask;

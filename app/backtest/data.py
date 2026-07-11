@@ -64,7 +64,16 @@ class SymbolSeries:
 
 
 def _sort_candles(candles: List[Candle]) -> List[Candle]:
-    return sorted(candles, key=lambda c: c.start_time)
+    """
+    Chronological + DEDUPED by start_time (last wins — matches the live
+    upsert's update-in-place semantics). A server glitch that replays a bar
+    would otherwise double-count it in the VWAP prefix sums, silently skewing
+    every later bar's session VWAP that day.
+    """
+    out: Dict[str, Candle] = {}
+    for c in sorted(candles, key=lambda c: c.start_time):
+        out[c.start_time] = c
+    return list(out.values())
 
 
 def warmup_calendar_days(timeframe: str, configured: int,
@@ -84,7 +93,10 @@ def warmup_calendar_days(timeframe: str, configured: int,
         lookback = cfg.TALIB_LOOKBACK
     mins  = cfg.TIMEFRAME_MINUTES.get(timeframe, 5)
     tdays = math.ceil(lookback * mins / 375.0)
-    cdays = math.ceil(tdays * 7.0 / 5.0) + 3
+    # 365/245 ≈ trading→calendar ratio including ~15 NSE holidays/year (the
+    # old 7/5 covered weekends only — a holiday cluster could leave 60m/1d
+    # warmups a few bars short of the lookback).
+    cdays = math.ceil(tdays * 365.0 / 245.0) + 3
     return max(configured, cdays)
 
 

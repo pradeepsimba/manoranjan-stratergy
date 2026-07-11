@@ -115,10 +115,14 @@ class SchedulerService:
         # Serializes the read-modify-write of the persisted watchlist-override
         # blob — two rapid dashboard edits would otherwise lose one update.
         self._wl_lock = asyncio.Lock()
-        # Exit rows whose DB UPDATE failed (see _write_exit) — retried every
-        # tick cycle and at EOD so the row can't stay OPEN in Postgres after
-        # the position already closed in memory.
-        self._pending_exit_writes: List[dict] = []
+        # Exit rows whose DB UPDATE failed (see _write_exit) — retried in the
+        # tick loop (AFTER the in-memory SL/target checks, throttled) and at
+        # EOD so the row can't stay OPEN in Postgres after the position
+        # already closed in memory. Entry saves get the same treatment: an
+        # unsaved fill would break restart recovery (no-re-entry + daily P&L).
+        self._pending_exit_writes:  List[dict]     = []
+        self._pending_entry_saves:  List[Position] = []
+        self._next_db_retry: float = 0.0   # monotonic; throttles retries to 1/5s
 
     async def start(self) -> None:
         self._tasks = [
@@ -388,31 +392,66 @@ class SchedulerService:
         UPDATE were only printed-and-dropped, the row would stay OPEN in
         Postgres and a same-day restart would resurrect (and re-manage) the
         finished trade with understated daily P&L. Failures queue for retry.
+
+        The CLOSE's IST date rides in the kw: a write queued near midnight and
+        retried the next day must still target the close's row — resolving
+        "today" at retry time would match 0 rows and silently drop the write.
         """
         kw = dict(symbol=closed.symbol, exit_price=closed.exit_price,
-                  exit_time=closed.exit_time, pnl=closed.pnl)
+                  exit_time=closed.exit_time, pnl=closed.pnl,
+                  day=_now().date())
         try:
-            await self._db.update_position_exit(**kw)
+            n = await self._db.update_position_exit(**kw)
+            if n == 0:
+                print(f"Exit write matched NO row ({closed.symbol}) — "
+                      f"entry save may have failed; queued for retry")
+                self._pending_exit_writes.append(kw)
         except Exception as e:
             self._pending_exit_writes.append(kw)
             print(f"Exit DB write failed ({closed.symbol}) — queued for retry: {e}")
 
-    async def _flush_exit_writes(self) -> None:
-        """Retry queued exit writes; stop at the first failure (DB still down)."""
+    async def _flush_db_retries(self) -> None:
+        """
+        Retry queued entry saves then exit writes; stop at the first failure
+        (DB still down). Entry saves go FIRST — an exit UPDATE can only match
+        once its row exists. An exit retry that still matches 0 rows stays
+        queued (its entry save may land on a later flush).
+        """
+        while self._pending_entry_saves:
+            pos = self._pending_entry_saves[0]
+            try:
+                await self._db.save_position(pos)
+            except Exception as e:
+                print(f"Entry-save retry failed ({pos.symbol}): {e}")
+                return
+            self._pending_entry_saves.pop(0)
+        remaining: List[dict] = []
         while self._pending_exit_writes:
             kw = self._pending_exit_writes[0]
             try:
-                await self._db.update_position_exit(**kw)
+                n = await self._db.update_position_exit(**kw)
             except Exception as e:
                 print(f"Exit-write retry failed ({kw['symbol']}): {e}")
+                self._pending_exit_writes.extend(remaining)
                 return
             self._pending_exit_writes.pop(0)
+            if n == 0:
+                # Entry queue is empty at this point (flushed above), so the
+                # row either landed already-CLOSED via a retried entry save
+                # (save_position persists exit fields — nothing left to do)
+                # or never existed at all. Keeping the kw would retry a
+                # guaranteed 0-row UPDATE every 5s forever — drop it loudly.
+                if self._pending_entry_saves:
+                    remaining.append(kw)   # its entry save may still land
+                else:
+                    print(f"Exit write unresolvable ({kw['symbol']} "
+                          f"{kw['day']}): no OPEN row — dropped "
+                          f"(entry likely persisted already-closed)")
+        self._pending_exit_writes.extend(remaining)
 
     async def _tick_exits(self) -> None:
         """Tick-wise SL/target check against the live price for open positions."""
         st = get_state()
-        if self._pending_exit_writes:
-            await self._flush_exit_writes()
         for symbol in list(st.positions.keys()):
             ltp = st.ltp.get(symbol)
             if not ltp:
@@ -424,6 +463,14 @@ class SchedulerService:
                 continue
             if closed:
                 await self._write_exit(closed)
+        # Retry queued DB writes AFTER the in-memory SL/target loop (exits
+        # need no DB) and at most once per 5s — a dead DB with a slow connect
+        # timeout must not head-block stop monitoring every 100ms cycle.
+        if self._pending_exit_writes or self._pending_entry_saves:
+            now_m = asyncio.get_running_loop().time()
+            if now_m >= self._next_db_retry:
+                self._next_db_retry = now_m + 5.0
+                await self._flush_db_retries()
 
     async def _tick_entries(self, loop) -> None:
         """Re-evaluate every stock that ticked since the last cycle; fill aligned signals."""
@@ -463,6 +510,13 @@ class SchedulerService:
                 or st.daily_pnl <= -cfg.DAILY_LOSS_LIMIT):
             return
 
+        # Deterministic fill priority — SAME key as the backtest's
+        # _fill_signals (tightest stop ÷ price, then symbol). `signals` arrives
+        # in dirty-set hash order; without sorting, which signals win the
+        # concurrent-position slots is arbitrary and can never match a backtest.
+        signals = sorted(signals, key=lambda s: (
+            s.sl_offset / s.ltp if s.ltp > 0 else float("inf"), s.symbol))
+
         for sig in signals:
             ok, _ = can_enter(sig.symbol, st.positions, st.traded_today, st.daily_pnl)
             if not ok:
@@ -489,7 +543,11 @@ class SchedulerService:
             try:
                 await self._db.save_position(pos)
             except Exception as e:
-                print(f"DB save_position error ({sig.symbol}): {e}")
+                # Must not be dropped: without the row, the exit UPDATE matches
+                # nothing and a mid-day restart forgets the trade entirely —
+                # re-entering the symbol and understating daily P&L/loss limit.
+                self._pending_entry_saves.append(pos)
+                print(f"DB save_position failed ({sig.symbol}) — queued for retry: {e}")
 
     async def _restore_positions_from_db(self) -> None:
         """
@@ -673,18 +731,43 @@ class SchedulerService:
         if not st.traded_today and not st.positions:
             await self._restore_positions_from_db()
 
-        # Square off anything still open at the last known price before the feed
-        # stops, so every trade has a recorded exit and P&L.
+        # Square off anything still open at the last known price before the
+        # feed stops. After a restart-after-close, st.ltp is EMPTY (the WS
+        # never ran in this process) — falling back straight to entry_price
+        # would record a fabricated exit (pnl = −costs) even when the stock
+        # moved; fetch the real last 5m close for those symbols first.
+        missing = {s: st.positions[s].token
+                   for s in st.positions if not st.ltp.get(s)}
+        if missing:
+            try:
+                data = await fetch_today_candles(missing, [cfg.INTERVAL_5M])
+                for sym, tok in missing.items():
+                    bars = data.get(tok, {}).get(cfg.INTERVAL_5M) or []
+                    if bars:
+                        st.ltp[sym] = bars[-1].close
+            except Exception as e:
+                print(f"EOD: last-price fetch failed ({len(missing)} symbols): {e}")
+
         for symbol in list(st.positions.keys()):
             pos        = st.positions[symbol]
             exit_price = st.ltp.get(symbol, pos.entry_price)
             closed     = force_close(symbol, exit_price)
             if closed:
                 await self._write_exit(closed)
-        # Last chance today to land queued exit rows — an OPEN row surviving
-        # into tomorrow can never be squared off by the day-scoped queries.
-        if self._pending_exit_writes:
-            await self._flush_exit_writes()
+        # Last chance today to land queued rows — an OPEN row surviving into
+        # tomorrow can never be squared off by the day-scoped queries.
+        if self._pending_exit_writes or self._pending_entry_saves:
+            await self._flush_db_retries()
+        # Entry saves that STILL failed must not roll over: created_at is
+        # stamped at INSERT time, so landing tomorrow would file the trade
+        # under tomorrow's day scope (double-counted by tomorrow's restore).
+        # Exit writes are safe to keep — they carry their close date.
+        if self._pending_entry_saves:
+            lost = [p.symbol for p in self._pending_entry_saves]
+            self._pending_entry_saves.clear()
+            print(f"=== EOD: DROPPED {len(lost)} unsaved position rows "
+                  f"(DB down all day): {lost} — daily_stats still reflect "
+                  f"in-memory trades ===")
 
         await self._mkt.stop()
 
@@ -767,10 +850,16 @@ class SchedulerService:
             # (Only 1H is needed for today — the daily gate derives today's open
             # from the 5m session, so the never-live-updated 1d series is no
             # longer fetched.)
+            # One shared error list across the three fetches — each writing its
+            # own aggregate status would race (a healthy fetch finishing last
+            # overwrites a concurrent fetch's "API partial"). This loader is
+            # the single status writer for the round (below).
+            fetch_errors: list = []
             hist, today, nifty_5m = await asyncio.gather(
-                fetch_indicator_history(wl, cfg.INTERVAL_5M, days_back=5),
-                fetch_today_candles(wl, [cfg.INTERVAL_1H]),
-                fetch_nifty_candles(),
+                fetch_indicator_history(wl, cfg.INTERVAL_5M, days_back=5,
+                                        errors=fetch_errors),
+                fetch_today_candles(wl, [cfg.INTERVAL_1H], errors=fetch_errors),
+                fetch_nifty_candles(errors=fetch_errors),
             )
             for token_key, candles in hist.items():
                 st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
@@ -789,8 +878,14 @@ class SchedulerService:
             # duplicate NIFTY bars, which would skew the index VWAP / daily-open.
             st.nifty_candles_5m.clear(); st.nifty_candles_5m.extend(nifty_5m)
 
-            st.api_status = "API OK"
-            print(f"Historical load complete: {len(st.candles_5m)} stocks with 5m data")
+            # Single aggregate status for the whole load round — a day trading
+            # on a partial universe must not read as healthy.
+            st.api_status = (
+                f"API partial: {len(fetch_errors)} fetch(es) failed "
+                f"({fetch_errors[0]})" if fetch_errors else "API OK"
+            )
+            print(f"Historical load complete: {len(st.candles_5m)} stocks with 5m data"
+                  + (f" — {len(fetch_errors)} fetch error(s)" if fetch_errors else ""))
         except Exception as e:
             st.api_status = f"Load error: {e}"
             print(f"Historical load error: {e}")

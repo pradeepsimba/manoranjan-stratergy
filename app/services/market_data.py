@@ -257,18 +257,25 @@ class MarketDataService:
         st = self.state
         filled = 0
         for token, per_iv in data.items():
-            candles = per_iv.get(cfg.INTERVAL_5M) or []
-            if not candles:
-                continue
-            filled += 1
-            if token == cfg.NIFTY50_TOKEN:
-                with st._nifty_lock:
-                    for c in candles:
-                        self._upsert_list(st.nifty_candles_5m, c)
-            else:
-                with st.candle_lock(token):
-                    for c in candles:
-                        self._upsert(st.candles_5m, token, c)
+            # Per-token isolation: one bad symbol's merge must not raise out of
+            # _run_ws — that would crash the CONNECTION into a reconnect →
+            # backfill → crash loop, killing the feed (and exits) for every
+            # symbol on this chunk.
+            try:
+                candles = per_iv.get(cfg.INTERVAL_5M) or []
+                if not candles:
+                    continue
+                filled += 1
+                if token == cfg.NIFTY50_TOKEN:
+                    with st._nifty_lock:
+                        for c in candles:
+                            self._upsert_list(st.nifty_candles_5m, c)
+                else:
+                    with st.candle_lock(token):
+                        for c in candles:
+                            self._upsert(st.candles_5m, token, c)
+            except Exception as e:
+                print(f"WS [{label}] backfill merge error ({token}): {e}")
         print(f"WS [{label}] reconnect backfill: merged {filled} symbols")
 
     # ── Subscription filter builders ──────────────────────────────────────────
@@ -420,7 +427,10 @@ class MarketDataService:
     @staticmethod
     def _upsert(store: Dict[str, list], symbol: str, candle: Candle) -> None:
         lst = store.get(symbol)
-        if lst is None:
+        # `not lst` also covers an EXISTING-but-empty deque — the historical
+        # loader stores one for symbols the REST response listed with no bars
+        # (halted stock, new listing); lst[-1] on it would raise IndexError.
+        if lst is None or not lst:
             store[symbol] = _deque([candle], maxlen=_MAX_CANDLES)
             return
         last = lst[-1].start_time

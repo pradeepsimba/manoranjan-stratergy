@@ -67,8 +67,15 @@ function render(d) {
   const lbEl = document.getElementById('last-bar-time');
   if (lbEl) lbEl.textContent = d.lastBarTime ? `Last bar ${d.lastBarTime}` : 'Live';
 
-  setStatus('ws',  d.wsStatus  || '—', d.wsStatus  === 'WS Connected' ? 'green' : 'red');
-  setStatus('api', d.apiStatus || '—', d.apiStatus === 'API OK'        ? 'green' : 'red');
+  // The server derives ws_status from the tradeable feed and may suffix a
+  // degraded-aux note ("WS Connected (1 aux down)") — still connected, so
+  // prefix-match; strict equality would paint the healthy feed red.
+  const wsUp = (d.wsStatus || '').startsWith('WS Connected');
+  const wsDegraded = wsUp && d.wsStatus !== 'WS Connected';
+  setStatus('ws',  d.wsStatus  || '—', wsUp ? (wsDegraded ? 'yellow' : 'green') : 'red');
+  const apiSt = d.apiStatus || '—';
+  setStatus('api', apiSt, apiSt === 'API OK' ? 'green'
+                        : apiSt.startsWith('API partial') ? 'yellow' : 'red');
 
   const phase = d.phase || '—';
   const pb = document.getElementById('phase-badge');
@@ -338,10 +345,17 @@ function runBacktest() {
   const modeEl = document.getElementById('bt-mode');
   const mode = modeEl && modeEl.value ? modeEl.value : null;
 
-  const body = { from_date, to_date, capital };
-  if (slippage !== null && !Number.isNaN(slippage)) body.slippage_bps = slippage;
-  if (timeframe) body.timeframe = timeframe;
-  if (mode) body.mode = mode;
+  // The server prefers the direct form fields over the overrides JSON — so
+  // when the user typed one of these keys into the overrides box, DON'T send
+  // the corresponding (always-populated) form field, or the override would be
+  // validated, recorded in the run's params, shown in the meta tags… and
+  // silently never applied.
+  const hasOvr = k => !!overrides && Object.prototype.hasOwnProperty.call(overrides, k);
+  const body = { from_date, to_date };
+  if (!hasOvr('ACCOUNT_BALANCE')) body.capital = capital;
+  if (slippage !== null && !Number.isNaN(slippage) && !hasOvr('SLIPPAGE_BPS')) body.slippage_bps = slippage;
+  if (timeframe && !hasOvr('BACKTEST_TIMEFRAME')) body.timeframe = timeframe;
+  if (mode && !hasOvr('BACKTEST_MODE')) body.mode = mode;
   if (overrides) body.overrides = overrides;
 
   fetch('/api/backtest', {

@@ -136,6 +136,20 @@ def _try_exit(port: Portfolio, pos: BTPosition, bar: Candle, slippage_bps: float
     port.close_position(pos.symbol, bar.start_time, price, outcome)
 
 
+def _last_entry_start(tf_minutes: int) -> str:
+    """
+    Latest bar START time still eligible for entries: a bar decided at its
+    CLOSE must close by the cutoff, so start ≤ cutoff − tf_minutes. With
+    grid-aligned timings this yields the same bar set as the old `tm < cutoff`
+    (5m default: 14:25), but an off-grid cutoff (e.g. 14:28) or a coarse
+    timeframe (60m bar starting 14:00 closes 15:00) no longer lets the
+    backtest decide on data PAST the cutoff that live could never see.
+    Reads cfg at call time — must run inside the run's thread-override scope.
+    """
+    total = max(0, cfg.CUTOFF_HOUR * 60 + cfg.CUTOFF_MIN - tf_minutes)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
 def _simulate_day(
     day:          str,
     symbols:      Dict[str, SymbolSeries],
@@ -143,6 +157,7 @@ def _simulate_day(
     slippage_bps: float,
     capital:      Optional[float] = None,
     overrides:    Optional[Dict]  = None,
+    tf_minutes:   int             = 5,
 ) -> List:
     """
     Simulate ONE trading day with its own fresh portfolio. Days are fully
@@ -160,7 +175,8 @@ def _simulate_day(
     keeps reading the global runtime values.
     """
     with cfg.thread_overrides(overrides or {}):
-        return _simulate_day_impl(day, symbols, nifty, slippage_bps, capital)
+        return _simulate_day_impl(day, symbols, nifty, slippage_bps, capital,
+                                  tf_minutes)
 
 
 def _simulate_day_impl(
@@ -169,19 +185,20 @@ def _simulate_day_impl(
     nifty:        SymbolSeries,
     slippage_bps: float,
     capital:      Optional[float],
+    tf_minutes:   int,
 ) -> List:
     # Dynamic settings hoisted ONCE per day — we are inside the run's
     # thread-override scope, so these cannot change mid-day, and re-resolving
     # them per bar/per symbol costs millions of dynamic cfg lookups on a long
     # run (module __getattr__ + thread-local check each).
     scan_start = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"
-    cutoff     = f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d}"
+    last_entry = _last_entry_start(tf_minutes)
     max_pos    = cfg.MAX_CONCURRENT_POSITIONS
     loss_limit = cfg.DAILY_LOSS_LIMIT
 
     port = Portfolio()
     _replay_day(port, day, symbols, nifty, slippage_bps, capital,
-                scan_start, cutoff, max_pos, loss_limit)
+                scan_start, last_entry, max_pos, loss_limit)
 
     # 3) EOD square-off any survivors at the day's last bar close.
     for sym in list(port.positions.keys()):
@@ -205,7 +222,7 @@ def _replay_day(
     slippage_bps: float,
     capital:      Optional[float],
     scan_start:   str,
-    cutoff:       str,
+    last_entry:   str,   # latest eligible bar START (= cutoff − timeframe)
     max_pos:      int,
     loss_limit:   float,
 ) -> None:
@@ -261,10 +278,11 @@ def _replay_day(
                 continue
             _try_exit(port, pos, ss.series[gidx], slippage_bps)
 
-        # 2) Entries — only inside the scan window, before cutoff, and only when
-        #    the portfolio can take a new position. Once 3 are open (or the loss
+        # 2) Entries — only inside the scan window (a bar is eligible when it
+        #    CLOSES by the cutoff — see _last_entry_start), and only when the
+        #    portfolio can take a new position. Once 3 are open (or the loss
         #    limit is hit) the whole 500-symbol scan is skipped until a slot frees.
-        if scan_start <= tm < cutoff:
+        if scan_start <= tm <= last_entry:
             open_syms, traded, dpnl = port.snapshot()
             if len(open_syms) < max_pos and dpnl > -loss_limit:
                 # Concurrent positions SHARE the account: size new entries from
@@ -304,10 +322,18 @@ def _fill_signals(port: Portfolio, signals: List[BTPosition],
     same-bar consumption by earlier fills — NOT to re-reject the slippage
     haircut the sizer never saw. A qty capped to exactly fit `available`
     would otherwise be dropped whenever int() slack < slippage, a systematic
-    under-entry bias vs live (which fills at the scan price). Shared by the
+    under-entry bias vs live (which sizes at the scan price). Shared by the
     intraday per-bar loop (_replay_day) and the daily positional loop
     (_simulate_range_daily) — keep them provably in sync.
     """
+    # Deterministic fill priority: tightest stop relative to price first
+    # (best risk-efficiency), symbol as tiebreak. Without an explicit order,
+    # which 3 of N same-bar signals win the concurrent-position slots depends
+    # on universe-fetch order (backtest) / set-hash order (live) — silently
+    # nondeterministic books. The LIVE fill loop sorts by the same key.
+    signals = sorted(signals, key=lambda s: (
+        s.sl_offset / s.entry_price if s.entry_price > 0 else float("inf"),
+        s.symbol))
     lev  = cfg.INTRADAY_LEVERAGE
     slip = 1.0 + slippage_bps / 10_000.0
     for sig in signals:
@@ -352,6 +378,14 @@ def _delivery_overrides(user_overrides: Optional[Dict] = None) -> Dict[str, Any]
         "GATE_STOCK_HOURLY":        cfg.DELIVERY_GATE_STOCK_HOURLY,
         "GATE_NIFTY_DAILY":         cfg.DELIVERY_GATE_NIFTY_DAILY,
         "GATE_NIFTY_VWAP":          cfg.DELIVERY_GATE_NIFTY_VWAP,
+        # CNC cost profile: STT on BOTH legs, higher stamp, flat DP per sell,
+        # usually zero brokerage — the intraday cost defaults understate
+        # delivery costs ~9x on STT alone.
+        "COST_BROKERAGE_PCT":       cfg.DELIVERY_COST_BROKERAGE_PCT,
+        "COST_STT_SELL":            cfg.DELIVERY_COST_STT,
+        "COST_STT_BUY":             cfg.DELIVERY_COST_STT,
+        "COST_STAMP_BUY":           cfg.DELIVERY_COST_STAMP,
+        "COST_DP_SELL":             cfg.DELIVERY_COST_DP,
     }
     for key in (user_overrides or {}):
         shadow.pop(key, None)
@@ -382,6 +416,7 @@ def _simulate_range_intraday(
     slippage_bps: float,
     capital:      Optional[float],
     overrides:    Optional[Dict],
+    tf_minutes:   int = 5,
 ) -> Tuple[List, int]:
     """
     DELIVERY (positional) replay on an INTRADAY timeframe: ONE portfolio across
@@ -404,14 +439,14 @@ def _simulate_range_intraday(
             return [], 0
 
         scan_start = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"
-        cutoff     = f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d}"
+        last_entry = _last_entry_start(tf_minutes)
         max_pos    = cfg.MAX_CONCURRENT_POSITIONS
         loss_limit = cfg.DAILY_LOSS_LIMIT
 
         port = Portfolio()
         for day in days:
             _replay_day(port, day, symbols, nifty, slippage_bps, capital,
-                        scan_start, cutoff, max_pos, loss_limit)
+                        scan_start, last_entry, max_pos, loss_limit)
 
         _square_off_range_end(port, symbols, lo_s, hi_s, slippage_bps)
         return port.trades, len(days)
@@ -521,12 +556,13 @@ def simulate(
     """
     tf = timeframe or cfg.BACKTEST_TIMEFRAME
     md = mode or cfg.BACKTEST_MODE
+    tf_min = cfg.TIMEFRAME_MINUTES.get(tf, 5)
     if tf == "1d":
         trades, ndays = _simulate_range_daily(
             symbols, nifty, from_d, to_d, slippage_bps, capital, overrides)
     elif md == "delivery":
         trades, ndays = _simulate_range_intraday(
-            symbols, nifty, from_d, to_d, slippage_bps, capital, overrides)
+            symbols, nifty, from_d, to_d, slippage_bps, capital, overrides, tf_min)
     else:
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
         days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
@@ -536,7 +572,8 @@ def simulate(
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bt-day") as pool:
             # map preserves input order → results already in chronological day order
             per_day = list(pool.map(
-                lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital, overrides),
+                lambda d: _simulate_day(d, symbols, nifty, slippage_bps, capital,
+                                        overrides, tf_min),
                 days,
             ))
         trades = []
@@ -590,6 +627,17 @@ async def run_backtest(
                 run_id, f"No {tf} data returned for {from_d} → {to_d} "
                         f"(NIFTY {'ok' if nifty else 'missing'}, {len(symbols)} symbols). "
                         f"Try a shorter date range.")
+            return
+        # A partially failed batched fetch silently drops whole batches — a run
+        # over 20% of the universe would otherwise complete 'done' with biased
+        # results and no error surface (the batch errors only reach the LIVE
+        # dashboard's api_status). Some symbols legitimately lack data in the
+        # range, so only a gross shortfall fails the run.
+        if len(symbols) < len(universe) * 0.5:
+            await db.fail_backtest_run(
+                run_id, f"Partial data: only {len(symbols)} of {len(universe)} "
+                        f"universe symbols returned {tf} candles — historical API "
+                        f"batches likely failed; retry the run.")
             return
 
         trades, equity, days = await asyncio.to_thread(

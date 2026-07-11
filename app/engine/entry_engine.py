@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import app.config as cfg
 from app.engine.conditions import build_entry_checks, failed_entry_checks
@@ -9,6 +11,25 @@ from app.engine.position_manager import calc_quantity, can_enter
 from app.engine.trend_filter import check_trend, trend_blockers
 from app.models import Candle, EntrySignal
 from app.state import get_state
+
+IST = ZoneInfo("Asia/Kolkata")
+
+# An hourly candle whose START is older than this is stale: a healthy 1h feed
+# updates the forming bar continuously, so its start_time is at most ~60min
+# old. Beyond this, the primary-1h WS connection has died and the "hourly
+# green" gate would silently evaluate a frozen candle for the rest of the day.
+_STALE_1H_SECONDS = 75 * 60
+
+
+def _stale_1h(candles_1h: List[Candle]) -> bool:
+    if not candles_1h:
+        return False
+    ts = candles_1h[-1].start_time[:16].replace("T", " ")
+    try:
+        bar_start = datetime.strptime(ts, "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+    except ValueError:
+        return False
+    return (datetime.now(IST) - bar_start).total_seconds() > _STALE_1H_SECONDS
 
 
 def _bar_time(candles_5m: List[Candle]) -> str:
@@ -113,6 +134,11 @@ def scan_stock(
         return None
 
     # ── Trend gate (entry pre-filter; disabled gates can't block) ────────────
+    # A frozen 1h candle (dead primary-1h connection) must read as MISSING —
+    # check_trend then leaves hourly_green False (fail-closed), same as the
+    # empty-list case, instead of gating on hours-old data all day.
+    if _stale_1h(candles_1h):
+        candles_1h = []
     gate     = check_trend(ltp, day_open, candles_1h, nifty_daily_green, nifty_above_vwap)
     blockers = trend_blockers(gate)
     if blockers:

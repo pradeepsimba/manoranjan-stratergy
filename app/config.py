@@ -200,14 +200,26 @@ _DEFAULTS: Dict[str, Any] = {
     "DELIVERY_GATE_NIFTY_DAILY":     True,
     "DELIVERY_GATE_NIFTY_VWAP":      True,
 
+    # Delivery (CNC) cost profile — NSE delivery is taxed very differently from
+    # intraday: STT is 0.1% on BOTH legs (vs 0.025% sell-only), stamp 0.015%
+    # (vs 0.003%), brokerage is usually 0 at discount brokers, and every sell
+    # incurs a flat DP charge. Shadowed onto the plain COST_* keys during
+    # positional replays; without this delivery P&L is overstated ~0.2%/trade.
+    "DELIVERY_COST_BROKERAGE_PCT": 0.0,      # CNC brokerage (0 at discount brokers)
+    "DELIVERY_COST_STT":           0.001,    # 0.1% STT — applied to BOTH legs
+    "DELIVERY_COST_STAMP":         0.00015,  # 0.015% stamp duty, buy side
+    "DELIVERY_COST_DP":            15.93,    # flat ₹ DP charge per sell
+
     # Realistic intraday-equity round-trip cost model (fractions of turnover)
     "COST_BROKERAGE_PCT": 0.0003,     # per executed order
     "COST_BROKERAGE_CAP": 20.0,       # ₹ cap per order
     "COST_STT_SELL":      0.00025,    # securities txn tax, sell side only
+    "COST_STT_BUY":       0.0,        # buy-side STT — 0 intraday; delivery pays BOTH legs
     "COST_TXN_CHARGE":    0.0000297,  # NSE exchange transaction charge
     "COST_GST":           0.18,       # GST on (brokerage + txn charge)
     "COST_STAMP_BUY":     0.00003,    # stamp duty, buy side only
     "COST_SEBI":          0.000001,   # SEBI turnover fee
+    "COST_DP_SELL":       0.0,        # flat ₹ DP charge per sell — 0 intraday, real for delivery
 }
 
 _runtime_overrides: Dict[str, Any] = {}

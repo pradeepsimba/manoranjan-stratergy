@@ -167,8 +167,16 @@ function renderRuleBuilder(s) {
       if (cl.op !== 'between') delete cl.value2;
     } else {
       const kind = _fieldMeta(s, cl.field).kind;
-      cl[prop] = kind === 'bool' ? (t.value === 'true') : parseFloat(t.value);
-      if (Number.isNaN(cl[prop])) cl[prop] = 0;
+      if (kind === 'bool') {
+        cl[prop] = (t.value === 'true');
+      } else {
+        // An emptied/garbled input parses to NaN — KEEP the previous value
+        // (sync() repaints it) instead of coercing to 0, which would silently
+        // turn e.g. "rsi < 30" into the never/always-true "rsi < 0" and save
+        // without any error.
+        const v = parseFloat(t.value);
+        if (!Number.isNaN(v)) cl[prop] = v;
+      }
     }
     sync();
   });
@@ -356,10 +364,12 @@ function updateSaveBar() {
 
 // Shared submit: every mutation endpoint returns the fresh describe() payload,
 // so success handling is identical — re-render from the response.
-// keepEdits: pending edits to PRESERVE across the re-render — resetting one key
-// must not silently discard the user's unsaved changes to OTHER keys (the
-// controls re-paint from `edits` first, so kept values stay visible).
-function submitSettings(method, url, body, okMsg, failLabel, keepEdits) {
+// settledKeys: the keys this request SETTLED (saved or reset). On success only
+// those are dropped from `edits`, and even they survive when the user re-edited
+// them to a DIFFERENT value while the request was in flight — computing the
+// survivors at response time (not call time) means edits made mid-flight to
+// other keys are never silently reverted by the re-render.
+function submitSettings(method, url, body, okMsg, failLabel, settledKeys, sentValues) {
   return fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
@@ -368,7 +378,12 @@ function submitSettings(method, url, body, okMsg, failLabel, keepEdits) {
     .then(async r => {
       const d = await r.json();
       if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
-      specData = d; edits = keepEdits || {}; render();
+      const keep = { ...edits };
+      (settledKeys || []).forEach(k => {
+        // Drop the settled edit unless it changed again while in flight.
+        if (!sentValues || keep[k] === sentValues[k]) delete keep[k];
+      });
+      specData = d; edits = keep; render();
       toast(okMsg, true);
     })
     .catch(e => toast(failLabel + ': ' + e.message, false));
@@ -380,23 +395,27 @@ function saveChanges() {
   const btn = document.getElementById('btn-save');
   btn.disabled = true;
   submitSettings('PUT', '/api/settings', { changes },
-                 'Settings saved — applied live', 'Save failed')
+                 'Settings saved — applied live', 'Save failed',
+                 Object.keys(changes), changes)
     .finally(() => { btn.disabled = false; });
 }
 
 function discardChanges() { loadSettings(); }
 
 function resetKeys(keys) {
-  const keep = { ...edits };
-  keys.forEach(k => delete keep[k]);   // only the reset key's own pending edit goes
+  // A reset key's own pending edit goes; everything else survives (evaluated
+  // at response time inside submitSettings).
   submitSettings('POST', '/api/settings/reset', { keys },
-                 'Reset to default', 'Reset failed', keep);
+                 'Reset to default', 'Reset failed', keys);
 }
 
 function resetAll() {
   if (!confirm('Reset ALL settings to their built-in defaults?')) return;
+  // A full reset settles EVERY pending edit — keeping them would re-render
+  // the just-reset form still covered in dirty markers.
   submitSettings('POST', '/api/settings/reset', {},
-                 'All settings reset to defaults', 'Reset failed');
+                 'All settings reset to defaults', 'Reset failed',
+                 Object.keys(edits));
 }
 
 // ── Toast / theme ──────────────────────────────────────────────────────────────

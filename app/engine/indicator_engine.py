@@ -299,7 +299,10 @@ def compute_indicators(
             s_tail = macdsignal[valid][-lookback_n:]
         nt = len(m_tail)   # same length — joint warmup guarantees alignment
         if nt >= 2:
-            above_now    = m_tail[-1] > s_tail[-1]
+            # bool() both operands: `np_bool and py_bool` yields np.False_ when
+            # the left side is falsy, which json-serializes as the STRING
+            # "False" (truthy!) in any payload carrying the raw field.
+            above_now    = bool(m_tail[-1] > s_tail[-1])
             was_below    = bool(np.any(m_tail[: nt - 1] <= s_tail[: nt - 1]))
             ind.macd_bullish_cross = above_now and was_below
 

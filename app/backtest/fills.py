@@ -55,14 +55,21 @@ def square_off_fill(close: float, bps: float) -> float:
 # ── Costs ─────────────────────────────────────────────────────────────────────
 
 def round_trip_costs(buy_value: float, sell_value: float) -> float:
-    """Total transaction cost for one buy + one sell leg (absolute ₹)."""
+    """
+    Total transaction cost for one buy + one sell leg (absolute ₹).
+
+    COST_STT_BUY and COST_DP_SELL are 0 for intraday; delivery-mode replays
+    shadow them (via engine._delivery_overrides) because CNC pays STT on BOTH
+    legs plus a flat DP charge per sell — without them positional P&L is
+    overstated by roughly 0.2% of turnover per round trip.
+    """
     brokerage = (
         min(cfg.COST_BROKERAGE_CAP, cfg.COST_BROKERAGE_PCT * buy_value)
         + min(cfg.COST_BROKERAGE_CAP, cfg.COST_BROKERAGE_PCT * sell_value)
     )
-    stt   = cfg.COST_STT_SELL  * sell_value
+    stt   = cfg.COST_STT_SELL * sell_value + cfg.COST_STT_BUY * buy_value
     txn   = cfg.COST_TXN_CHARGE * (buy_value + sell_value)
     gst   = cfg.COST_GST        * (brokerage + txn)
     stamp = cfg.COST_STAMP_BUY  * buy_value
     sebi  = cfg.COST_SEBI       * (buy_value + sell_value)
-    return brokerage + stt + txn + gst + stamp + sebi
+    return brokerage + stt + txn + gst + stamp + sebi + cfg.COST_DP_SELL
