@@ -67,8 +67,18 @@ SPEC: List[Dict[str, Any]] = [
        help_="EOD square-off and daily reset."),
 
     # ── Risk & capital ────────────────────────────────────────────────────────
+    _s("RISK_MODE", "Risk basis", "choice", "Risk & Capital",
+       choices=cfg.RISK_MODES,
+       help_="fixed_amount = risk ₹X per trade · capital_pct = risk X% of "
+             "account capital per trade. Stop placement (swing low) is the "
+             "same in both — only the share count changes."),
     _s("RISK_PER_TRADE", "Risk per trade ₹", "float", "Risk & Capital",
-       min_=50, max_=100_000, step=50, help_="Qty = risk ÷ stop distance."),
+       min_=50, max_=100_000, step=50,
+       help_="Qty = risk ÷ stop distance (used when Risk basis = fixed_amount)."),
+    _s("RISK_CAPITAL_PCT", "Risk % of capital (fraction)", "float", "Risk & Capital",
+       min_=0.001, max_=0.2, step=0.001,
+       help_="0.02 = a stop-out loses 2% of account capital "
+             "(used when Risk basis = capital_pct)."),
     _s("ACCOUNT_BALANCE", "Account capital ₹", "float", "Risk & Capital",
        min_=1_000, max_=100_000_000, step=1000),
     _s("INTRADAY_LEVERAGE", "Intraday leverage ×", "int", "Risk & Capital",
@@ -151,8 +161,15 @@ SPEC: List[Dict[str, Any]] = [
        min_=0.5, max_=1000, step=0.5, help_="Structural stop floor for overnight/multi-day holds."),
     _s("DELIVERY_RR_RATIO", "Reward : risk ratio (delivery)", "float", "Delivery Mode",
        min_=0.5, max_=20, step=0.1),
+    _s("DELIVERY_RISK_MODE", "Risk basis (delivery)", "choice", "Delivery Mode",
+       choices=cfg.RISK_MODES,
+       help_="fixed_amount = risk ₹X per trade · capital_pct = risk X% of "
+             "capital per trade (stop stays at the swing low)."),
     _s("DELIVERY_RISK_PER_TRADE", "Risk per trade ₹ (delivery)", "float", "Delivery Mode",
        min_=50, max_=100_000, step=50),
+    _s("DELIVERY_RISK_CAPITAL_PCT", "Risk % of capital (delivery)", "float", "Delivery Mode",
+       min_=0.001, max_=0.2, step=0.001,
+       help_="0.02 = a stop-out loses 2% of capital (Risk basis = capital_pct)."),
     _s("DELIVERY_MAX_CONCURRENT_POSITIONS", "Max open positions (delivery)", "int", "Delivery Mode",
        min_=1, max_=20),
     _s("DELIVERY_DAILY_LOSS_LIMIT", "Run loss limit ₹ (delivery)", "float", "Delivery Mode",

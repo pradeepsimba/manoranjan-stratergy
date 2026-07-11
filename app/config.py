@@ -86,6 +86,9 @@ BACKTEST_TIMEFRAMES = list(TIMEFRAMES)
 # (its bars ARE days), so it replays as delivery regardless of this choice.
 BACKTEST_MODES = ["intraday", "delivery"]
 
+# Per-trade risk basis choices (see RISK_MODE in _DEFAULTS).
+RISK_MODES = ["fixed_amount", "capital_pct"]
+
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
 HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
 SCAN_WORKERS      = 16    # ThreadPoolExecutor size for the parallel scan
@@ -106,7 +109,15 @@ _DEFAULTS: Dict[str, Any] = {
     "SESSION_END_HOUR": 15, "SESSION_END_MIN": 30,   # Terminate session
 
     # Risk & capital
+    # How the per-trade risk (the ₹ lost when a stop hits) is defined:
+    #   "fixed_amount" — RISK_PER_TRADE ₹ per setup (original blueprint)
+    #   "capital_pct"  — RISK_CAPITAL_PCT × account capital per setup
+    # Stop PLACEMENT is unchanged in both modes (structural swing-low stop,
+    # floored at MIN_SL_OFFSET); the mode only changes how many shares are
+    # sized against that stop distance.
+    "RISK_MODE":                "fixed_amount",
     "RISK_PER_TRADE":           500.0,     # ₹ fixed risk capital per setup
+    "RISK_CAPITAL_PCT":         0.02,      # 0.02 = a stop-out loses 2% of capital
     "ACCOUNT_BALANCE":          40_000.0,  # ₹ base capital
     "INTRADAY_LEVERAGE":        5,         # Standard NSE intraday equity leverage
     "MAX_CONCURRENT_POSITIONS": 3,         # Hard cap on simultaneous open positions
@@ -180,7 +191,9 @@ _DEFAULTS: Dict[str, Any] = {
     # calc_quantity/can_enter/conditions.py/trend_filter.py are never forked.
     "DELIVERY_MIN_SL_OFFSET":    15.0,    # wider structural stop for multi-day holds
     "DELIVERY_RR_RATIO":         2.5,     # swing trades target a bigger reward:risk
+    "DELIVERY_RISK_MODE":        "fixed_amount",   # fixed_amount | capital_pct
     "DELIVERY_RISK_PER_TRADE":   500.0,   # ₹ fixed risk capital per setup
+    "DELIVERY_RISK_CAPITAL_PCT": 0.02,    # 0.02 = a stop-out loses 2% of capital
     "DELIVERY_MAX_CONCURRENT_POSITIONS": 3,
     "DELIVERY_DAILY_LOSS_LIMIT": 2_000.0, # run-level loss stop (positional semantics)
     "DELIVERY_LEVERAGE":         1,       # CNC/delivery has no intraday margin by default

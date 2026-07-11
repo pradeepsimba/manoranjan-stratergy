@@ -6,23 +6,36 @@ import app.config as cfg
 
 
 def calc_quantity(
-    entry_price: float,
-    support:     float,
-    capital:     Optional[float] = None,
+    entry_price:   float,
+    support:       float,
+    capital:       Optional[float] = None,
+    total_capital: Optional[float] = None,
 ) -> tuple[int, float, float]:
     """
     Compute trade quantity using the blueprint formula:
-        Qty = RISK_PER_TRADE / (entry - support)
+        Qty = risk / (entry - support)
 
-    `capital` overrides cfg.ACCOUNT_BALANCE so the backtest can be run with a
-    user-supplied starting balance without touching global config. (Resolved
-    at call time — a default-argument cfg read would freeze the dynamic value.)
+    where `risk` — the ₹ lost when the stop hits — is resolved from RISK_MODE:
+        fixed_amount — RISK_PER_TRADE ₹ (original blueprint)
+        capital_pct  — RISK_CAPITAL_PCT × total_capital (e.g. 2% of the
+                       account per stop-out). Stop PLACEMENT is identical in
+                       both modes; only the share count changes.
+
+    `capital` is the AVAILABLE capital (account minus margin already committed
+    by open positions) — the affordability ceiling. `total_capital` is the
+    FULL account/run equity, the basis for capital_pct risk; it must not
+    shrink as positions open, or the risk per trade would silently decay.
+    Both default to cfg.ACCOUNT_BALANCE so the backtest can run on a
+    user-supplied balance without touching global config. (Resolved at call
+    time — a default-argument cfg read would freeze the dynamic value.)
 
     Returns (quantity, sl_offset, target_offset).
     Returns (0, ...) if the setup is invalid or capital is insufficient.
     """
     if capital is None:
         capital = cfg.ACCOUNT_BALANCE
+    if total_capital is None:
+        total_capital = cfg.ACCOUNT_BALANCE
 
     # Support at/above entry means no structural stop BELOW the entry price.
     # Flooring to MIN_SL_OFFSET would put the stop at an arbitrary entry−₹5 and
@@ -36,7 +49,11 @@ def calc_quantity(
 
     sl_offset = round(max(entry_price - support, cfg.MIN_SL_OFFSET), 2)
 
-    raw_qty = cfg.RISK_PER_TRADE / sl_offset
+    if cfg.RISK_MODE == "capital_pct":
+        risk = total_capital * cfg.RISK_CAPITAL_PCT
+    else:
+        risk = cfg.RISK_PER_TRADE
+    raw_qty = risk / sl_offset
     qty     = max(1, int(raw_qty))
 
     target_offset = round(sl_offset * cfg.RR_RATIO, 2)

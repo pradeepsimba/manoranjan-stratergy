@@ -52,7 +52,8 @@ def _scan_symbol(
     traded,
     daily_pnl:         float,
     slippage_bps:      float,
-    capital:           Optional[float] = None,
+    capital:           Optional[float] = None,   # AVAILABLE (account − margin used)
+    total_capital:     Optional[float] = None,   # FULL run equity — capital_pct risk basis
 ) -> Optional[BTPosition]:
     """Evaluate one symbol at bar `gidx`. Returns a ready BTPosition or None."""
     ok, _ = can_enter(ss.name, open_syms, traded, daily_pnl)
@@ -97,7 +98,8 @@ def _scan_symbol(
     if not entry_ok(ind, None):
         return None
 
-    qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level, capital)
+    qty, sl_offset, target_offset = calc_quantity(ltp, ind.support_level,
+                                                  capital, total_capital)
     if qty == 0:
         return None
 
@@ -304,6 +306,7 @@ def _replay_day(
                             ss, gidx, day_idxs[0], hour_open_day,
                             nifty_daily_green, nifty_above_vwap,
                             open_syms, traded, dpnl, slippage_bps, available,
+                            cap_total,
                         )
                         if sig:
                             signals.append(sig)
@@ -363,7 +366,9 @@ def _delivery_overrides(user_overrides: Optional[Dict] = None) -> Dict[str, Any]
     shadow = {
         "MIN_SL_OFFSET":            cfg.DELIVERY_MIN_SL_OFFSET,
         "RR_RATIO":                 cfg.DELIVERY_RR_RATIO,
+        "RISK_MODE":                cfg.DELIVERY_RISK_MODE,
         "RISK_PER_TRADE":           cfg.DELIVERY_RISK_PER_TRADE,
+        "RISK_CAPITAL_PCT":         cfg.DELIVERY_RISK_CAPITAL_PCT,
         "MAX_CONCURRENT_POSITIONS": cfg.DELIVERY_MAX_CONCURRENT_POSITIONS,
         "DAILY_LOSS_LIMIT":         cfg.DELIVERY_DAILY_LOSS_LIMIT,
         "INTRADAY_LEVERAGE":        cfg.DELIVERY_LEVERAGE,
@@ -522,6 +527,7 @@ def _simulate_range_daily(
                             ss, idxs[0], idxs[0], {},
                             nifty_daily_green, nifty_above_vwap,
                             open_syms, traded, dpnl, slippage_bps, available,
+                            cap_total,
                         )
                         if sig:
                             signals.append(sig)

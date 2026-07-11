@@ -58,7 +58,7 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 
 **Live = 8 conditions, backtest = 7 (parity caveat):** `depth_bullish` uses live order-book depth parsed from the WS `snap` field (`st.depth[symbol] = {bid, ask, spread, buy_qty, sell_qty, ratio}`). It defaults to **pass** when no snap data has arrived, so it only vetoes a clearly bearish book. Historical data has no order book, so the **backtest omits `depth_bullish`** — live is therefore slightly stricter than backtest.
 
-**Risk guards (`can_enter`):** max 3 concurrent open positions, no same-day re-entry, ₹2000 daily loss limit, ₹500 risk/trade.
+**Risk guards (`can_enter`):** max 3 concurrent open positions, no same-day re-entry, ₹2000 daily loss limit. Per-trade risk (`calc_quantity`) is mode-switched by `RISK_MODE`: `fixed_amount` = ₹500 (`RISK_PER_TRADE`) or `capital_pct` = `RISK_CAPITAL_PCT` × account capital per stop-out — stop PLACEMENT (swing low, `MIN_SL_OFFSET` floor) is identical in both; only share count changes. The `capital_pct` basis is the FULL account/run equity (`total_capital` arg — backtests pass `cap_total`), never the available remainder, or risk would decay as positions open. Delivery variants (`DELIVERY_RISK_MODE`/`DELIVERY_RISK_CAPITAL_PCT`) shadow these in positional replays.
 
 ## Dynamic settings layer
 
