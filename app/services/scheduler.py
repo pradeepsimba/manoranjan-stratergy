@@ -750,8 +750,12 @@ class SchedulerService:
 
         for symbol in list(st.positions.keys()):
             pos        = st.positions[symbol]
-            exit_price = st.ltp.get(symbol, pos.entry_price)
-            closed     = force_close(symbol, exit_price)
+            exit_price = st.ltp.get(symbol)
+            # No market price even after the REST fetch above → square off at
+            # entry (synthetic: skip slippage — a fake price must not book a
+            # fake slippage loss on top).
+            closed = force_close(symbol, exit_price or pos.entry_price,
+                                 synthetic=exit_price is None)
             if closed:
                 await self._write_exit(closed)
         # Last chance today to land queued rows — an OPEN row surviving into

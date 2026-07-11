@@ -250,7 +250,13 @@ class MarketDataService:
         if not wl:
             return
         try:
-            data = await fetch_today_candles(wl, [cfg.INTERVAL_5M])
+            # Own errors list → this background heal never writes api_status:
+            # its "API OK" could otherwise mask a concurrent session load's
+            # "API partial" (the status the dashboard needs to keep showing).
+            bf_errors: list = []
+            data = await fetch_today_candles(wl, [cfg.INTERVAL_5M], errors=bf_errors)
+            if bf_errors:
+                print(f"WS [{label}] backfill fetch errors: {bf_errors[0]}")
         except Exception as e:
             print(f"WS [{label}] reconnect backfill failed: {e}")
             return

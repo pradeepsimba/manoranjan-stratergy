@@ -96,12 +96,8 @@ CREATE TABLE IF NOT EXISTS app_settings (
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
 CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
--- Unique per paper order — makes save_position's INSERT idempotent
--- (ON CONFLICT (order_id) DO NOTHING), so a crash-after-commit retry can't
--- create a duplicate row. NULLs (pre-existing rows without an id) don't
--- collide under a UNIQUE index.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_order_id ON positions(order_id);
-
+-- (the UNIQUE order_id index is created separately in init() — guarded, so
+--  legacy duplicate ids can't stop the app from booting)
 -- Add indicator columns to existing tables (idempotent)
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS rsi            NUMERIC(6,2);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS adx            NUMERIC(6,2);
@@ -114,11 +110,30 @@ ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS support_level  NUMERIC(12,2
 class DatabaseService:
     def __init__(self) -> None:
         self._pool: Optional[asyncpg.Pool] = None
+        # True once the unique order_id index exists — save_position may then
+        # use ON CONFLICT (which REQUIRES a matching index; using it without
+        # one raises on every insert).
+        self._order_id_unique = False
 
     async def init(self) -> None:
         self._pool = await asyncpg.create_pool(cfg.POSTGRES_DSN, min_size=2, max_size=15)
         async with self._pool.acquire() as conn:
             await conn.execute(_SCHEMA)
+            # Separate + guarded: makes save_position's INSERT idempotent for
+            # retries (crash-after-commit re-INSERT becomes a no-op). Legacy
+            # order ids lacked the date component and can collide across days
+            # (the sequence resets each restart), so index creation may fail
+            # on a pre-existing DB — that must degrade gracefully, not stop
+            # the app from booting.
+            try:
+                await conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_order_id "
+                    "ON positions(order_id)")
+                self._order_id_unique = True
+            except Exception as e:
+                print(f"WARNING: unique order_id index not created ({e}) — "
+                      f"entry-save retries are not idempotent until legacy "
+                      f"duplicate order_ids are cleaned up")
         print("PostgreSQL connected and schema applied")
 
     async def close(self) -> None:
@@ -133,14 +148,17 @@ class DatabaseService:
         # (DB outage spanning both events) must land as a complete CLOSED row
         # — inserting it without exit_price/pnl would permanently record a
         # phantom ₹0 trade that restart-restore then trusts.
-        # ON CONFLICT ON the order_id unique index makes the retry idempotent:
+        # ON CONFLICT on the order_id unique index makes the retry idempotent:
         # a crash-after-commit re-INSERT is a no-op instead of a duplicate row
-        # (which the day-scoped exit UPDATE would close in bulk).
+        # (which the day-scoped exit UPDATE would close in bulk). Only usable
+        # when the index actually exists (see init) — ON CONFLICT without a
+        # matching index raises on EVERY insert.
         ind = pos.indicators or IndicatorResult()
         gate = pos.trend or TrendGate()
+        conflict = "ON CONFLICT (order_id) DO NOTHING" if self._order_id_unique else ""
         async with self._pool.acquire() as conn:
             await conn.execute(
-                """
+                f"""
                 INSERT INTO positions
                     (symbol, token, entry_price, entry_time, quantity,
                      stop_loss, target, sl_offset, target_offset, order_id,
@@ -149,7 +167,7 @@ class DatabaseService:
                      exit_price, exit_time, pnl)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
                         $16,$17,$18,$19,$20,$21,$22,$23)
-                ON CONFLICT (order_id) DO NOTHING
+                {conflict}
                 """,
                 pos.symbol, pos.token,
                 pos.entry_price, pos.entry_time,

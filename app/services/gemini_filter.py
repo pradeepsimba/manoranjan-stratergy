@@ -30,13 +30,15 @@ def _find_json_array(text: str, known: Optional[set] = None) -> list:
 
     Grounded responses can contain several `[...]` string arrays — the answer,
     but also source-domain lists or (if the model editorializes) a second
-    "bearish" array. Position alone can't disambiguate, so when `known` (the
-    input symbol set, uppercased) is given, the candidate with the LARGEST
-    overlap with it wins (first on ties — the prompt asks for the bullish
-    list first). Largest-overlap rather than first-intersecting: the prompt's
-    own two-symbol example ["RELIANCE","TCS"], if echoed in a preamble, must
-    not displace the real answer. Falls back to the last valid string-array
-    (skips citation arrays like [1]) when nothing intersects.
+    "bearish"/avoid array. Position alone can't disambiguate, so when `known`
+    (the input symbol set, uppercased) is given: take the FIRST candidate with
+    ≥3 known symbols. The prompt asks for the bullish list first, so a
+    trailing bearish array (which could be LONGER — largest-overlap would
+    wrongly pick it and trade the avoid-list) can't displace the answer, and
+    the ≥3 floor rejects a preamble echo of the prompt's own two-symbol
+    example ["RELIANCE","TCS"]. Falls back to largest overlap (a real answer
+    of 1-2 symbols), then to the last valid string-array (skips citation
+    arrays like [1]).
     """
     candidates = []
     for candidate in _JSON_ARRAY.findall(text):
@@ -50,6 +52,8 @@ def _find_json_array(text: str, known: Optional[set] = None) -> list:
         best, best_hits = None, 0
         for parsed in candidates:
             hits = sum(1 for s in parsed if s.strip().upper() in known)
+            if hits >= 3:
+                return parsed
             if hits > best_hits:
                 best, best_hits = parsed, hits
         if best is not None:

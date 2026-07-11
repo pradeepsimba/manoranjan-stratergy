@@ -49,7 +49,10 @@ def place_paper_order(
     Returns the new Position object (already added to AppState).
     """
     now      = datetime.now(IST)
-    order_id = f"PAPER-{now.strftime('%H%M%S')}-{next(_order_seq)}"
+    # Date-scoped id: the sequence resets on every restart, so a time-only id
+    # (HHMMSS-seq) could collide with another DAY's row — order_id backs a
+    # unique index that makes DB retries idempotent, so ids must never repeat.
+    order_id = f"PAPER-{now.strftime('%Y%m%d-%H%M%S')}-{next(_order_seq)}"
     now      = now.strftime("%Y-%m-%d %H:%M:%S")
 
     # Slip the buy upward and anchor SL/target on the SLIPPED fill — exactly
@@ -81,12 +84,16 @@ def place_paper_order(
     return pos
 
 
-def _finalize(pos: Position, exit_price: float, label: str) -> Position:
+def _finalize(pos: Position, exit_price: float, label: str,
+              slip: bool = True) -> Position:
     """Close a position at exit_price (slipped downward, matching the
     backtest's sell fills), record net P&L (after costs), and move it out of
-    the open book."""
+    the open book. slip=False for synthetic prices (the EOD entry-price
+    fallback when no market price was ever observed) — slipping a fabricated
+    price would book a fabricated extra loss."""
     st         = get_state()
-    exit_price = _slip_sell(exit_price)
+    if slip:
+        exit_price = _slip_sell(exit_price)
     buy_value  = pos.entry_price * pos.quantity
     sell_value = exit_price      * pos.quantity
     gross      = round((exit_price - pos.entry_price) * pos.quantity, 2)
@@ -131,9 +138,13 @@ def check_tick_exit(symbol: str, ltp: float) -> Optional[Position]:
     return None
 
 
-def force_close(symbol: str, exit_price: float) -> Optional[Position]:
-    """Square off an open position at a given price (used for the 15:30 EOD flat)."""
+def force_close(symbol: str, exit_price: float,
+                synthetic: bool = False) -> Optional[Position]:
+    """Square off an open position at a given price (used for the 15:30 EOD
+    flat). synthetic=True when exit_price is a FALLBACK (entry price, no
+    market price ever observed) — skips the sell-side slippage so the fake
+    price doesn't also book a fake slippage loss."""
     pos = get_state().positions.get(symbol)
     if pos is None or pos.status != PositionStatus.OPEN:
         return None
-    return _finalize(pos, exit_price, "EOD SQUARE-OFF")
+    return _finalize(pos, exit_price, "EOD SQUARE-OFF", slip=not synthetic)
