@@ -319,18 +319,8 @@ function runBacktest() {
   if (!from_date || !to_date) { toast('Select both a from and to date.', 'warn'); return; }
   if (capital < 1000) { toast('Capital must be at least ₹1,000.', 'warn'); return; }
 
-  // Optional per-run strategy overrides (JSON) — live settings stay untouched.
-  let overrides = null;
-  const ovrRaw = (document.getElementById('bt-overrides')?.value || '').trim();
-  if (ovrRaw) {
-    try {
-      overrides = JSON.parse(ovrRaw);
-      if (typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error('not an object');
-    } catch (e) {
-      toast('Overrides must be a JSON object, e.g. {"RR_RATIO": 2.0}', 'err');
-      return;
-    }
-  }
+  // Optional per-run strategy overrides from the picker — live settings stay untouched.
+  const overrides = Object.keys(_btOvr).length ? { ..._btOvr } : null;
 
   setBtStatus('running…', 'yellow');
   setRunBtn(true);
@@ -690,9 +680,125 @@ function syncBtMode() {
   if (is1d) modeEl.value = 'delivery';
   modeEl.disabled = is1d;
   modeEl.title = is1d ? '1d bars replay positionally — mode is fixed to Delivery' : '';
+  // Positional runs behave differently in ways that surprise people — say so
+  // up front instead of letting the results confuse.
+  const hint = document.getElementById('bt-mode-hint');
+  if (hint) {
+    const positional = is1d || modeEl.value === 'delivery';
+    hint.style.display = positional ? '' : 'none';
+    if (positional) {
+      hint.innerHTML =
+        '<b>Positional (delivery) run:</b> one portfolio across the whole range — ' +
+        'positions carry overnight and gaps fill at the next open. ' +
+        '<b>Each symbol trades at most once per run</b>, the loss limit acts as a ' +
+        'run-level stop (not daily), and the <a href="/settings">Delivery Mode</a> ' +
+        'settings (stop, risk, leverage, costs, conditions) apply instead of the intraday ones.';
+    }
+  }
 }
 const _btTfEl = document.getElementById('bt-tf');
 if (_btTfEl) _btTfEl.addEventListener('change', syncBtMode);
+const _btModeEl = document.getElementById('bt-mode');
+if (_btModeEl) _btModeEl.addEventListener('change', syncBtMode);
+syncBtMode();
+
+// ── Backtest overrides picker ─────────────────────────────────────────────────
+// No-code replacement for the old raw-JSON textarea: pick a setting, get a
+// type-aware input (toggle / choices / time / bounded number), add it as a
+// removable chip. _btOvr is exactly the {SPEC_KEY: value} object the API takes.
+let _btOvr   = {};
+let _btSpecs = null;   // key → settings-describe entry (bt-able, non-rules)
+
+function loadBtSpecs() {
+  const sel = document.getElementById('bt-ovr-key');
+  if (!sel || _btSpecs) return;
+  fetch('/api/settings').then(r => r.json()).then(d => {
+    _btSpecs = {};
+    (d.groups || []).forEach(g => {
+      const grp = document.createElement('optgroup');
+      grp.label = g.name;
+      (g.settings || []).forEach(s => {
+        if (!s.bt || s.type === 'rules') return;
+        _btSpecs[s.key] = s;
+        const o = document.createElement('option');
+        o.value = s.key;
+        o.textContent = s.label;
+        if (s.help) o.title = s.help;
+        grp.appendChild(o);
+      });
+      if (grp.children.length) sel.appendChild(grp);
+    });
+  }).catch(() => { _btSpecs = null; });
+}
+
+function _btOvrValueControl(s) {
+  if (s.type === 'bool')
+    return '<select class="field-input" id="bt-ovr-value" style="width:80px">' +
+           '<option value="true">on</option><option value="false">off</option></select>';
+  if (s.type === 'choice')
+    return '<select class="field-input" id="bt-ovr-value" style="width:150px">' +
+           (s.choices || []).map(c =>
+             `<option${String(c) === String(s.value) ? ' selected' : ''}>${escHtml(String(c))}</option>`
+           ).join('') + '</select>';
+  if (s.type === 'time')
+    return `<input class="field-input" id="bt-ovr-value" type="time" value="${escHtml(String(s.value ?? ''))}" style="width:110px">`;
+  const step = s.step != null ? s.step : (s.type === 'int' ? 1 : 'any');
+  return '<input class="field-input" id="bt-ovr-value" type="number" style="width:120px"' +
+         (s.min != null ? ` min="${s.min}"` : '') + (s.max != null ? ` max="${s.max}"` : '') +
+         ` step="${step}" placeholder="${escHtml(String(s.value ?? ''))}" ` +
+         `title="current: ${escHtml(String(s.value ?? '—'))} · default: ${escHtml(String(s.default ?? '—'))}">`;
+}
+
+const _btOvrKeyEl = document.getElementById('bt-ovr-key');
+if (_btOvrKeyEl) {
+  loadBtSpecs();
+  _btOvrKeyEl.addEventListener('change', () => {
+    const slot = document.getElementById('bt-ovr-value-slot');
+    const s = _btSpecs && _btSpecs[_btOvrKeyEl.value];
+    if (slot) slot.innerHTML = s ? _btOvrValueControl(s) : '';
+  });
+}
+
+function btOvrAdd() {
+  const keyEl = document.getElementById('bt-ovr-key');
+  const valEl = document.getElementById('bt-ovr-value');
+  const s = _btSpecs && keyEl ? _btSpecs[keyEl.value] : null;
+  if (!s) { toast('Pick a setting first', 'warn'); return; }
+  if (!valEl) return;
+  let v;
+  if (s.type === 'bool') v = valEl.value === 'true';
+  else if (s.type === 'choice' || s.type === 'time') {
+    v = valEl.value;
+    if (!v) { toast('Enter a value', 'warn'); return; }
+  } else {
+    v = parseFloat(valEl.value);
+    if (Number.isNaN(v)) { toast('Enter a number', 'warn'); return; }
+    if (s.min != null && v < s.min) { toast(`${s.label}: minimum is ${s.min}`, 'warn'); return; }
+    if (s.max != null && v > s.max) { toast(`${s.label}: maximum is ${s.max}`, 'warn'); return; }
+  }
+  _btOvr[s.key] = v;
+  renderBtOvrChips();
+}
+
+function btOvrRemove(key) { delete _btOvr[key]; renderBtOvrChips(); }
+
+function renderBtOvrChips() {
+  const box = document.getElementById('bt-ovr-chips');
+  const cnt = document.getElementById('bt-ovr-count');
+  if (!box) return;
+  const keys = Object.keys(_btOvr);
+  box.innerHTML = keys.map(k => {
+    const s = (_btSpecs && _btSpecs[k]) || { label: k };
+    let v = _btOvr[k];
+    if (v === true) v = 'on'; else if (v === false) v = 'off';
+    return `<span class="bt-chip">${escHtml(s.label)} = <b>${escHtml(String(v))}</b>` +
+           `<button class="bt-chip-x" type="button" onclick="btOvrRemove('${escHtml(k)}')" title="Remove">×</button></span>`;
+  }).join('');
+  if (cnt) {
+    cnt.style.display = keys.length ? '' : 'none';
+    cnt.textContent = keys.length + ' override' + (keys.length !== 1 ? 's' : '');
+  }
+}
 
 // On page load: check for a running backtest (resume polling if found), then
 // load the most recent done run so results survive a refresh — no localStorage.

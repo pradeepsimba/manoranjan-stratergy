@@ -899,3 +899,33 @@ a:focus-visible, button:focus-visible, input:focus-visible,
   }
   table.cardify td.card-title::before { content: none; }
 }
+
+/* ── Backtest overrides picker + positional-run hint ─────────────────────── */
+.bt-adv { margin-top: 10px; }
+.bt-adv > summary {
+  cursor: pointer; font-size: 12px; color: var(--text-dim, #8ea3bf);
+  user-select: none;
+}
+.bt-adv-hint { font-size: 11px; color: var(--text-dim, #8ea3bf); margin-top: 6px; line-height: 1.5; }
+.bt-mode-hint {
+  margin-top: 8px; padding: 8px 10px; border-radius: 6px;
+  background: rgba(255, 193, 7, .08); border: 1px solid rgba(255, 193, 7, .25);
+}
+.bt-ovr-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.bt-ovr-row .btn-mini {
+  background: rgba(78,186,255,.12); color: inherit; border: 1px solid rgba(78,186,255,.35);
+  border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+}
+.bt-ovr-row .btn-mini:hover { background: rgba(78,186,255,.22); }
+.bt-ovr-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.bt-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 3px 8px; border-radius: 12px;
+  background: rgba(78,186,255,.10); border: 1px solid rgba(78,186,255,.3);
+}
+.bt-chip b { font-weight: 600; }
+.bt-chip-x {
+  background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 0 2px; opacity: .7;
+}
+.bt-chip-x:hover { opacity: 1; }

@@ -273,14 +273,22 @@
           </div>
           <button class="btn-run" onclick="runBacktest()">Run</button>
         </div>
+        <div id="bt-mode-hint" class="bt-adv-hint bt-mode-hint" style="display:none"></div>
         <details class="bt-adv">
-          <summary>Strategy overrides for this run (optional)</summary>
-          <textarea id="bt-overrides" class="field-input bt-ovr" rows="3"
-            placeholder='{"RR_RATIO": 2.0, "ADX_THRESHOLD": 25, "COND_MACD_CROSS": false}'></textarea>
+          <summary>Strategy overrides for this run (optional)
+            <span id="bt-ovr-count" class="badge yellow" style="display:none"></span></summary>
+          <div class="bt-ovr-row">
+            <select class="field-input" id="bt-ovr-key" style="min-width:240px">
+              <option value="">— choose a setting —</option>
+            </select>
+            <span id="bt-ovr-value-slot"></span>
+            <button class="btn-mini" type="button" onclick="btOvrAdd()">+ Add</button>
+          </div>
+          <div id="bt-ovr-chips" class="bt-ovr-chips"></div>
           <div class="bt-adv-hint">
-            JSON of setting keys → values, applied to this run only (live trading is untouched).
-            Keys are the same as on the <a href="/settings">Settings page</a> — strategy, risk,
-            conditions, gates, costs, scan window.
+            Overrides apply to <b>this run only</b> — live trading and your saved
+            <a href="/settings">Settings</a> are untouched. Pick a setting, enter the
+            value to test, press <b>+ Add</b>. Remove a chip to drop it.
           </div>
         </details>
         <div id="bt-meta" class="bt-meta" style="display:none"></div>
