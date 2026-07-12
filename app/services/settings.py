@@ -73,10 +73,10 @@ SPEC: List[Dict[str, Any]] = [
              "account capital per trade. Stop placement (swing low) is the "
              "same in both — only the share count changes."),
     _s("RISK_PER_TRADE", "Risk per trade ₹", "float", "Risk & Capital",
-       min_=50, max_=100_000, step=50,
+       min_=1, max_=100_000_000, step=50,
        help_="Qty = risk ÷ stop distance (used when Risk basis = fixed_amount)."),
     _s("RISK_CAPITAL_PERCENT", "Risk % of capital", "float", "Risk & Capital",
-       min_=0.1, max_=20, step=0.1,
+       min_=0.1, max_=100, step=0.1,
        help_="A true percentage: 10 = a stop-out loses 10% of account capital "
              "(₹10 per ₹100). Used when Risk basis = capital_pct."),
     _s("ACCOUNT_BALANCE", "Account capital ₹", "float", "Risk & Capital",
@@ -119,11 +119,11 @@ SPEC: List[Dict[str, Any]] = [
        min_=0.0, max_=1.0, step=0.05, cond="COND_DEPTH",
        help_="Live only — backtests have no order book."),
 
-    _s("MIN_SL_OFFSET", "Min stop distance ₹", "float", "Strategy", min_=0.5, max_=100, step=0.5),
-    _s("SL_PCT", "Stop-loss % of entry", "float", "Strategy", min_=0, max_=20, step=0.1,
+    _s("MIN_SL_OFFSET", "Min stop distance ₹", "float", "Strategy", min_=0.5, max_=10_000, step=0.5),
+    _s("SL_PCT", "Stop-loss % of entry", "float", "Strategy", min_=0, max_=99, step=0.1,
        help_="A true percentage: 10 = stop 10% below entry (scales with the "
              "stock's price). 0 = structural stop at the swing low."),
-    _s("RR_RATIO", "Reward : risk ratio", "float", "Strategy", min_=0.5, max_=10, step=0.1),
+    _s("RR_RATIO", "Reward : risk ratio", "float", "Strategy", min_=0.1, max_=100, step=0.1),
     _s("TALIB_LOOKBACK", "Indicator lookback bars", "int", "Strategy", min_=60, max_=290,
        help_="Tail fed to TA-Lib; must stay under the 300-bar candle buffer."),
 
@@ -161,22 +161,22 @@ SPEC: List[Dict[str, Any]] = [
     # replay (app.backtest.engine._delivery_overrides); live and intraday
     # backtests never read these. ──────────────────────────────────────────────
     _s("DELIVERY_MIN_SL_OFFSET", "Min stop distance ₹ (delivery)", "float", "Delivery Mode",
-       min_=0.5, max_=1000, step=0.5, help_="Structural stop floor for overnight/multi-day holds."),
+       min_=0.5, max_=10_000, step=0.5, help_="Structural stop floor for overnight/multi-day holds."),
     _s("DELIVERY_SL_PCT", "Stop-loss % of entry (delivery)", "float", "Delivery Mode",
-       min_=0, max_=20, step=0.1,
+       min_=0, max_=99, step=0.1,
        help_="A true percentage: 10 = stop 10% below entry — REQUIRED for "
              "capital_pct risk to reach its full % at 1× leverage (a ₹-fixed "
              "stop is a tiny fraction of a high-priced stock). 0 = swing-low stop."),
     _s("DELIVERY_RR_RATIO", "Reward : risk ratio (delivery)", "float", "Delivery Mode",
-       min_=0.5, max_=20, step=0.1),
+       min_=0.1, max_=100, step=0.1),
     _s("DELIVERY_RISK_MODE", "Risk basis (delivery)", "choice", "Delivery Mode",
        choices=cfg.RISK_MODES,
        help_="fixed_amount = risk ₹X per trade · capital_pct = risk X% of "
              "capital per trade (stop stays at the swing low)."),
     _s("DELIVERY_RISK_PER_TRADE", "Risk per trade ₹ (delivery)", "float", "Delivery Mode",
-       min_=50, max_=100_000, step=50),
+       min_=1, max_=100_000_000, step=50),
     _s("DELIVERY_RISK_CAPITAL_PERCENT", "Risk % of capital (delivery)", "float", "Delivery Mode",
-       min_=0.1, max_=20, step=0.1,
+       min_=0.1, max_=100, step=0.1,
        help_="A true percentage: 10 = a stop-out loses 10% of capital "
              "(₹10 per ₹100). Used when Risk basis = capital_pct."),
     _s("DELIVERY_MAX_CONCURRENT_POSITIONS", "Max open positions (delivery)", "int", "Delivery Mode",

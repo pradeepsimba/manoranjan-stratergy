@@ -218,39 +218,68 @@ function rowHtml(s, nested) {
     </div>${s.type === 'rules' ? `<div class="rb-wrap" data-rules="${escHtml(s.key)}"></div>` : ''}`;
 }
 
-// ── Intraday / Delivery page tabs ─────────────────────────────────────────────
-// The Delivery Mode group gets its own page; everything else lives on the
-// Intraday & General page. Deep-linkable: /settings#delivery.
-let activeTab = (location.hash === '#delivery') ? 'delivery' : 'intraday';
+// ── General / Intraday / Delivery page tabs ───────────────────────────────────
+// Three pages: General = system-level (AI screen, timings, engine, backtest
+// plumbing & costs); Intraday = the live/intraday strategy + risk knobs;
+// Delivery = the positional profile that shadows them in delivery replays.
+// Deep-linkable: /settings#intraday, /settings#delivery.
+const _TAB_OF_GROUP = {
+  'AI Pre-market Screen': 'general',
+  'Session Timings':      'general',
+  'Engine':               'general',
+  'Backtest & Costs':     'general',
+  'Risk & Capital':       'intraday',
+  'Strategy':             'intraday',
+  'Entry Conditions':     'intraday',
+  'Trend Gates':          'intraday',
+  'Delivery Mode':        'delivery',
+};
+const _TABS = ['general', 'intraday', 'delivery'];
+
+function _tabFromHash() {
+  const h = location.hash.replace('#', '');
+  return _TABS.includes(h) ? h : 'general';
+}
+
+let activeTab = _tabFromHash();
 
 function tabOf(groupName) {
-  return groupName === 'Delivery Mode' ? 'delivery' : 'intraday';
+  return _TAB_OF_GROUP[groupName] || 'general';
 }
 
 function switchTab(tab) {
   activeTab = tab;
-  history.replaceState(null, '', tab === 'delivery' ? '#delivery' : '#');
-  document.getElementById('tab-intraday').classList.toggle('active', tab === 'intraday');
-  document.getElementById('tab-delivery').classList.toggle('active', tab === 'delivery');
+  history.replaceState(null, '', tab === 'general' ? '#' : '#' + tab);
+  _TABS.forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.classList.toggle('active', t === tab);
+  });
   render();
   const q = document.getElementById('set-search');
   if (q && q.value) filterSettings(q.value);
 }
 
 window.addEventListener('hashchange', () => {
-  const t = (location.hash === '#delivery') ? 'delivery' : 'intraday';
+  const t = _tabFromHash();
   if (t !== activeTab) switchTab(t);
 });
 
+// Initial load may deep-link (#intraday/#delivery) — sync the button
+// highlight to the tab the hash selected (the HTML defaults to General).
+_TABS.forEach(t => {
+  const el = document.getElementById('tab-' + t);
+  if (el) el.classList.toggle('active', t === activeTab);
+});
+
 function _updateTabBadges(groups) {
-  // Unsaved-edit counts per tab so a change parked on the OTHER page is
+  // Unsaved-edit counts per tab so a change parked on ANOTHER page is
   // never invisible while the save bar shows a nonzero total.
-  const counts = { intraday: 0, delivery: 0 };
+  const counts = { general: 0, intraday: 0, delivery: 0 };
   groups.forEach(g => g.settings.forEach(s => {
     if (s.key in edits) counts[tabOf(g.name)]++;
   }));
-  [['intraday', 'tab-intraday-badge'], ['delivery', 'tab-delivery-badge']].forEach(([t, id]) => {
-    const el = document.getElementById(id);
+  _TABS.forEach(t => {
+    const el = document.getElementById('tab-' + t + '-badge');
     if (!el) return;
     el.style.display = counts[t] ? '' : 'none';
     el.textContent = counts[t] + ' unsaved';
@@ -399,6 +428,9 @@ function updateSaveBar() {
   bar.classList.toggle('visible', n > 0);
   document.getElementById('save-count').textContent =
     n + ' unsaved change' + (n !== 1 ? 's' : '');
+  // Tab badges track edits live — refreshing them only on full re-renders
+  // would show stale counts while the user is still typing.
+  if (specData) _updateTabBadges(specData.groups || []);
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────────
