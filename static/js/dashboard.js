@@ -322,6 +322,11 @@ function runBacktest() {
   // Optional per-run strategy overrides from the picker — live settings stay untouched.
   const overrides = Object.keys(_btOvr).length ? { ..._btOvr } : null;
 
+  const tfEl = document.getElementById('bt-tf');
+  const timeframe = tfEl && tfEl.value ? tfEl.value : null;
+  const modeEl = document.getElementById('bt-mode');
+  const mode = modeEl && modeEl.value ? modeEl.value : null;
+
   // Pre-flight inert-combo warning: a % risk value does nothing unless the
   // MATCHING Risk basis is capital_pct (delivery runs read the DELIVERY pair).
   // Effective basis = per-run override if present, else the saved setting.
@@ -349,11 +354,6 @@ function runBacktest() {
   document.getElementById('bt-meta').style.display = 'none';
   document.getElementById('bt-trades').innerHTML =
     '<tr><td colspan="14" class="empty-cell">Running…</td></tr>';
-
-  const tfEl = document.getElementById('bt-tf');
-  const timeframe = tfEl && tfEl.value ? tfEl.value : null;
-  const modeEl = document.getElementById('bt-mode');
-  const mode = modeEl && modeEl.value ? modeEl.value : null;
 
   // The server prefers the direct form fields over the overrides JSON — so
   // when the user typed one of these keys into the overrides box, DON'T send

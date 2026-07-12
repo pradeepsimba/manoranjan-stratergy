@@ -120,6 +120,9 @@ SPEC: List[Dict[str, Any]] = [
        help_="Live only — backtests have no order book."),
 
     _s("MIN_SL_OFFSET", "Min stop distance ₹", "float", "Strategy", min_=0.5, max_=100, step=0.5),
+    _s("SL_PCT", "Stop-loss % of entry", "float", "Strategy", min_=0, max_=20, step=0.1,
+       help_="A true percentage: 10 = stop 10% below entry (scales with the "
+             "stock's price). 0 = structural stop at the swing low."),
     _s("RR_RATIO", "Reward : risk ratio", "float", "Strategy", min_=0.5, max_=10, step=0.1),
     _s("TALIB_LOOKBACK", "Indicator lookback bars", "int", "Strategy", min_=60, max_=290,
        help_="Tail fed to TA-Lib; must stay under the 300-bar candle buffer."),
@@ -159,6 +162,11 @@ SPEC: List[Dict[str, Any]] = [
     # backtests never read these. ──────────────────────────────────────────────
     _s("DELIVERY_MIN_SL_OFFSET", "Min stop distance ₹ (delivery)", "float", "Delivery Mode",
        min_=0.5, max_=1000, step=0.5, help_="Structural stop floor for overnight/multi-day holds."),
+    _s("DELIVERY_SL_PCT", "Stop-loss % of entry (delivery)", "float", "Delivery Mode",
+       min_=0, max_=20, step=0.1,
+       help_="A true percentage: 10 = stop 10% below entry — REQUIRED for "
+             "capital_pct risk to reach its full % at 1× leverage (a ₹-fixed "
+             "stop is a tiny fraction of a high-priced stock). 0 = swing-low stop."),
     _s("DELIVERY_RR_RATIO", "Reward : risk ratio (delivery)", "float", "Delivery Mode",
        min_=0.5, max_=20, step=0.1),
     _s("DELIVERY_RISK_MODE", "Risk basis (delivery)", "choice", "Delivery Mode",

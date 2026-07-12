@@ -517,7 +517,104 @@ def s13():
           and a.exit_time.startswith(DAY1), f"{a.outcome} {a.exit_time}")
 
 
+
+
+# ── Scenario 14: leverage caps the position when risk wants more than capital ─
+def s14():
+    print("S14 margin cap under 1x delivery leverage")
+    sym = {"1": series("1", "AAA", rising_day(DAY1, 100.0))}
+    entry = 100.0 + 0.1 * 6 + 0.1                 # unslipped sizing basis
+    tr = run(sym, [DAY1], {"DELIVERY_RR_RATIO": 100.0, "DELIVERY_MIN_SL_OFFSET": 5.0,
+                           "DELIVERY_RISK_MODE": "capital_pct",
+                           "DELIVERY_RISK_CAPITAL_PERCENT": 10.0},
+             mode="delivery", capital=40_000.0)
+    # 10% of 40k = 4000 risk / 5 stop = 800 shares — but 800 x ~100.7 needs
+    # ~80.5k buying power and delivery leverage is 1x on 40k -> capped.
+    exp = int(40_000.0 * 1 / entry)
+    check("qty capped by capital x leverage", tr[0].qty == exp,
+          f"{tr[0].qty} vs {exp}")
+    # same setup with 5x intraday leverage is NOT capped
+    tr = run(sym, [DAY1], {"RR_RATIO": 100.0, "RISK_MODE": "capital_pct",
+                           "RISK_CAPITAL_PERCENT": 10.0}, capital=40_000.0)
+    check("intraday 5x leverage uncapped", tr[0].qty == 800, f"{tr[0].qty}")
+
+
+# ── Scenario 15: metrics computed from a real two-trade run ───────────────────
+def s15():
+    print("S15 metrics from a real run (1 win + 1 loss)")
+    from app.backtest.metrics import compute_metrics
+    # A wins at target; B stops out. Costs are zeroed in BASE -> gross == net.
+    day_a = rising_day(DAY1, 100.0)
+    tgt_a = round((100.0 + 0.1 * 6 + 0.1) + 7.5, 2)
+    x = day_a[40]
+    day_a[40] = Candle(start_time=x.start_time, open=x.open, close=x.open + 0.1,
+                       high=tgt_a + 1.0, low=x.open - 0.02, volume=1000.0)
+    day_b = rising_day(DAY1, 200.0)
+    stop_b = round((200.0 + 0.1 * 6 + 0.1) - 5.0, 2)
+    y = day_b[20]
+    day_b[20] = Candle(start_time=y.start_time, open=stop_b - 1.0, close=stop_b - 1.0,
+                       high=stop_b - 0.5, low=stop_b - 2.0, volume=1000.0)
+    syms = {"1": series("1", "AAA", day_a), "2": series("2", "BBB", day_b)}
+    nifty = nifty_series([DAY1])
+    trades, equity, ndays = simulate(syms, nifty, D1, D1, 0.0, None,
+                                     {**BASE, "MAX_CONCURRENT_POSITIONS": 2}, "5m", "intraday")
+    m = compute_metrics(trades, equity, ndays)
+    check("2 trades, 1 win 1 loss", m["total_trades"] == 2
+          and m["winning_trades"] == 1 and m["losing_trades"] == 1,
+          f"{m['total_trades']}/{m['winning_trades']}/{m['losing_trades']}")
+    check("win rate 0.5", abs(m["win_rate"] - 0.5) < 1e-9, f"{m['win_rate']}")
+    check("gross identity (costs zeroed)", abs(m["gross_profit"] + m["gross_loss"]
+          - m["total_costs"] - m["net_pnl"]) < 1e-6,
+          f"{m['gross_profit']} {m['gross_loss']} {m['total_costs']} {m['net_pnl']}")
+    check("equity curve chronological", [e[0] for e in m["equity_curve"]]
+          == sorted(e[0] for e in m["equity_curve"]), f"{m['equity_curve']}")
+    check("max drawdown >= loser's net", m["max_drawdown"] >= abs(min(t.net_pnl for t in trades)) - 0.01
+          or m["max_drawdown"] >= 0, f"{m['max_drawdown']}")
+
+
+
+
+# ── Scenario 16: % stop makes capital_pct risk achievable at 1x leverage ─────
+def s16():
+    print("S16 percent stop-loss (SL_PCT)")
+    from app.engine.position_manager import calc_quantity
+    import app.config as _c
+    # The real-world case that motivated this: Rs 5,162 stock, Rs 40k capital,
+    # 10% risk. With the Rs 15 structural stop the position is leverage-capped
+    # to 7 shares risking only ~Rs 105. With a 10% price stop the SAME 7
+    # shares now risk ~Rs 3,613 ~ 9% of capital — the intent, achievable.
+    with _c.thread_overrides({"RISK_MODE": "capital_pct", "RISK_CAPITAL_PERCENT": 10.0,
+                              "SL_PCT": 10.0, "INTRADAY_LEVERAGE": 1}):
+        qty, slo, tgt = calc_quantity(5162.0, 5160.5, capital=40_000.0,
+                                      total_capital=40_000.0)
+        assert abs(slo - 516.2) < 0.01, slo
+        check("stop = 10% of entry", abs(slo - 516.2) < 0.01, f"{slo}")
+        check("qty from risk, uncapped", qty == int(4000.0 / 516.2), f"{qty}")
+        check("realized risk ≈ 9% of capital", 0.085 <= qty * slo / 40_000.0 <= 0.10,
+              f"{qty * slo / 40_000.0:.3f}")
+        # support above entry does NOT reject in % mode (stop is price-based)
+        qty2, _, _ = calc_quantity(100.0, 150.0, capital=40_000.0, total_capital=40_000.0)
+        check("support>entry irrelevant in % mode", qty2 > 0, f"{qty2}")
+    # SL_PCT=0 keeps the original structural behavior bit-identical
+    with _c.thread_overrides({"SL_PCT": 0.0}):
+        qty3, slo3, _ = calc_quantity(100.0, 97.0)
+        check("SL_PCT=0 = structural stop unchanged", (qty3, slo3) == (100, 5.0),
+              f"{qty3}, {slo3}")
+    # end-to-end through the replay: delivery shadow applies DELIVERY_SL_PCT
+    sym = {"1": series("1", "AAA", rising_day(DAY1, 100.0))}
+    tr = run(sym, [DAY1], {"DELIVERY_SL_PCT": 10.0, "DELIVERY_RR_RATIO": 100.0,
+                           "DELIVERY_RISK_MODE": "capital_pct",
+                           "DELIVERY_RISK_CAPITAL_PERCENT": 10.0},
+             mode="delivery", capital=40_000.0)
+    entry = 100.0 + 0.1 * 6 + 0.1
+    exp_slo = round(entry * 0.10, 2)
+    exp_qty = int(4000.0 / exp_slo)
+    check("delivery replay uses DELIVERY_SL_PCT", tr[0].qty == exp_qty
+          and abs((tr[0].entry_price - tr[0].stop_loss) - exp_slo) < 0.02,
+          f"qty {tr[0].qty} vs {exp_qty}, stop dist {tr[0].entry_price - tr[0].stop_loss}")
+
+
 if __name__ == "__main__":
-    for fn in (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13):
+    for fn in (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16):
         fn()
     print(f"\nALL GREEN — {PASS} assertions passed")

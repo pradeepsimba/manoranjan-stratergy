@@ -365,6 +365,7 @@ def _delivery_overrides(user_overrides: Optional[Dict] = None) -> Dict[str, Any]
     """
     shadow = {
         "MIN_SL_OFFSET":            cfg.DELIVERY_MIN_SL_OFFSET,
+        "SL_PCT":                   cfg.DELIVERY_SL_PCT,
         "RR_RATIO":                 cfg.DELIVERY_RR_RATIO,
         "RISK_MODE":                cfg.DELIVERY_RISK_MODE,
         "RISK_PER_TRADE":           cfg.DELIVERY_RISK_PER_TRADE,

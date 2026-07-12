@@ -54,6 +54,28 @@ def calc_quantity(
     if total_capital is None:
         total_capital = cfg.ACCOUNT_BALANCE
 
+    # % stop mode: the stop sits SL_PCT% below entry — independent of the
+    # swing low, so the support>entry reject doesn't apply. The MIN_SL_OFFSET
+    # ₹-floor does NOT apply either: the % is already price-proportional, and
+    # flooring it would silently widen a 10% stop to 15% on low-priced stocks
+    # (the ₹ floor exists to protect the STRUCTURAL stop from paise-thin
+    # swing-low distances, a failure mode the % stop cannot have).
+    sl_pct = cfg.SL_PCT
+    if sl_pct > 0:
+        sl_offset = round(entry_price * sl_pct / 100.0, 2)
+        if cfg.RISK_MODE == "capital_pct":
+            risk = total_capital * cfg.RISK_CAPITAL_PERCENT / 100.0
+        else:
+            risk = cfg.RISK_PER_TRADE
+        qty = max(1, int(risk / sl_offset))
+        target_offset = round(sl_offset * cfg.RR_RATIO, 2)
+        capital_needed = (entry_price * qty) / cfg.INTRADAY_LEVERAGE
+        if capital_needed > capital:
+            qty = int((capital * cfg.INTRADAY_LEVERAGE) / entry_price)
+            if qty < 1:
+                return 0, sl_offset, target_offset
+        return qty, sl_offset, target_offset
+
     # Support at/above entry means no structural stop BELOW the entry price.
     # Flooring to MIN_SL_OFFSET would put the stop at an arbitrary entry−₹5 and
     # size the position off that nonsensical distance (RISK/5 = a large qty).

@@ -398,9 +398,13 @@ class DatabaseService:
         return [dict(r) for r in rows]
 
     async def list_backtest_runs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        # The history strip only reads net_pnl + dates — strip the equity
+        # curve (by far the largest summary key, ~10× the rest) from the LIST
+        # payload; the single-run GET still returns it in full.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT run_id, from_date, to_date, status, summary, created_at "
+                "SELECT run_id, from_date, to_date, status, "
+                "       summary - 'equity_curve' AS summary, created_at "
                 "FROM backtest_runs ORDER BY created_at DESC LIMIT $1",
                 limit,
             )

@@ -138,6 +138,11 @@ _DEFAULTS: Dict[str, Any] = {
     "SWING_LOW_BARS":    10,      # Lookback bars for structural support floor
     "SUPPORT_TOUCH_PCT": 0.015,   # Price within 1.5% of support = "at support"
     "MIN_SL_OFFSET":     5.0,     # Minimum SL distance in ₹
+    # Stop distance as a TRUE percentage of the entry price (10 = 10% below
+    # entry). 0 = the original structural stop at the swing low. A % stop is
+    # what makes capital_pct risk achievable at low leverage: with a stop X%
+    # below entry, a full-capital position risks ~X% of capital.
+    "SL_PCT":            0.0,
     "VOLUME_MA_PERIOD":  20,
     "VOLUME_MULTIPLIER": 1.5,     # Bar volume must exceed this × the volume MA
     "RR_RATIO":          1.5,     # target_offset = sl_offset × RR_RATIO
@@ -191,6 +196,7 @@ _DEFAULTS: Dict[str, Any] = {
     # a positional replay only (see app.backtest.engine._delivery_overrides) —
     # calc_quantity/can_enter/conditions.py/trend_filter.py are never forked.
     "DELIVERY_MIN_SL_OFFSET":    15.0,    # wider structural stop for multi-day holds
+    "DELIVERY_SL_PCT":           0.0,     # 10 = stop 10% below entry; 0 = swing-low stop
     "DELIVERY_RR_RATIO":         2.5,     # swing trades target a bigger reward:risk
     "DELIVERY_RISK_MODE":        "fixed_amount",   # fixed_amount | capital_pct
     "DELIVERY_RISK_PER_TRADE":   500.0,   # ₹ fixed risk capital per setup
