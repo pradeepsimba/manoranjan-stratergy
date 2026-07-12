@@ -9,6 +9,7 @@ A disabled condition auto-passes: it is excluded from the failure list but
 still reported in the checks dict for the dashboard.
 """
 
+import threading
 from typing import Dict, List, Optional
 
 import app.config as cfg
@@ -190,6 +191,30 @@ def _rules_mode() -> Optional[str]:
     return rules.get("mode", "and") if rules.get("enabled") and rules.get("groups") else None
 
 
+# ── Resolved-plan cache ────────────────────────────────────────────────────────
+# entry_ok / cheap_gates_veto run once per gated symbol-bar — tens of millions
+# of times in a long backtest — and each toggle read goes through config's
+# module __getattr__ (~20× a plain attribute). Resolve the ENABLED evaluator
+# tuples once per cfg.resolution_token() (bumps on any Settings apply/reset or
+# thread-override scope change) and reuse them. Thread-local: worker threads
+# hold different override scopes. Behavior-identical to resolving per call.
+_plan_local = threading.local()
+
+
+def _resolved_plan() -> tuple:
+    """(enabled evaluator fns, enabled CHEAP evaluator fns, rules mode)."""
+    tok    = cfg.resolution_token()
+    cached = getattr(_plan_local, "plan", None)
+    if cached is not None and cached[0] == tok:
+        return cached[1]
+    enabled = tuple(fn for toggle, fn in _CONDITIONS.values() if getattr(cfg, toggle))
+    cheap   = tuple(_CONDITIONS[k][1] for k in _CHEAP_KEYS
+                    if getattr(cfg, _CONDITIONS[k][0]))
+    plan = (enabled, cheap, _rules_mode())
+    _plan_local.plan = (tok, plan)
+    return plan
+
+
 # ── Evaluation entry points (shared live + backtest) ──────────────────────────
 
 def build_entry_checks(ind: IndicatorResult,
@@ -219,15 +244,17 @@ def entry_ok(ind: IndicatorResult, depth_ratio: Optional[float] = None) -> bool:
     """
     Short-circuit conjunction of the ENABLED conditions — the backtest's hot
     path (no dict build, stops at the first enabled failure). Same tables as
-    build_entry_checks/failed_entry_checks, so the two styles cannot drift.
+    build_entry_checks/failed_entry_checks, so the two styles cannot drift;
+    the toggle resolution is cached per cfg.resolution_token() (see
+    _resolved_plan) but semantically identical to per-call getattr.
     """
-    mode = _rules_mode()
+    enabled, _, mode = _resolved_plan()
     if mode == "replace":
         return custom_rules_ok(ind, depth_ratio)
     if mode == "and" and not custom_rules_ok(ind, depth_ratio):
         return False
-    for toggle, fn in _CONDITIONS.values():
-        if getattr(cfg, toggle) and not fn(ind, depth_ratio):
+    for fn in enabled:
+        if not fn(ind, depth_ratio):
             return False
     return True
 
@@ -250,10 +277,10 @@ def cheap_gates_veto(ind: IndicatorResult) -> bool:
     wrongly veto rule sets that don't require them (and rules need the full
     RSI/MACD/ADX values anyway).
     """
-    if _rules_mode() == "replace":
+    _, cheap_enabled, mode = _resolved_plan()
+    if mode == "replace":
         return False
-    for key in _CHEAP_KEYS:
-        toggle, fn = _CONDITIONS[key]
-        if getattr(cfg, toggle) and not fn(ind, None):
+    for fn in cheap_enabled:
+        if not fn(ind, None):
             return True
     return False

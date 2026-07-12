@@ -30,15 +30,14 @@ def _find_json_array(text: str, known: Optional[set] = None) -> list:
 
     Grounded responses can contain several `[...]` string arrays — the answer,
     but also source-domain lists or (if the model editorializes) a second
-    "bearish"/avoid array. Position alone can't disambiguate, so when `known`
-    (the input symbol set, uppercased) is given: take the FIRST candidate with
-    ≥3 known symbols. The prompt asks for the bullish list first, so a
-    trailing bearish array (which could be LONGER — largest-overlap would
-    wrongly pick it and trade the avoid-list) can't displace the answer, and
-    the ≥3 floor rejects a preamble echo of the prompt's own two-symbol
-    example ["RELIANCE","TCS"]. Falls back to largest overlap (a real answer
-    of 1-2 symbols), then to the last valid string-array (skips citation
-    arrays like [1]).
+    "bearish"/avoid array. When `known` (the input symbol set, uppercased) is
+    given: the FIRST candidate containing a known symbol wins. The prompt asks
+    for the bullish list first, so neither a trailing bearish array (however
+    long) nor a sources list can displace it — and a genuine 1-2 symbol answer
+    still wins over anything after it. Safe against a preamble echo of the
+    prompt's example because the example uses placeholder names
+    ("SYMBOL1"/"SYMBOL2") that can never match `known` — keep it that way.
+    Falls back to the last valid string-array (skips citation arrays like [1]).
     """
     candidates = []
     for candidate in _JSON_ARRAY.findall(text):
@@ -49,15 +48,9 @@ def _find_json_array(text: str, known: Optional[set] = None) -> list:
         if isinstance(parsed, list) and all(isinstance(s, str) for s in parsed):
             candidates.append(parsed)
     if known:
-        best, best_hits = None, 0
         for parsed in candidates:
-            hits = sum(1 for s in parsed if s.strip().upper() in known)
-            if hits >= 3:
+            if any(s.strip().upper() in known for s in parsed):
                 return parsed
-            if hits > best_hits:
-                best, best_hits = parsed, hits
-        if best is not None:
-            return best
     if candidates:
         return candidates[-1]
     raise ValueError("no valid JSON string-array in grounded response")
@@ -100,7 +93,7 @@ def _grounded_screen(stocknames: List[str]) -> List[str]:
             f"From the following NSE stocks, return ONLY the symbols most likely to "
             f"show INTRADAY BULLISH momentum today, using each symbol exactly as "
             f"given. Respond with ONLY a JSON array of strings, e.g. "
-            f'["RELIANCE","TCS"]. No prose, no markdown.\n\n'
+            f'["SYMBOL1","SYMBOL2"]. No prose, no markdown.\n\n'
             f"Stocks: {stock_list}"
         )
 

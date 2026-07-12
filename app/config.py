@@ -24,6 +24,7 @@ The editable registry (labels, types, bounds, grouping) lives in
 app/services/settings.py — add new tunables in BOTH places.
 """
 
+import itertools
 import os
 import threading
 from contextlib import contextmanager
@@ -282,6 +283,25 @@ def settings_generation() -> int:
     return _settings_generation
 
 
+# Monotonic id for each thread_overrides scope entry — never reused (unlike
+# id() of the dict, which the allocator can recycle), and restored on exit so
+# nested scopes (delivery replays) resolve correctly.
+_ctx_token_counter = itertools.count(1)
+
+
+def resolution_token() -> tuple:
+    """
+    Opaque key identifying the CURRENT dynamic-config resolution state for
+    this thread: changes whenever a Settings-page apply/reset lands OR the
+    thread enters/exits a thread_overrides scope. Hot paths that resolve many
+    cfg values per call (entry_ok, trend_blockers, can_enter) cache their
+    resolved plan against this token — the module __getattr__ costs ~20× a
+    plain attribute read, and a long backtest performs tens of millions of
+    such reads.
+    """
+    return (_settings_generation, getattr(_thread_ctx, "token", 0))
+
+
 def set_runtime_overrides(changes: Dict[str, Any]) -> None:
     """Apply validated overrides globally (event-loop callers only)."""
     global _settings_generation
@@ -311,11 +331,14 @@ def thread_overrides(overrides: Dict[str, Any]) -> Iterator[None]:
     so a run's parameters never leak into the live engine, whose scan-pool
     threads and event loop keep reading the global runtime values.
     """
-    prev = getattr(_thread_ctx, "overrides", None)
+    prev       = getattr(_thread_ctx, "overrides", None)
+    prev_token = getattr(_thread_ctx, "token", 0)
     merged = dict(prev) if prev else {}
     merged.update(overrides)
     _thread_ctx.overrides = merged
+    _thread_ctx.token     = next(_ctx_token_counter)
     try:
         yield
     finally:
         _thread_ctx.overrides = prev
+        _thread_ctx.token     = prev_token

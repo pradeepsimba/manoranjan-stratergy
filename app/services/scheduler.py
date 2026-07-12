@@ -123,6 +123,8 @@ class SchedulerService:
         self._pending_exit_writes:  List[dict]     = []
         self._pending_entry_saves:  List[Position] = []
         self._next_db_retry: float = 0.0   # monotonic; throttles retries to 1/5s
+        # token → loop.time() of its last display-only scan (see _tick_entries)
+        self._display_scan_ts: dict = {}
 
     async def start(self) -> None:
         self._tasks = [
@@ -487,12 +489,23 @@ class SchedulerService:
         # Iterate the (small) dirty-token set directly — O(dirty), not O(watchlist).
         # token_to_name covers the FULL watchlist; tradeable_set is the Gemini subset.
         tradeable_set = set(st.active_watchlist)
-        t2n   = st.token_to_name
-        items = []
+        t2n    = st.token_to_name
+        now_ts = loop.time()
+        items  = []
         for tok in dirty:
             name = t2n.get(tok)
-            if name is not None:
-                items.append((name, tok, name in tradeable_set))
+            if name is None:
+                continue
+            tradeable = name in tradeable_set
+            if not tradeable:
+                # Display-only symbols can never signal, yet their full
+                # TA-Lib pass is ~90% of tick-path CPU. Throttle them to 1/s
+                # per token — still far fresher than a human can read, and
+                # the 5-min full scan refreshes them regardless.
+                if now_ts - self._display_scan_ts.get(tok, 0.0) < 1.0:
+                    continue
+                self._display_scan_ts[tok] = now_ts
+            items.append((name, tok, tradeable))
         if not items:
             return
 

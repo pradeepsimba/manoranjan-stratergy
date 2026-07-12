@@ -89,6 +89,10 @@ class MarketDataService:
         # Deliberately not cleared on stop()/restart(): the watchlist-edit
         # restart is itself an outage that can cross a bar boundary.
         self._seen_labels: set = set()
+        # symbol → last raw snap string: the 3 order-book regexes are the most
+        # expensive part of _process_tick, and the book often doesn't move
+        # between pushes — identical snap ⇒ identical parse ⇒ skip it.
+        self._last_snap: Dict[str, str] = {}
 
     def start(self) -> None:
         self._running = True
@@ -410,7 +414,9 @@ class MarketDataService:
         # real order book — its snap shows -0.01 sentinels which _parse_depth
         # discards via the bid_p > 0 guard).
         snap = n.get("snap", "")
-        if snap and stockname and symbol != cfg.NIFTY50_TOKEN and interval == "5m":
+        if (snap and stockname and symbol != cfg.NIFTY50_TOKEN and interval == "5m"
+                and self._last_snap.get(stockname) != snap):
+            self._last_snap[stockname] = snap
             depth = _parse_depth(snap)
             if depth:
                 # MERGE, don't replace: a partial snap (e.g. bid/ask present but

@@ -435,6 +435,15 @@ async def _refetch_tf_history(wl: Dict[str, str], timeframe: str,
         # An empty result is cached too (with the short negative TTL) so a dead
         # data server is retried at _TF_NEG_TTL cadence, not on every poll.
         _tf_hist_cache[timeframe] = {"ts": now, "sig": sig, "hist": hist, "access": now}
+        # Evict memo entries for tokens that left this TF's watchlist — each
+        # day brings a fresh ~500-token universe, and a tab kept open across
+        # days would otherwise pin yesterday's patched candle lists (tens of
+        # MB/day) until the whole TF idles out.
+        valid = set(wl.values())
+        for memo in (_tf_row_memo, _mtf_sig_memo, _patched_cache):
+            for key in list(memo):
+                if key[0] == timeframe and key[1] not in valid:
+                    memo.pop(key, None)
         return hist, now
 
 

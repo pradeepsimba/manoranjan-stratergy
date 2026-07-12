@@ -1,8 +1,24 @@
 from __future__ import annotations
 
+import threading
 from typing import Container, Optional, Set
 
 import app.config as cfg
+
+# can_enter runs for every symbol-bar in a backtest before anything else; its
+# two limit reads go through config's module __getattr__ (~20× a plain
+# attribute). Cache them per cfg.resolution_token() — identical semantics.
+_limits_local = threading.local()
+
+
+def _risk_limits() -> tuple:
+    tok    = cfg.resolution_token()
+    cached = getattr(_limits_local, "limits", None)
+    if cached is not None and cached[0] == tok:
+        return cached[1]
+    limits = (cfg.MAX_CONCURRENT_POSITIONS, cfg.DAILY_LOSS_LIMIT)
+    _limits_local.limits = (tok, limits)
+    return limits
 
 
 def calc_quantity(
@@ -86,8 +102,10 @@ def can_enter(
     open_symbols — current open positions, supporting `in` and `len`
     Returns (allowed, rejection_reason).
     """
-    if len(open_symbols) >= cfg.MAX_CONCURRENT_POSITIONS:
-        return False, f"Max {cfg.MAX_CONCURRENT_POSITIONS} concurrent positions reached"
+    max_pos, loss_limit = _risk_limits()
+
+    if len(open_symbols) >= max_pos:
+        return False, f"Max {max_pos} concurrent positions reached"
 
     if symbol in traded_today:
         return False, f"{symbol} already traded today"
@@ -95,7 +113,7 @@ def can_enter(
     if symbol in open_symbols:
         return False, f"{symbol} already has an open position"
 
-    if daily_pnl <= -cfg.DAILY_LOSS_LIMIT:
-        return False, f"Daily loss limit ₹{cfg.DAILY_LOSS_LIMIT} hit"
+    if daily_pnl <= -loss_limit:
+        return False, f"Daily loss limit ₹{loss_limit} hit"
 
     return True, ""

@@ -66,11 +66,16 @@ def scan_stock(
     """
     st = get_state()
 
-    # Thread-safe snapshot — hold lock only for the list copy, not for math
+    # Thread-safe snapshot — hold lock only for the list copy, not for math.
+    # Only the LAST 1h bar is ever consumed (hourly gate + staleness check),
+    # so copy just that ref instead of the whole ~300-bar list. Safe outside
+    # the lock afterwards: the WS upsert REPLACES the tail element, never
+    # mutates a Candle in place.
     lock = st.candle_lock(token)
     with lock:
         candles_5m = list(st.candles_5m.get(token, []))
-        candles_1h = list(st.candles_1h.get(token, []))
+        lst_1h     = st.candles_1h.get(token)
+        candles_1h = [lst_1h[-1]] if lst_1h else []
 
     if len(candles_5m) < 30:
         st.record_scan(symbol, {"pass": False, "reason": "Insufficient 5m bars"})

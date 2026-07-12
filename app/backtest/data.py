@@ -134,22 +134,28 @@ async def load_backtest_data(from_d: date, to_d: date,
         ),
     )
 
-    symbols: Dict[str, SymbolSeries] = {}
-    name_by_token = {t: n for n, t in universe.items()}
-    for token, frames in raw.items():
-        bars = _sort_candles(frames.get(tf, []))
-        if not bars:
-            continue
-        ss = SymbolSeries(token=token, name=name_by_token.get(token, token), series=bars)
-        ss.index_days()
-        symbols[token] = ss
+    # Series construction is pure CPU over ~1M bars on a big run (sort + dedup
+    # + per-bar index maps + 4 numpy mirrors + 3 cumsums per symbol) — several
+    # seconds that MUST NOT run on the event loop, or a live session's 100ms
+    # tick loop (SL/target exits!) freezes while a backtest is loading.
+    def _build_series():
+        symbols: Dict[str, SymbolSeries] = {}
+        name_by_token = {t: n for n, t in universe.items()}
+        for token, frames in raw.items():
+            bars = _sort_candles(frames.get(tf, []))
+            if not bars:
+                continue
+            ss = SymbolSeries(token=token, name=name_by_token.get(token, token), series=bars)
+            ss.index_days()
+            symbols[token] = ss
 
-    # NIFTY index
-    nifty = None
-    nframes = nifty_raw.get(cfg.NIFTY50_TOKEN, {})
-    nbars   = _sort_candles(nframes.get(tf, []))
-    if nbars:
-        nifty = SymbolSeries(token=cfg.NIFTY50_TOKEN, name=cfg.NIFTY50_NAME, series=nbars)
-        nifty.index_days()
+        nifty = None
+        nframes = nifty_raw.get(cfg.NIFTY50_TOKEN, {})
+        nbars   = _sort_candles(nframes.get(tf, []))
+        if nbars:
+            nifty = SymbolSeries(token=cfg.NIFTY50_TOKEN, name=cfg.NIFTY50_NAME, series=nbars)
+            nifty.index_days()
+        return symbols, nifty
 
+    symbols, nifty = await asyncio.to_thread(_build_series)
     return universe, symbols, nifty

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import List, Tuple
 
 import app.config as cfg
@@ -86,6 +87,23 @@ _GATE_TOGGLES = (
     ("nifty_above_vwap",  "GATE_NIFTY_VWAP",   "NIFTY below VWAP"),
 )
 
+# trend_blockers runs for EVERY symbol-bar in a backtest (before indicators —
+# it's the first gate), so the 4 dynamic toggle reads per call add up to
+# minutes over a long run. Cache the ENABLED (attr, reason) pairs per
+# cfg.resolution_token() — semantically identical to per-call getattr.
+_gate_plan_local = threading.local()
+
+
+def _enabled_gates() -> tuple:
+    tok    = cfg.resolution_token()
+    cached = getattr(_gate_plan_local, "plan", None)
+    if cached is not None and cached[0] == tok:
+        return cached[1]
+    plan = tuple((attr, reason) for attr, toggle, reason in _GATE_TOGGLES
+                 if getattr(cfg, toggle))
+    _gate_plan_local.plan = (tok, plan)
+    return plan
+
 
 def trend_blockers(gate: TrendGate) -> List[str]:
     """
@@ -93,5 +111,5 @@ def trend_blockers(gate: TrendGate) -> List[str]:
     trend filter passes. The single place gate toggles are applied — shared by
     the live engine and the backtest so they cannot drift.
     """
-    return [reason for attr, toggle, reason in _GATE_TOGGLES
-            if getattr(cfg, toggle) and not getattr(gate, attr)]
+    return [reason for attr, reason in _enabled_gates()
+            if not getattr(gate, attr)]

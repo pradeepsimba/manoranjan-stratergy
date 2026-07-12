@@ -65,8 +65,9 @@ class Portfolio:
     traded_today: Set[str]              = field(default_factory=set)
     daily_pnl:    float                 = 0.0
     trades:       List[BTTrade]         = field(default_factory=list)
-    cum_net:      float                 = 0.0          # running net P&L (equity)
-    equity_curve: List[tuple]           = field(default_factory=list)  # (timestamp, cum_net)
+    # NOTE: no equity curve here — simulate() rebuilds it from the merged,
+    # exit-time-sorted trade stream (per-close accumulation would be in the
+    # wrong order once square-offs/parallel days merge).
 
     # ── Daily lifecycle ─────────────────────────────────────────────────────
     def reset_day(self) -> None:
@@ -115,8 +116,6 @@ class Portfolio:
         r_mult     = (net / risk) if risk > 0 else 0.0
 
         self.daily_pnl += net
-        self.cum_net   += net
-        self.equity_curve.append((exit_time, round(self.cum_net, 2)))
 
         trade = BTTrade(
             symbol=pos.symbol, token=pos.token,

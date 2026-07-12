@@ -192,8 +192,12 @@ function connect() {
         var source = snap[sym];
         _dirtySyms.add(sym);
         // An update touching the active sort column can reorder the table —
-        // only then is the O(n log n) full render needed.
-        if (sortKey !== 'symbol' && sortKey in source) _needFull = true;
+        // but only when its VALUE actually changed. Snapshot entries carry
+        // every key, so a presence check alone would force the O(n log n)
+        // full render on every ~100ms delta whenever a numeric sort is
+        // active (filter + sort + format of ~500 rows per frame).
+        if (sortKey !== 'symbol' && sortKey in source
+            && target[sortKey] !== source[sortKey]) _needFull = true;
         Object.keys(source).forEach(function(key) {
           // ltp/bar_time are handled ONLY by the guarded copies below —
           // copying them here would overwrite a real price with a stub's
