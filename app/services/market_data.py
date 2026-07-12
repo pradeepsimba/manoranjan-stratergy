@@ -141,6 +141,10 @@ class MarketDataService:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
         self._conn_status.clear()
+        # st.depth is cleared at EOD — the snap dedup cache must go with it,
+        # or a byte-identical first snap tomorrow would skip the parse and
+        # leave that symbol's depth missing until its book changes.
+        self._last_snap.clear()
         # Cancellation skips _run_ws's post-loop status update — set it here so
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"

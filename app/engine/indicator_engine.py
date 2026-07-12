@@ -15,7 +15,8 @@ every 5-minute bar close. Design rules for thread/GIL efficiency:
     exception: it must see every bar since 09:15, so it uses the session array.
 """
 
-from typing import List, Optional
+import threading
+from typing import List, NamedTuple, Optional
 
 import numpy as np
 import talib
@@ -23,6 +24,49 @@ import talib
 import app.config as cfg
 from app.engine.conditions import cheap_gates_veto
 from app.models import Candle, IndicatorResult
+
+
+# ── Resolved dynamic parameters ───────────────────────────────────────────────
+# compute_indicators reads ~14 dynamic settings per call, each through config's
+# module __getattr__ (~20× a plain attribute) — millions of reads over a long
+# backtest. Resolve them once per cfg.resolution_token() (bumps on Settings
+# apply/reset and thread-override scope changes) — same proven pattern as the
+# condition/gate plan caches, semantically identical to per-call reads.
+
+class _IndicatorParams(NamedTuple):
+    lookback:          int
+    swing_low_bars:    int
+    support_touch_pct: float
+    volume_ma_period:  int
+    volume_multiplier: float
+    rsi_period:        int
+    rsi_oversold:      float
+    rsi_rising_bars:   int
+    macd_fast:         int
+    macd_slow:         int
+    macd_signal:       int
+    macd_cross_bars:   int
+    adx_period:        int
+    adx_threshold:     float
+
+
+_params_local = threading.local()
+
+
+def _params() -> _IndicatorParams:
+    tok    = cfg.resolution_token()
+    cached = getattr(_params_local, "p", None)
+    if cached is not None and cached[0] == tok:
+        return cached[1]
+    p = _IndicatorParams(
+        cfg.TALIB_LOOKBACK, cfg.SWING_LOW_BARS, cfg.SUPPORT_TOUCH_PCT,
+        cfg.VOLUME_MA_PERIOD, cfg.VOLUME_MULTIPLIER,
+        cfg.RSI_PERIOD, cfg.RSI_OVERSOLD, cfg.RSI_RISING_BARS,
+        cfg.MACD_FAST, cfg.MACD_SLOW, cfg.MACD_SIGNAL, cfg.MACD_CROSS_BARS,
+        cfg.ADX_PERIOD, cfg.ADX_THRESHOLD,
+    )
+    _params_local.p = (tok, p)
+    return p
 
 
 # ── Array helpers ─────────────────────────────────────────────────────────────
@@ -174,7 +218,8 @@ def compute_indicators(
     # ── Slice isolation: only the tail needed for lookback enters the C calls.
     # TALIB_LOOKBACK bars is enough for RSI(14)/ADX(14)/MACD(26,9) to fully
     # converge while skipping the multi-day warmup history.
-    lookback = cfg.TALIB_LOOKBACK   # dynamic setting — read per call
+    prm = _params()                 # resolved dynamic settings (cached per token)
+    lookback = prm.lookback
     if ohlcv_window is not None:
         close, high, low, volume = ohlcv_window
         if close.size > lookback:   # same defensive window as the list path
@@ -201,11 +246,11 @@ def compute_indicators(
 
     # Structural support: lowest low of the last SWING_LOW_BARS bars excluding
     # the current one — taken from the already-built `low` array.
-    sl_win = low[-(cfg.SWING_LOW_BARS + 1):-1]
+    sl_win = low[-(prm.swing_low_bars + 1):-1]
     ind.support_level = float(sl_win.min()) if sl_win.size else 0.0
     if ind.support_level > 0:
         dist = (ltp - ind.support_level) / ind.support_level
-        ind.near_support = 0 <= dist <= cfg.SUPPORT_TOUCH_PCT
+        ind.near_support = 0 <= dist <= prm.support_touch_pct
 
     # Candlestick pattern
     pat = _detect_bullish_pattern(
@@ -234,11 +279,11 @@ def compute_indicators(
     # Volume surge
     prev_vol = volume[:-1]
     if prev_vol.size:
-        avg = (prev_vol[-cfg.VOLUME_MA_PERIOD:].mean()
-               if prev_vol.size >= cfg.VOLUME_MA_PERIOD else prev_vol.mean())
+        avg = (prev_vol[-prm.volume_ma_period:].mean()
+               if prev_vol.size >= prm.volume_ma_period else prev_vol.mean())
         ind.avg_volume_20 = float(avg)
         ind.volume_surge  = (ind.avg_volume_20 > 0
-                             and float(volume[-1]) > ind.avg_volume_20 * cfg.VOLUME_MULTIPLIER)
+                             and float(volume[-1]) > ind.avg_volume_20 * prm.volume_multiplier)
         if ind.avg_volume_20 > 0:
             ind.volume_ratio = float(volume[-1]) / ind.avg_volume_20
 
@@ -254,26 +299,26 @@ def compute_indicators(
         return ind
 
     # ── RSI (14) ────────────────────────────────────────────────────────────
-    rsi_arr = talib.RSI(close, timeperiod=cfg.RSI_PERIOD)
+    rsi_arr = talib.RSI(close, timeperiod=prm.rsi_period)
     ind.rsi = _last(rsi_arr)
     if ind.rsi is not None:
-        ind.rsi_above_30 = ind.rsi > cfg.RSI_OVERSOLD
+        ind.rsi_above_30 = ind.rsi > prm.rsi_oversold
         # Need RSI_RISING_BARS + 1 values to produce RSI_RISING_BARS diffs.
         # NaNs only pad the warmup prefix, so the plain tail slice is valid in
         # the common case; the full-array mask is paid only when the series is
         # still inside the warmup window.
-        tail = rsi_arr[-(cfg.RSI_RISING_BARS + 1):]
+        tail = rsi_arr[-(prm.rsi_rising_bars + 1):]
         if np.isnan(tail).any():
-            tail = rsi_arr[~np.isnan(rsi_arr)][-(cfg.RSI_RISING_BARS + 1):]
+            tail = rsi_arr[~np.isnan(rsi_arr)][-(prm.rsi_rising_bars + 1):]
         ind.rsi_rising = (
-            tail.size >= cfg.RSI_RISING_BARS + 1
+            tail.size >= prm.rsi_rising_bars + 1
             and bool(np.all(np.diff(tail) > 0))
         )
 
     # ── MACD (12, 26, 9) ──────────────────────────────────────────────────────
     macd, macdsignal, _ = talib.MACD(
-        close, fastperiod=cfg.MACD_FAST, slowperiod=cfg.MACD_SLOW,
-        signalperiod=cfg.MACD_SIGNAL,
+        close, fastperiod=prm.macd_fast, slowperiod=prm.macd_slow,
+        signalperiod=prm.macd_signal,
     )
     # Store None when TA-Lib returns NaN (insufficient bars) so callers can
     # distinguish "no data" from a legitimate value of 0.0.
@@ -290,7 +335,7 @@ def compute_indicators(
         # fire on confirming bars after the cross, not only on the exact cross bar.
         # NaNs only pad the warmup prefix — mask the full arrays only when the
         # plain tail slice still contains warmup NaNs.
-        lookback_n = cfg.MACD_CROSS_BARS + 1
+        lookback_n = prm.macd_cross_bars + 1
         m_tail = macd[-lookback_n:]
         s_tail = macdsignal[-lookback_n:]
         if np.isnan(m_tail).any() or np.isnan(s_tail).any():
@@ -307,13 +352,13 @@ def compute_indicators(
             ind.macd_bullish_cross = above_now and was_below
 
     # ── ADX (14) + directional movement ──────────────────────────────────────
-    adx_arr = talib.ADX(high, low, close, timeperiod=cfg.ADX_PERIOD)
-    plus_di_arr  = talib.PLUS_DI(high, low, close, timeperiod=cfg.ADX_PERIOD)
-    minus_di_arr = talib.MINUS_DI(high, low, close, timeperiod=cfg.ADX_PERIOD)
+    adx_arr = talib.ADX(high, low, close, timeperiod=prm.adx_period)
+    plus_di_arr  = talib.PLUS_DI(high, low, close, timeperiod=prm.adx_period)
+    minus_di_arr = talib.MINUS_DI(high, low, close, timeperiod=prm.adx_period)
     ind.adx      = _last(adx_arr)
     ind.plus_di  = _last(plus_di_arr)
     ind.minus_di = _last(minus_di_arr)
-    ind.adx_ok   = (ind.adx is not None and ind.adx > cfg.ADX_THRESHOLD
+    ind.adx_ok   = (ind.adx is not None and ind.adx > prm.adx_threshold
                     and ind.plus_di is not None and ind.minus_di is not None
                     and ind.plus_di > ind.minus_di)
 

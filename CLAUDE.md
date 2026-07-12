@@ -25,7 +25,7 @@ python main.py                # serves http://0.0.0.0:8080
 
 - Dashboard: `http://localhost:8080` (live status, positions, scans, backtest runner).
 - `TA-Lib` (the Python pkg) needs the **native C library** present at build time — the Dockerfile compiles it; for a local venv install it on the host first (`brew install ta-lib`, or build from source).
-- There is **no test suite**. Validate changes with `python -m compileall -q app main.py` and by reading the flow.
+- **Test suite:** `python3 tests/test_engine_synthetic.py` — an end-to-end conformance suite that replays the REAL backtest pipeline on synthetic candles with hand-computed expected results (entry window/cutoff, no-lookahead, gap fills, SL priority, delivery semantics, fill priority, risk modes, cost profiles, dedup, loss limit). It stubs `talib` (deterministic outputs) and ships a numpy shim, so it runs anywhere; under Docker it uses real numpy. Run it after touching the engine, `conditions.py`, `position_manager.py`, or `fills.py`. Also `python -m compileall -q app main.py` for the rest.
 
 ## External dependencies (not in this repo)
 
