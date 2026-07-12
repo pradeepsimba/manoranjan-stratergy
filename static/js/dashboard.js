@@ -322,6 +322,26 @@ function runBacktest() {
   // Optional per-run strategy overrides from the picker — live settings stay untouched.
   const overrides = Object.keys(_btOvr).length ? { ..._btOvr } : null;
 
+  // Pre-flight inert-combo warning: a % risk value does nothing unless the
+  // MATCHING Risk basis is capital_pct (delivery runs read the DELIVERY pair).
+  // Effective basis = per-run override if present, else the saved setting.
+  if (_btSpecs) {
+    const eff = k => (overrides && k in overrides) ? overrides[k]
+                    : (_btSpecs[k] ? _btSpecs[k].value : undefined);
+    const positional = (timeframe === '1d') || ((mode || eff('BACKTEST_MODE')) === 'delivery');
+    const basisKey = positional ? 'DELIVERY_RISK_MODE' : 'RISK_MODE';
+    const pctKey   = positional ? 'DELIVERY_RISK_CAPITAL_PERCENT' : 'RISK_CAPITAL_PERCENT';
+    const wrongPairPct = positional ? 'RISK_CAPITAL_PERCENT' : 'DELIVERY_RISK_CAPITAL_PERCENT';
+    if (overrides && wrongPairPct in overrides && !(pctKey in overrides)) {
+      toast(`This ${positional ? 'delivery' : 'intraday'} run reads ${pctKey}, ` +
+            `not ${wrongPairPct} — your override will be ignored`, 'warn');
+    }
+    if (overrides && pctKey in overrides && eff(basisKey) !== 'capital_pct') {
+      toast(`Risk % has NO effect: set ${positional ? 'Risk basis (delivery)' : 'Risk basis'} ` +
+            `= capital_pct (add it as an override or change it in Settings)`, 'warn');
+    }
+  }
+
   setBtStatus('running…', 'yellow');
   setRunBtn(true);
   document.getElementById('bt-summary').innerHTML = '';
@@ -449,6 +469,7 @@ function renderBacktestMeta(run) {
   const mode = p.mode || (tf === '1d' ? 'delivery' : 'intraday');
   tags.push(`<span class="tag">Mode <b>${escHtml(mode)}</b></span>`);
   if (p.capital != null)      tags.push(`<span class="tag">Capital <b>₹${fmt2(p.capital)}</b></span>`);
+  if (p.risk)                 tags.push(`<span class="tag">Risk <b>${escHtml(p.risk)}</b></span>`);
   if (p.slippage_bps != null) tags.push(`<span class="tag">Slippage <b>${p.slippage_bps} bps</b></span>`);
   // Data source held less history than requested — show where the replay
   // really began so a short days_traded doesn't look like a bug.
@@ -699,7 +720,7 @@ function syncBtMode() {
         '<b>Positional (delivery) run:</b> one portfolio across the whole range — ' +
         'positions carry overnight and gaps fill at the next open. ' +
         '<b>Each symbol trades at most once per run</b>, the loss limit acts as a ' +
-        'run-level stop (not daily), and the <a href="/settings">Delivery Mode</a> ' +
+        'run-level stop (not daily), and the <a href="/settings#delivery">Delivery Mode</a> ' +
         'settings (stop, risk, leverage, costs, conditions) apply instead of the intraday ones.';
     }
   }

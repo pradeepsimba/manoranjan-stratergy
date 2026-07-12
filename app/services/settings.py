@@ -554,7 +554,24 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     await db.replace_app_settings(store, at_default)
     cfg.set_runtime_overrides(store)
     cfg.clear_runtime_overrides(at_default)
-    return describe()
+
+    # Inert-field warnings: saving a risk value whose Risk basis makes it a
+    # no-op is the classic silent trap ("I set 10% but the backtest ignores
+    # it") — say so in the save confirmation instead of letting it pass.
+    warnings: List[str] = []
+    if "RISK_CAPITAL_PERCENT" in changes and cfg.RISK_MODE != "capital_pct":
+        warnings.append("Risk % of capital has NO effect until Risk basis = capital_pct")
+    if "RISK_PER_TRADE" in changes and cfg.RISK_MODE != "fixed_amount":
+        warnings.append("Risk per trade ₹ has NO effect while Risk basis = capital_pct")
+    if "DELIVERY_RISK_CAPITAL_PERCENT" in changes and cfg.DELIVERY_RISK_MODE != "capital_pct":
+        warnings.append("Delivery Risk % has NO effect until Risk basis (delivery) = capital_pct")
+    if "DELIVERY_RISK_PER_TRADE" in changes and cfg.DELIVERY_RISK_MODE != "fixed_amount":
+        warnings.append("Delivery Risk ₹ has NO effect while Risk basis (delivery) = capital_pct")
+
+    out = describe()
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
 async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:

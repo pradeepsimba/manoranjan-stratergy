@@ -281,6 +281,22 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
                 f"{timeframe} ({from_date} → {req.to_date}) — longer ranges "
                 f"don't fit in memory at this bar size")
 
+    # Record the EFFECTIVE per-trade risk this run will size with (mode-aware:
+    # positional runs read the DELIVERY_* pair) — the classic silent surprise
+    # is "I set 10% but nothing changed" because the matching Risk basis is
+    # still fixed_amount. The results header shows this tag.
+    ovr = attr_overrides
+    if mode == "delivery" or timeframe == "1d":
+        r_mode = ovr.get("DELIVERY_RISK_MODE", cfg.DELIVERY_RISK_MODE)
+        r_amt  = ovr.get("DELIVERY_RISK_PER_TRADE", cfg.DELIVERY_RISK_PER_TRADE)
+        r_pct  = ovr.get("DELIVERY_RISK_CAPITAL_PERCENT", cfg.DELIVERY_RISK_CAPITAL_PERCENT)
+    else:
+        r_mode = ovr.get("RISK_MODE", cfg.RISK_MODE)
+        r_amt  = ovr.get("RISK_PER_TRADE", cfg.RISK_PER_TRADE)
+        r_pct  = ovr.get("RISK_CAPITAL_PERCENT", cfg.RISK_CAPITAL_PERCENT)
+    risk_label = (f"{r_pct:g}% of capital" if r_mode == "capital_pct"
+                  else f"₹{r_amt:g}/trade")
+
     run_id = uuid.uuid4().hex[:12]
     # Reserve the slot BEFORE the awaited DB insert — two concurrent POSTs
     # would otherwise both pass the len() check above during the await and
@@ -290,7 +306,8 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         await _db.create_backtest_run(
             run_id, from_date, req.to_date,
             {"slippage_bps": slippage, "capital": capital,
-             "timeframe": timeframe, "mode": mode, "overrides": attr_overrides},
+             "timeframe": timeframe, "mode": mode, "risk": risk_label,
+             "overrides": attr_overrides},
         )
     except Exception:
         _BT_RUNNING.discard(run_id)

@@ -218,11 +218,52 @@ function rowHtml(s, nested) {
     </div>${s.type === 'rules' ? `<div class="rb-wrap" data-rules="${escHtml(s.key)}"></div>` : ''}`;
 }
 
+// ── Intraday / Delivery page tabs ─────────────────────────────────────────────
+// The Delivery Mode group gets its own page; everything else lives on the
+// Intraday & General page. Deep-linkable: /settings#delivery.
+let activeTab = (location.hash === '#delivery') ? 'delivery' : 'intraday';
+
+function tabOf(groupName) {
+  return groupName === 'Delivery Mode' ? 'delivery' : 'intraday';
+}
+
+function switchTab(tab) {
+  activeTab = tab;
+  history.replaceState(null, '', tab === 'delivery' ? '#delivery' : '#');
+  document.getElementById('tab-intraday').classList.toggle('active', tab === 'intraday');
+  document.getElementById('tab-delivery').classList.toggle('active', tab === 'delivery');
+  render();
+  const q = document.getElementById('set-search');
+  if (q && q.value) filterSettings(q.value);
+}
+
+window.addEventListener('hashchange', () => {
+  const t = (location.hash === '#delivery') ? 'delivery' : 'intraday';
+  if (t !== activeTab) switchTab(t);
+});
+
+function _updateTabBadges(groups) {
+  // Unsaved-edit counts per tab so a change parked on the OTHER page is
+  // never invisible while the save bar shows a nonzero total.
+  const counts = { intraday: 0, delivery: 0 };
+  groups.forEach(g => g.settings.forEach(s => {
+    if (s.key in edits) counts[tabOf(g.name)]++;
+  }));
+  [['intraday', 'tab-intraday-badge'], ['delivery', 'tab-delivery-badge']].forEach(([t, id]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.style.display = counts[t] ? '' : 'none';
+    el.textContent = counts[t] + ' unsaved';
+  });
+}
+
 function render() {
-  const groups = (specData && specData.groups) || [];
+  const allGroups = (specData && specData.groups) || [];
+  const groups = allGroups.filter(g => tabOf(g.name) === activeTab);
   wrap.querySelectorAll('.panel').forEach(p => p.remove());
   const loading = document.getElementById('loading-note');
   if (loading) loading.remove();
+  _updateTabBadges(allGroups);
 
   // Map COND_* toggle key → its linked value settings (gathered across ALL
   // groups) so each condition's thresholds render inline under its toggle.
@@ -384,7 +425,8 @@ function submitSettings(method, url, body, okMsg, failLabel, settledKeys, sentVa
         if (!sentValues || keep[k] === sentValues[k]) delete keep[k];
       });
       specData = d; edits = keep; render();
-      toast(okMsg, true);
+      const warn = (d.warnings || [])[0];
+      toast(warn ? okMsg + ' — ' + warn : okMsg, true);
     })
     .catch(e => toast(failLabel + ': ' + e.message, false));
 }

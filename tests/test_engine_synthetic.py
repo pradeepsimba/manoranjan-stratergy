@@ -394,7 +394,130 @@ def s9():
           f"{[t.symbol for t in tr]}")
 
 
+
+
+# ── Scenario 10: 1d timeframe — the always-positional daily path ─────────────
+def s10():
+    print("S10 1d timeframe (positional daily replay)")
+    # 35 warmup daily bars + 2 in-range days; bars ARE days. Day1 green ->
+    # entry at its close; day2 gaps below the stop -> STOP at day2 open.
+    def daily(day, o, c, h, l):
+        return Candle(start_time=f"{day} 09:15", open=o, close=c, high=h, low=l,
+                      volume=1000.0)
+    warm = [daily(f"2026-05-{d:02d}", 100 + d * 0.1, 100 + d * 0.1 + 0.05,
+                  100 + d * 0.1 + 0.1, 100 + d * 0.1 - 0.1) for d in range(1, 30)]
+    warm += [daily(f"2026-06-{d:02d}", 103 + d * 0.1, 103 + d * 0.1 + 0.05,
+                   103 + d * 0.1 + 0.1, 103 + d * 0.1 - 0.1) for d in range(1, 10)]
+    entry_close = 106.0
+    d1 = daily(DAY1, 105.0, entry_close, 106.2, 104.9)           # green entry day
+    # delivery stop floor pinned to 5 below -> stop = 101.0; day2 opens at 99
+    d2 = daily(DAY2, 99.0, 98.5, 99.5, 98.0)
+    ss = SymbolSeries(token="1", name="AAA", series=_sort_candles(warm + [d1, d2]))
+    ss.index_days()
+    nwarm = [daily(b.start_time[:10], 25_000, 25_010, 25_020, 24_990) for b in warm]
+    nifty = SymbolSeries(token=cfg.NIFTY50_TOKEN, name=cfg.NIFTY50_NAME,
+                         series=_sort_candles(nwarm + [
+                             daily(DAY1, 25_000, 25_100, 25_150, 24_990),
+                             daily(DAY2, 25_100, 25_200, 25_250, 25_090)]))
+    nifty.index_days()
+    trades, _, ndays = simulate({"1": ss}, nifty, D1, D2, 0.0, None,
+                                {**BASE, "DELIVERY_RR_RATIO": 100.0,
+                                 "DELIVERY_MIN_SL_OFFSET": 5.0}, "1d", "intraday")
+    check("1d forces positional; one trade", len(trades) == 1, f"{len(trades)}")
+    t = trades[0]
+    check("1d entry at day-1 bar close", t.entry_time.startswith(DAY1)
+          and abs(t.entry_price - entry_close) < 0.01, f"{t.entry_time} @ {t.entry_price}")
+    check("1d overnight gap -> STOP at day-2 open", t.outcome == "STOP"
+          and t.exit_time.startswith(DAY2) and abs(t.exit_price - 99.0) < 0.01,
+          f"{t.outcome} {t.exit_time} @ {t.exit_price}")
+
+
+# ── Scenario 11: a freed slot admits the next symbol ──────────────────────────
+def s11():
+    print("S11 slot freeing after an exit")
+    # A stops out at 10:05; B is gate-blocked until ~10:40, then eligible —
+    # with cap 1 and a healthy loss limit, B must enter AFTER A's slot frees.
+    day_a = rising_day(DAY1, 200.0)
+    fill = 200.0 + 0.1 * 6 + 0.1
+    stop = round(fill - 5.0, 2)
+    b = day_a[10]
+    day_a[10] = Candle(start_time=b.start_time, open=stop - 1.0, close=stop - 1.0,
+                       high=stop - 0.5, low=stop - 2.0, volume=1000.0)
+    day_b = []
+    for i, bb in enumerate(rising_day(DAY1, 100.0)):
+        if i <= 10:
+            o = 100.0 - 0.05 * i
+            day_b.append(Candle(start_time=bb.start_time, open=o, close=o - 0.05,
+                                high=o + 0.02, low=o - 0.1, volume=1000.0))
+        else:
+            o = 99.45 + 0.1 * (i - 10)
+            day_b.append(Candle(start_time=bb.start_time, open=o, close=o + 0.1,
+                                high=o + 0.12, low=o - 0.02, volume=1000.0))
+    syms = {"1": series("1", "AAA", day_a), "2": series("2", "BBB", day_b)}
+    tr = run(syms, [DAY1], {"DAILY_LOSS_LIMIT": 100_000.0, "RR_RATIO": 100.0})
+    check("both traded through one slot", sorted(t.symbol for t in tr) == ["AAA", "BBB"],
+          f"{[t.symbol for t in tr]}")
+    a, bt = [t for t in tr if t.symbol == "AAA"][0], [t for t in tr if t.symbol == "BBB"][0]
+    check("B entered only after A exited", bt.entry_time >= a.exit_time,
+          f"A exit {a.exit_time}, B entry {bt.entry_time}")
+
+
+# ── Scenario 12: slippage direction on both legs ──────────────────────────────
+def s12():
+    print("S12 slippage: buy slipped up, sell slipped down")
+    day = rising_day(DAY1, 100.0)
+    entry_close = 100.0 + 0.1 * 6 + 0.1
+    # generous target bar late in the day so the target is reachable post-slip
+    b = day[40]
+    day[40] = Candle(start_time=b.start_time, open=b.open, close=b.open + 0.1,
+                     high=b.open + 20.0, low=b.open - 0.02, volume=1000.0)
+    bps = 100.0                                   # 1% — big enough to assert exactly
+    tr = run({"1": series("1", "AAA", day)}, [DAY1], {}, slip=bps)
+    t = tr[0]
+    exp_fill = round(entry_close * 1.01, 2)
+    check("entry slipped UP 1%", abs(t.entry_price - exp_fill) < 0.02,
+          f"{t.entry_price} vs {exp_fill}")
+    exp_target = round(t.entry_price + 7.5, 2)    # stop floored at 5, RR 1.5
+    exp_exit = exp_target * 0.99                  # sell slipped DOWN 1%
+    check("target exit slipped DOWN 1%", t.outcome == "TARGET"
+          and abs(t.exit_price - exp_exit) < 0.05, f"{t.exit_price} vs {exp_exit}")
+
+
+# ── Scenario 13: early-data-end square-off keeps the trade stream chronological
+def s13():
+    print("S13 equity stream stays chronological when a symbol's data ends early")
+    # Delivery run over 2 days: A has DAY1 data only (never exits in range ->
+    # squared off at ITS last bar, DAY1 15:25); B enters DAY2 and stops out
+    # later. The merged trade list must come back sorted by exit_time.
+    day_a = rising_day(DAY1, 100.0)
+    day_b1 = []          # B gate-blocked all of DAY1 (red)
+    for bb in rising_day(DAY1, 200.0):
+        day_b1.append(Candle(start_time=bb.start_time, open=bb.open,
+                             close=bb.open - 0.05, high=bb.open + 0.02,
+                             low=bb.open - 0.1, volume=1000.0))
+    day_b2 = rising_day(DAY2, 200.0)
+    fill_b = 200.0 + 0.1 * 6 + 0.1
+    stop_b = round(fill_b - 5.0, 2)
+    x = day_b2[20]
+    day_b2[20] = Candle(start_time=x.start_time, open=stop_b - 1.0, close=stop_b - 1.0,
+                        high=stop_b - 0.5, low=stop_b - 2.0, volume=1000.0)
+    syms = {"1": series("1", "AAA", day_a),
+            "2": series("2", "BBB", day_b1 + day_b2)}
+    tr = run(syms, [DAY1, DAY2],
+             {"RR_RATIO": 100.0, "DELIVERY_RR_RATIO": 100.0,
+              "DELIVERY_MIN_SL_OFFSET": 5.0, "MAX_CONCURRENT_POSITIONS": 2,
+              "DELIVERY_MAX_CONCURRENT_POSITIONS": 2}, mode="delivery")
+    check("both symbols traded", sorted(t.symbol for t in tr) == ["AAA", "BBB"],
+          f"{[(t.symbol, t.exit_time) for t in tr]}")
+    check("trade stream sorted by exit_time",
+          [t.exit_time for t in tr] == sorted(t.exit_time for t in tr),
+          f"{[t.exit_time for t in tr]}")
+    a = [t for t in tr if t.symbol == "AAA"][0]
+    check("A squared off at ITS last available bar", a.outcome == "EOD"
+          and a.exit_time.startswith(DAY1), f"{a.outcome} {a.exit_time}")
+
+
 if __name__ == "__main__":
-    for fn in (s1, s2, s3, s4, s5, s6, s7, s8, s9):
+    for fn in (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13):
         fn()
     print(f"\nALL GREEN — {PASS} assertions passed")

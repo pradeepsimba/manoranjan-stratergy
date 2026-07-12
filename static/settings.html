@@ -156,6 +156,21 @@
     .toast.err { background: var(--neg-bg); color: var(--neg); border: 1px solid var(--neg-edge); }
 
     .hdr-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    /* Intraday / Delivery page tabs */
+    .set-tabs {
+      max-width: 1180px; margin: 16px auto 0; padding: 0 18px;
+      display: flex; gap: 8px;
+    }
+    .set-tab {
+      background: var(--surf); border: 1px solid var(--edge); color: var(--txt-2);
+      border-radius: var(--r) var(--r) 0 0; font-size: 12.5px; font-weight: 600;
+      padding: 9px 20px; cursor: pointer;
+    }
+    .set-tab.active {
+      color: var(--prime); border-color: var(--prime-dim);
+      border-bottom-color: transparent; background: var(--surf-raised);
+    }
+    .set-tab .grp-badge { margin-left: 6px; }
     .grp-badge { font-size: 10px; }
     .set-search { width: 180px; }
     .panel.filtered-out { display: none; }
@@ -209,6 +224,13 @@
     </button>
   </div>
 </header>
+
+<div class="set-tabs" role="tablist">
+  <button class="set-tab active" id="tab-intraday" onclick="switchTab('intraday')">Intraday &amp; General
+    <span class="badge yellow grp-badge" id="tab-intraday-badge" style="display:none"></span></button>
+  <button class="set-tab" id="tab-delivery" onclick="switchTab('delivery')">Delivery Mode
+    <span class="badge yellow grp-badge" id="tab-delivery-badge" style="display:none"></span></button>
+</div>
 
 <div class="settings-wrap" id="settings-wrap">
   <div class="settings-note">
