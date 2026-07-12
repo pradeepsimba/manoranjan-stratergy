@@ -5,7 +5,7 @@ import csv
 import io
 import time
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket
@@ -266,11 +266,20 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
     if timeframe == "1d":
         mode = "delivery"   # 1d bars are days — positional by construction
 
-    max_days = _BT_MAX_RANGE_DAYS.get(timeframe, 250)
-    if (req.to_date - req.from_date).days > max_days:
-        raise HTTPException(
-            400, f"range too long for {timeframe}: max {max_days} days "
-                 f"(the replay materializes every bar for ~500 symbols in memory)")
+    # Long ranges aren't an error — CLAMP to the newest max_days instead (the
+    # replay materializes every bar for ~500 symbols in memory, so the cap
+    # itself stays). If the data server holds less history than requested,
+    # nothing extra is needed: the replay iterates only days that actually
+    # came back, so the run simply begins at the real start of the data — the
+    # summary's data_from/data_to report what was actually replayed.
+    max_days  = _BT_MAX_RANGE_DAYS.get(timeframe, 250)
+    from_date = req.from_date
+    note      = None
+    if (req.to_date - from_date).days > max_days:
+        from_date = req.to_date - timedelta(days=max_days)
+        note = (f"Range shortened to the most recent {max_days} days for "
+                f"{timeframe} ({from_date} → {req.to_date}) — longer ranges "
+                f"don't fit in memory at this bar size")
 
     run_id = uuid.uuid4().hex[:12]
     # Reserve the slot BEFORE the awaited DB insert — two concurrent POSTs
@@ -279,7 +288,7 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
     _BT_RUNNING.add(run_id)
     try:
         await _db.create_backtest_run(
-            run_id, req.from_date, req.to_date,
+            run_id, from_date, req.to_date,
             {"slippage_bps": slippage, "capital": capital,
              "timeframe": timeframe, "mode": mode, "overrides": attr_overrides},
         )
@@ -288,11 +297,12 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         raise
     spawn(
         _run_backtest_tracked(
-            run_id, _db, run_id, req.from_date, req.to_date,
+            run_id, _db, run_id, from_date, req.to_date,
             slippage, capital, overrides=attr_overrides,
             timeframe=timeframe, mode=mode)
     )
-    return {"run_id": run_id, "status": "running", "timeframe": timeframe, "mode": mode}
+    return {"run_id": run_id, "status": "running", "timeframe": timeframe,
+            "mode": mode, "from_date": from_date.isoformat(), "note": note}
 
 
 @router.get("/api/backtest/{run_id}")

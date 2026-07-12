@@ -652,6 +652,14 @@ async def run_backtest(
 
         summary = compute_metrics(trades, equity, days)
         summary["universe_size"] = len(symbols)
+        # The ACTUAL replayed span: if the data server holds less history than
+        # requested, the replay silently begins at the real start of the data
+        # — record it so the UI can show "data starts <date>" instead of the
+        # user wondering why an old range produced few days.
+        lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
+        in_range = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
+        if in_range:
+            summary["data_from"], summary["data_to"] = in_range[0], in_range[-1]
 
         await db.save_backtest_trades(run_id, trades)
         await db.finish_backtest_run(run_id, summary)

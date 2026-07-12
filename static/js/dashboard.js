@@ -356,6 +356,8 @@ function runBacktest() {
     .then(r => r.json())
     .then(d => {
       if (!d.run_id) throw new Error(d.detail || 'no run_id');
+      // Server may shorten oversized ranges instead of rejecting — say so.
+      if (d.note) toast(d.note, 'warn');
       startPolling(d.run_id);
     })
     .catch(e => {
@@ -448,6 +450,12 @@ function renderBacktestMeta(run) {
   tags.push(`<span class="tag">Mode <b>${escHtml(mode)}</b></span>`);
   if (p.capital != null)      tags.push(`<span class="tag">Capital <b>₹${fmt2(p.capital)}</b></span>`);
   if (p.slippage_bps != null) tags.push(`<span class="tag">Slippage <b>${p.slippage_bps} bps</b></span>`);
+  // Data source held less history than requested — show where the replay
+  // really began so a short days_traded doesn't look like a bug.
+  const sm = run.summary || {};
+  if (sm.data_from && run.from_date && sm.data_from > run.from_date) {
+    tags.push(`<span class="tag ovr">data starts <b>${escHtml(sm.data_from)}</b></span>`);
+  }
 
   const ovr = p.overrides || {};
   const keys = Object.keys(ovr);
