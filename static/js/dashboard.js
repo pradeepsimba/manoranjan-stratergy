@@ -353,7 +353,7 @@ function runBacktest() {
   document.getElementById('bt-viz').style.display = 'none';
   document.getElementById('bt-meta').style.display = 'none';
   document.getElementById('bt-trades').innerHTML =
-    '<tr><td colspan="14" class="empty-cell">Running…</td></tr>';
+    '<tr><td colspan="16" class="empty-cell">Running…</td></tr>';
 
   // The server prefers the direct form fields over the overrides JSON — so
   // when the user typed one of these keys into the overrides box, DON'T send
@@ -424,7 +424,7 @@ function pollBacktest(runId) {
         document.getElementById('bt-summary').innerHTML =
           `<p class="pnl-neg" style="padding:8px 0;font-size:12px">${escHtml(run.error || 'Backtest failed')}</p>`;
         document.getElementById('bt-trades').innerHTML =
-          '<tr><td colspan="14" class="empty-cell">—</td></tr>';
+          '<tr><td colspan="16" class="empty-cell">—</td></tr>';
         toast('Backtest failed: ' + (run.error || 'unknown error'), 'err');
         return;
       }
@@ -562,7 +562,7 @@ function renderBacktestViz(s) {
 function renderBacktestTrades(trades) {
   const tbody = document.getElementById('bt-trades');
   if (!Array.isArray(trades) || !trades.length) {
-    tbody.innerHTML = '<tr><td colspan="14" class="empty-cell">No trades</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="16" class="empty-cell">No trades</td></tr>';
     return;
   }
   tbody.innerHTML = trades.map(t => {
@@ -583,6 +583,8 @@ function renderBacktestTrades(trades) {
       <td class="time-col">${entryT}</td>
       <td>${fmt2(t.exit_price)}</td>
       <td class="time-col">${exitT}</td>
+      <td class="num-col">${t.stop_loss != null ? fmt2(t.stop_loss) : '—'}</td>
+      <td class="num-col">${t.target != null ? fmt2(t.target) : '—'}</td>
       <td class="num-col">${t.quantity}</td>
       <td class="${ocCls}">${escHtml(t.outcome || '')}</td>
       <td class="num-col">${rsi}</td>
@@ -840,7 +842,7 @@ fetch('/api/backtests')
       setBtStatus('running…', 'yellow');
       setRunBtn(true);
       document.getElementById('bt-trades').innerHTML =
-        '<tr><td colspan="14" class="empty-cell">Running…</td></tr>';
+        '<tr><td colspan="16" class="empty-cell">Running…</td></tr>';
       startPolling(active.run_id);
       return;
     }
