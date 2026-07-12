@@ -62,6 +62,11 @@ def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
+@app.get("/backtest")
+def backtest_page() -> FileResponse:
+    return FileResponse("static/backtest.html")
+
+
 @app.get("/indicators")
 def indicators_page() -> FileResponse:
     return FileResponse("static/indicators.html")

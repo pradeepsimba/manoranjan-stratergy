@@ -174,3 +174,8 @@ function outcomeBars(container, rows) {
     '</div>';
   }).join('');
 }
+
+function fmt2(n) {
+  if (n == null || n === '') return '—';
+  return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
