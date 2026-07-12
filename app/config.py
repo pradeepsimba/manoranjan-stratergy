@@ -112,13 +112,13 @@ _DEFAULTS: Dict[str, Any] = {
     # Risk & capital
     # How the per-trade risk (the ₹ lost when a stop hits) is defined:
     #   "fixed_amount" — RISK_PER_TRADE ₹ per setup (original blueprint)
-    #   "capital_pct"  — RISK_CAPITAL_PCT × account capital per setup
+    #   "capital_pct"  — RISK_CAPITAL_PERCENT % of account capital per setup
     # Stop PLACEMENT is unchanged in both modes (structural swing-low stop,
     # floored at MIN_SL_OFFSET); the mode only changes how many shares are
     # sized against that stop distance.
     "RISK_MODE":                "fixed_amount",
     "RISK_PER_TRADE":           500.0,     # ₹ fixed risk capital per setup
-    "RISK_CAPITAL_PCT":         0.02,      # 0.02 = a stop-out loses 2% of capital
+    "RISK_CAPITAL_PERCENT":     2.0,       # 2 = a stop-out loses 2% of capital (10 = 10%)
     "ACCOUNT_BALANCE":          40_000.0,  # ₹ base capital
     "INTRADAY_LEVERAGE":        5,         # Standard NSE intraday equity leverage
     "MAX_CONCURRENT_POSITIONS": 3,         # Hard cap on simultaneous open positions
@@ -194,7 +194,7 @@ _DEFAULTS: Dict[str, Any] = {
     "DELIVERY_RR_RATIO":         2.5,     # swing trades target a bigger reward:risk
     "DELIVERY_RISK_MODE":        "fixed_amount",   # fixed_amount | capital_pct
     "DELIVERY_RISK_PER_TRADE":   500.0,   # ₹ fixed risk capital per setup
-    "DELIVERY_RISK_CAPITAL_PCT": 0.02,    # 0.02 = a stop-out loses 2% of capital
+    "DELIVERY_RISK_CAPITAL_PERCENT": 2.0, # 2 = a stop-out loses 2% of capital (10 = 10%)
     "DELIVERY_MAX_CONCURRENT_POSITIONS": 3,
     "DELIVERY_DAILY_LOSS_LIMIT": 2_000.0, # run-level loss stop (positional semantics)
     "DELIVERY_LEVERAGE":         1,       # CNC/delivery has no intraday margin by default

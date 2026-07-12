@@ -332,7 +332,7 @@ def s7():
     tr = run(sym, [DAY1], {"RR_RATIO": 100.0})
     check("fixed_amount qty 100", tr[0].qty == 100, f"{tr[0].qty}")
     tr = run(sym, [DAY1], {"RR_RATIO": 100.0, "RISK_MODE": "capital_pct",
-                           "RISK_CAPITAL_PCT": 0.02}, capital=100_000.0)
+                           "RISK_CAPITAL_PERCENT": 2.0}, capital=100_000.0)
     check("capital_pct qty = 2% of run capital / stop", tr[0].qty == int(100_000 * 0.02 / 5.0),
           f"{tr[0].qty}")
 

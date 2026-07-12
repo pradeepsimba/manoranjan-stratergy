@@ -368,7 +368,7 @@ def _delivery_overrides(user_overrides: Optional[Dict] = None) -> Dict[str, Any]
         "RR_RATIO":                 cfg.DELIVERY_RR_RATIO,
         "RISK_MODE":                cfg.DELIVERY_RISK_MODE,
         "RISK_PER_TRADE":           cfg.DELIVERY_RISK_PER_TRADE,
-        "RISK_CAPITAL_PCT":         cfg.DELIVERY_RISK_CAPITAL_PCT,
+        "RISK_CAPITAL_PERCENT":     cfg.DELIVERY_RISK_CAPITAL_PERCENT,
         "MAX_CONCURRENT_POSITIONS": cfg.DELIVERY_MAX_CONCURRENT_POSITIONS,
         "DAILY_LOSS_LIMIT":         cfg.DELIVERY_DAILY_LOSS_LIMIT,
         "INTRADAY_LEVERAGE":        cfg.DELIVERY_LEVERAGE,

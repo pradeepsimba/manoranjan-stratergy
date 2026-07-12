@@ -33,9 +33,10 @@ def calc_quantity(
 
     where `risk` — the ₹ lost when the stop hits — is resolved from RISK_MODE:
         fixed_amount — RISK_PER_TRADE ₹ (original blueprint)
-        capital_pct  — RISK_CAPITAL_PCT × total_capital (e.g. 2% of the
-                       account per stop-out). Stop PLACEMENT is identical in
-                       both modes; only the share count changes.
+        capital_pct  — RISK_CAPITAL_PERCENT % of total_capital (entered as a
+                       true percentage: 10 = 10% of capital per stop-out).
+                       Stop PLACEMENT is identical in both modes; only the
+                       share count changes.
 
     `capital` is the AVAILABLE capital (account minus margin already committed
     by open positions) — the affordability ceiling. `total_capital` is the
@@ -66,7 +67,7 @@ def calc_quantity(
     sl_offset = round(max(entry_price - support, cfg.MIN_SL_OFFSET), 2)
 
     if cfg.RISK_MODE == "capital_pct":
-        risk = total_capital * cfg.RISK_CAPITAL_PCT
+        risk = total_capital * cfg.RISK_CAPITAL_PERCENT / 100.0
     else:
         risk = cfg.RISK_PER_TRADE
     raw_qty = risk / sl_offset
