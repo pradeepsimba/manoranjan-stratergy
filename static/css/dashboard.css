@@ -1,40 +1,43 @@
 /* ── Design tokens ─────────────────────────────────────────────────────────── */
+/* Dark theme matches c.html's exact palette (body #111, panels #1e1e1e/#1a1a1a,
+   green #4caf50 accent, #333 borders) — this is the app's primary/default look,
+   c.html itself has no light mode. */
 :root {
-  --bg:               #060a12;
-  --bg-grad:          radial-gradient(1200px 600px at 78% -10%, #0f1b30 0%, #060a12 60%);
-  --surf:             #0c1322;
-  --surf-raised:      #111c30;
-  --surf-hover:       #182644;
-  --surf-high:        #1e2f4e;
+  --bg:               #111111;
+  --bg-grad:          none;
+  --surf:             #1e1e1e;
+  --surf-raised:      #1a1a1a;
+  --surf-hover:       #222222;
+  --surf-high:        #262626;
 
-  --edge:             #29405e;
-  --edge-soft:        #17253a;
+  --edge:             #333333;
+  --edge-soft:        #222222;
 
-  --prime:            #55c1ff;
-  --prime-dim:        #3ba2e6;
+  --prime:            #4caf50;
+  --prime-dim:        #3d8b40;
   --prime-container:  #0d3050;
   --on-prime:         #04131f;
 
-  --accent-2:         #b394ff;   /* secondary data series / highlights */
-  --accent-2-bg:      rgba(179,148,255,.13);
+  --accent-2:         #38bdf8;   /* c.html's cyan informational accent */
+  --accent-2-bg:      rgba(56,189,248,.13);
 
-  --pos:              #45d18a;
-  --pos-bg:           rgba(69,209,138,.13);
-  --pos-edge:         rgba(69,209,138,.34);
+  --pos:              #39aa39;
+  --pos-bg:           rgba(57,170,57,.15);
+  --pos-edge:         rgba(57,170,57,.34);
 
-  --neg:              #ff6f6f;
-  --neg-bg:           rgba(255,111,111,.13);
-  --neg-edge:         rgba(255,111,111,.34);
+  --neg:              #c93535;
+  --neg-bg:           rgba(201,53,53,.15);
+  --neg-edge:         rgba(201,53,53,.34);
 
-  --warn:             #ffcb6e;
-  --warn-bg:          rgba(255,203,110,.13);
-  --warn-edge:        rgba(255,203,110,.34);
+  --warn:             #f6c453;
+  --warn-bg:          rgba(246,196,83,.13);
+  --warn-edge:        rgba(246,196,83,.34);
 
-  --txt:              #d9e6fb;
-  --txt-2:            #8298b8;
-  --txt-3:            #47607f;
+  --txt:              #eeeeee;
+  --txt-2:            #aaaaaa;
+  --txt-3:            #777777;
 
-  --grid:             rgba(130,152,184,.11);   /* chart gridlines / axes */
+  --grid:             rgba(170,170,170,.11);   /* chart gridlines / axes */
 
   --r:                10px;
   --r-sm:             7px;
@@ -47,8 +50,8 @@
   /* elevation */
   --sh-1: 0 1px 3px rgba(0,0,0,.35);
   --sh-2: 0 4px 16px rgba(0,0,0,.45);
-  --sh-3: 0 12px 34px rgba(0,0,0,.5);
-  --ring: 0 0 0 2px rgba(85,193,255,.22);
+  --sh-3: 0 0 10px rgba(0,0,0,.6);
+  --ring: 0 0 0 2px rgba(76,175,80,.25);
 }
 
 /* ── Light theme overrides ─────────────────────────────────────────────────── */
@@ -279,7 +282,11 @@ body {
   align-items: start;
 }
 
-.col { display: flex; flex-direction: column; gap: 12px; }
+/* min-width: 0 overrides the grid item's default auto min-width (= its
+   content's min-content size) — without it, a wide table anywhere inside
+   (e.g. the Stock Candles panel's 12-stock × N-bar table) blows out the
+   whole grid track instead of scrolling within its own .tbl-wrap. */
+.col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 
 /* ── Panels ────────────────────────────────────────────────────────────────── */
 .panel {
@@ -899,3 +906,115 @@ a:focus-visible, button:focus-visible, input:focus-visible,
   }
   table.cardify td.card-title::before { content: none; }
 }
+
+/* ── c.html UI-parity additions ──────────────────────────────────────────────
+   Everything below recreates panels/widgets that exist in c.html but have no
+   equivalent above: collapsible sections, the analog clock, the live 12-stock
+   candle table, the breakout/global-signal banner, the Kite manual-order form
+   (decorative), the local IndexedDB trade/qty-audit tables, and the read-only
+   Trade Conditions modal. */
+
+/* ── Collapsible section (c.html's .dash-section) ─────────────────────────── */
+.dash-toggle {
+  background: none; border: none; color: var(--txt-2); cursor: pointer;
+  font-size: 13px; padding: 2px 6px; line-height: 1;
+}
+.dash-toggle:hover { color: var(--prime); }
+.dash-collapsed .dash-body { display: none; }
+
+/* ── Analog clock face ────────────────────────────────────────────────────── */
+.analog-clock-wrap {
+  display: flex; align-items: center; justify-content: center;
+  padding: 14px 0;
+}
+.analog-face {
+  position: relative; width: 150px; height: 150px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, var(--surf-high), var(--surf-raised) 70%);
+  border: 2px solid var(--edge); box-shadow: var(--sh-3);
+}
+.analog-tick {
+  position: absolute; left: 50%; top: 50%; width: 2px; height: 6px;
+  background: var(--txt-3); transform-origin: 50% 0;
+}
+.analog-tick.hour { height: 10px; width: 3px; background: var(--txt-2); }
+.analog-hand {
+  position: absolute; left: 50%; top: 50%; transform-origin: 50% 100%;
+  border-radius: 3px; background: var(--txt);
+}
+.analog-hand.hour   { width: 4px; height: 38px; margin-top: -38px; margin-left: -2px; }
+.analog-hand.minute { width: 3px; height: 54px; margin-top: -54px; margin-left: -1.5px; }
+.analog-hand.second { width: 1.5px; height: 60px; margin-top: -60px; margin-left: -.75px; background: var(--accent-2); }
+.analog-cap {
+  position: absolute; left: 50%; top: 50%; width: 10px; height: 10px;
+  margin-left: -5px; margin-top: -5px; border-radius: 50%;
+  background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2);
+}
+.analog-digital { text-align: center; font-size: 12px; color: var(--txt-2); margin-top: 6px; }
+
+/* ── Stock Candles panel: live 12-stock table + global signal + breakout ──── */
+.global-signal-badge {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 12px; border-radius: var(--r-sm);
+  background: var(--surf-raised); border: 1px solid var(--edge-soft);
+  margin-bottom: 8px; font-size: 13px;
+}
+.global-signal-badge b { font-weight: 800; }
+.global-signal-badge small { color: var(--txt-2); font-size: 11px; }
+.breakout-banner {
+  padding: 8px 12px; border-radius: var(--r-sm);
+  background: var(--surf-raised); border: 1px solid var(--edge-soft);
+  margin-bottom: 8px; font-size: 12px; color: var(--txt-2);
+}
+.breakout-banner b { color: var(--txt); }
+.candle-cell {
+  display: inline-block; min-width: 58px; padding: 3px 6px; border-radius: 4px;
+  font-size: 11px; text-align: center; font-weight: 600;
+}
+.candle-cell.positive { background: var(--pos); color: #04130a; }
+.candle-cell.negative { background: var(--neg); color: #1a0505; }
+.candle-cell.neutral  { background: var(--surf-high); color: var(--txt-2); }
+.sr-table td, .sr-table th { font-size: 11px; white-space: nowrap; }
+
+/* ── Trade Dashboard: funds bar + Kite manual-order form (decorative) ─────── */
+.funds-bar {
+  display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline;
+  padding: 8px 0; font-size: 13px; color: var(--txt-2);
+}
+.funds-bar b { color: var(--txt); font-size: 15px; }
+.kite-form {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px 10px; padding: 10px 0; align-items: end;
+}
+.kite-form .field-input { width: 100%; }
+.kite-toggle-row { display: flex; gap: 6px; margin-bottom: 8px; }
+.kite-toggle {
+  flex: 1; padding: 6px 10px; border-radius: var(--r-sm); text-align: center;
+  border: 1px solid var(--edge-soft); background: var(--surf-raised);
+  color: var(--txt-2); cursor: pointer; font-size: 12px; font-weight: 600;
+}
+.kite-toggle.active.buy  { background: var(--pos-bg); color: var(--pos); border-color: var(--pos-edge); }
+.kite-toggle.active.sell { background: var(--neg-bg); color: var(--neg); border-color: var(--neg-edge); }
+.kite-actions { display: flex; gap: 8px; margin-top: 8px; }
+.kite-status { margin-top: 6px; font-size: 11px; color: var(--txt-3); }
+
+/* ── Big Trades / qty-audit (local IndexedDB) ─────────────────────────────── */
+.qty-spike td { background: var(--pos-bg); }
+.audit-line { font-size: 11px; color: var(--txt-2); font-family: monospace; line-height: 1.5; }
+
+/* ── Trade Conditions modal ───────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.modal-overlay.hidden { display: none; }
+.modal-box {
+  background: var(--surf); border: 1px solid var(--edge); border-radius: var(--r-lg);
+  box-shadow: var(--sh-3); max-width: 640px; width: 92%; max-height: 82vh;
+  overflow-y: auto; padding: 18px 20px;
+}
+.modal-box h3 { color: var(--prime); margin-bottom: 10px; }
+.modal-box table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 10px; }
+.modal-box th, .modal-box td { border: 1px solid var(--edge-soft); padding: 4px 8px; text-align: left; }
+.modal-close { float: right; cursor: pointer; color: var(--txt-2); font-size: 18px; }
+.modal-close:hover { color: var(--txt); }

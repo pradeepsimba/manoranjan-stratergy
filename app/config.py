@@ -34,7 +34,6 @@ from typing import Any, Dict, Iterator, List, Optional
 API_HOST          = "35.234.219.141"
 API_URL_TEMPLATE  = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
 WS_URL            = f"ws://{API_HOST}:8083/historical-data"
-CLIENT_STATUS_URL = f"https://{API_HOST}:8000/api/clientstatus/"
 
 # ── Static: credentials / DSN ─────────────────────────────────────────────────
 POSTGRES_DSN = os.getenv(
@@ -94,6 +93,26 @@ BN_ALL_STOCKS: Dict[str, str] = {
     "IDFC FIRST BANK":       "11184",
     "PUNJAB NATIONAL BANK":  "10666",
     "CANARA BANK":           "10794",
+}
+
+# Exact c.html INDEX_WEIGHTS table (Nifty Bank per-stock weight, % as of
+# the source's "Oct 30, 2025" snapshot) — keyed by TOKEN (c.html keys this
+# by `stock_symbol`, and this repo's own candles_5m is likewise token-keyed;
+# see CLAUDE.md's "candles_5m is keyed by TOKEN" convention). Same 11 stocks
+# as BN_ALL_STOCKS, no new universe needed. Used for the weighted
+# global-signal/contribution-analysis port (app/engine/bn_breakout.py).
+BN_INDEX_WEIGHTS: Dict[str, float] = {
+    "1333":  31.86,   # HDFC BANK
+    "4963":  20.14,   # ICICI BANK
+    "3045":  17.83,   # STATE BANK OF INDIA
+    "1922":  8.79,    # KOTAK BANK
+    "5900":  7.96,    # AXIS BANK
+    "5258":  2.92,    # INDUSIND BANK
+    "10666": 2.86,    # PUNJAB NATIONAL BANK
+    "10794": 2.40,    # CANARA BANK
+    "11184": 1.40,    # IDFC FIRST BANK
+    "21238": 1.35,    # AU SMALL FINANCE BANK
+    "1023":  1.19,    # FEDERAL BANK
 }
 
 # BankNifty exchange lot size — a contract-spec fact, not a user tunable.

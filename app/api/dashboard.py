@@ -14,8 +14,6 @@ from pydantic import BaseModel
 import app.config as cfg
 import app.services.settings as settings
 from app.backtest.engine import run_backtest
-from app.engine.watchlist import fetch_active_watchlist
-from app.services.historical_data import fetch_indicator_history
 from app.state import get_state
 from app.ws.dashboard_ws import ws_manager
 
@@ -213,38 +211,6 @@ async def export_backtest_csv(run_id: str) -> Response:
 @router.get("/api/backtests")
 async def list_backtests() -> List[Dict[str, Any]]:
     return await _db.list_backtest_runs() if _db else []
-
-
-# ── Dynamic Zone Scanner (independent equity-universe feature) ───────────────
-
-@router.get("/api/scanner/scan")
-async def get_scanner_results() -> List[Dict[str, Any]]:
-    from app.engine.dynamic_zone import run_dynamic_zone_scan
-    st = get_state()
-
-    # Ensure watchlists are loaded
-    if not st.full_watchlist:
-        try:
-            uni = await fetch_active_watchlist()
-            if uni:
-                st.full_watchlist = uni
-                st.token_to_name = {tok: name for name, tok in uni.items()}
-        except Exception as e:
-            print(f"Scanner on-demand fetch failed: {e}")
-
-    wl = st.active_watchlist if st.active_watchlist else st.full_watchlist
-    if not wl:
-        return []
-
-    # Fetch daily (1d) and intraday (5m) history
-    hist_1d, hist_5m = await asyncio.gather(
-        fetch_indicator_history(wl, interval="1d", days_back=20),
-        fetch_indicator_history(wl, interval="5m", days_back=5)
-    )
-
-    # Run the scan in a background thread to avoid blocking the event loop
-    results = await asyncio.to_thread(run_dynamic_zone_scan, hist_1d, hist_5m, st.token_to_name)
-    return results
 
 
 # ── Dashboard WebSocket ───────────────────────────────────────────────────────

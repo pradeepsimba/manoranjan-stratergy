@@ -106,7 +106,6 @@
 
   <nav class="nav-seg" aria-label="Pages">
     <a href="/" class="active">Dashboard</a>
-    <a href="/scanner">Scanner</a>
     <a href="/settings">Settings</a>
   </nav>
 
@@ -146,15 +145,68 @@
 <!-- ── Main grid ───────────────────────────────────────────────────────────── -->
 <div class="main-grid">
 
-  <!-- LEFT: Trade + Closed trades ──────────────────────────────────────────── -->
+  <!-- LEFT: Trade Dashboard + Big Trades ───────────────────────────────────── -->
   <div class="col">
+
+    <!-- Analog clock (c.html top-right clock face, ported here into the flow) -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Clock (IST)</span>
+        <button class="dash-toggle" data-target="clock-body" onclick="toggleSection(this)">▼</button>
+      </div>
+      <div class="panel-body dash-body" id="clock-body">
+        <div class="analog-clock-wrap">
+          <div class="analog-face" id="analog-face"></div>
+        </div>
+        <div class="analog-digital" id="analog-digital">—:—:—</div>
+      </div>
+    </div>
 
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Active Trade</span>
+        <span class="panel-title">Trade Dashboard</span>
         <span id="trade-badge" class="badge gray">none</span>
       </div>
-      <div class="panel-body">
+      <div class="panel-body dash-body" id="trade-dashboard-body">
+        <div class="funds-bar">
+          <span>Funds: <b id="stat-funds-2">—</b></span>
+          <span>Daily P&amp;L: <b id="stat-pnl-2">—</b></span>
+          <button class="btn-mini" onclick="openConditionModal()">Trade Conditions</button>
+        </div>
+
+        <!-- Kite manual order form — DECORATIVE ONLY, exactly like c.html:
+             local UI state only, never calls the real paper-trading engine. -->
+        <div class="kite-toggle-row">
+          <div class="kite-toggle active buy" id="kite-buy" onclick="kiteSetType('BUY')">BUY (CE)</div>
+          <div class="kite-toggle sell" id="kite-sell" onclick="kiteSetType('SELL')">SELL (PE)</div>
+        </div>
+        <div class="kite-form">
+          <div class="field">
+            <label class="field-label">Qty</label>
+            <input class="field-input" id="kite-qty" type="number" min="30" step="30" value="30">
+          </div>
+          <div class="field">
+            <label class="field-label">Order Type</label>
+            <select class="field-input" id="kite-ordtype" onchange="kiteSetOrdType(this.value)">
+              <option value="MARKET">Market</option>
+              <option value="LIMIT">Limit</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label">Price</label>
+            <input class="field-input" id="kite-price" type="number" step="0.05" disabled>
+          </div>
+          <div class="field">
+            <label class="field-label">Avail. Funds</label>
+            <input class="field-input" id="kite-funds" type="text" disabled value="—">
+          </div>
+        </div>
+        <div class="kite-actions">
+          <button class="btn-run" onclick="kiteSubmitOrder()">Submit (simulated)</button>
+          <button class="btn-mini" onclick="manualExit()">Exit (simulated)</button>
+        </div>
+        <div class="kite-status" id="kite-status">No simulated position.</div>
+
         <div id="trade-empty" class="empty-cell">No active trade</div>
         <div id="trade-card" class="trade-card" style="display:none"></div>
       </div>
@@ -178,9 +230,56 @@
       </div>
     </div>
 
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Local Trade Log (browser-only)</span>
+        <div>
+          <button class="btn-mini" onclick="setTradeLogFilter('today')" id="tl-filter-today">Today</button>
+          <button class="btn-mini" onclick="setTradeLogFilter('all')" id="tl-filter-all">All</button>
+          <button class="btn-mini" onclick="clearTradeLog()">Clear</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="muted-text" style="margin-bottom:6px">
+          Stored in this browser's IndexedDB only — a separate log from
+          "Today's Trades" above (which is the real, server-side history).
+        </div>
+        <div class="tbl-wrap">
+          <table class="cardify">
+            <thead><tr><th>Type</th><th>Price</th><th>Time</th><th>Confidence</th><th>P&amp;L</th></tr></thead>
+            <tbody id="tradelog-tbody">
+              <tr><td colspan="5" class="empty-cell">No local trades logged yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Big Trades — Qty Audit (browser-only)</span>
+        <button class="btn-mini" onclick="auditStockQtyStorage()">DB Check</button>
+      </div>
+      <div class="panel-body">
+        <div class="tbl-wrap">
+          <table class="cardify">
+            <thead><tr><th>Stock</th><th>Bucket</th><th>Qty (Σ ticks)</th></tr></thead>
+            <tbody id="bigtrade-tbody">
+              <tr><td colspan="3" class="empty-cell">Waiting for ticks…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="audit-line" id="bigtrade-audit">DB not checked yet.</div>
+        <div class="kite-actions" style="margin-top:8px">
+          <button class="btn-mini" onclick="chooseOutputFile()">Choose Output File…</button>
+          <span class="muted-text" id="fileexport-status">No file selected.</span>
+        </div>
+      </div>
+    </div>
+
   </div>
 
-  <!-- RIGHT: Entry Loop Monitor + Backtest ─────────────────────────────────── -->
+  <!-- RIGHT: Entry Loop Monitor + Stock Candles + Backtest ─────────────────── -->
   <div class="col">
 
     <div class="panel">
@@ -199,6 +298,36 @@
         </div>
         <div id="gate-rows"></div>
         <div id="no-trade-reason" class="no-trade-reason">—</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Stock Candles</span>
+        <button class="dash-toggle" data-target="stock-candles-body" onclick="toggleSection(this)">▼</button>
+      </div>
+      <div class="panel-body dash-body" id="stock-candles-body">
+        <div class="global-signal-badge" id="global-signal-badge">GLOBAL SIGNAL: —</div>
+        <div class="breakout-banner" id="breakout-banner">No breakout detected.</div>
+        <div class="tbl-wrap">
+          <table class="cardify" id="stock-table">
+            <thead><tr id="stock-table-head"><th>Stock</th></tr></thead>
+            <tbody id="stock-table-body">
+              <tr><td class="empty-cell">Waiting for data…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tbl-wrap" style="margin-top:10px">
+          <table class="sr-table" id="sr-table">
+            <thead><tr>
+              <th>Stock</th><th>5m Support</th><th>5m Resistance</th>
+              <th>15m Support</th><th>15m Resistance</th>
+            </tr></thead>
+            <tbody id="sr-table-body">
+              <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -279,7 +408,21 @@
 
 </div>
 
+<!-- ── Trade Conditions modal (read-only, sourced from /api/settings) ──────── -->
+<div class="modal-overlay hidden" id="condition-modal" onclick="if(event.target===this) closeConditionModal()">
+  <div class="modal-box">
+    <span class="modal-close" onclick="closeConditionModal()">✕</span>
+    <h3>Trade Conditions (live values)</h3>
+    <div id="condition-modal-body">Loading…</div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="/js/util.js"></script>
+<script src="/js/clock.js"></script>
+<script src="/js/breakout.js"></script>
+<script src="/js/qtyAudit.js"></script>
+<script src="/js/kiteForm.js"></script>
 <script src="/js/dashboard.js"></script>
 </body>
 </html>

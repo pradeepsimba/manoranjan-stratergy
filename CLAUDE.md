@@ -31,7 +31,6 @@ python main.py                # serves http://0.0.0.0:8080
 
 - **Market data server** `35.234.219.141` (self-signed cert, `verify=False`):
   - REST `:8000/api/historical-data/` — historical candles (POST, batched 100/req).
-  - REST `:8000/api/clientstatus/` — the day's high-volume stock list `[[rank, name, token], ...]` (used only by the independent Scanner feature — see below).
   - WebSocket `:8083/historical-data` — live 5m ticks.
   - **Matching quirk:** the server matches a historical-data request by **`stockname` text**, not solely by `stock_symbol` token — an exact-token-but-wrong-name request silently returns zero candles (bit us for Kotak: the client-status canonical name is `"Kotak Bank"`, not `"Kotak Mahindra Bank"`). If a stock in `cfg.BN_ALL_STOCKS` ever starts returning empty history, check its name against `/api/clientstatus/` first.
   - **No historical archive for the BankNifty index itself** (confirmed empirically — every `from_date`/`to_date` range returns only the CURRENT day's partial session), unlike NIFTY 50 and every individual stock, which both return full multi-day history. This is why BankNifty history is **self-recorded** into our own `bn_index_bars` table instead of fetched live for backtests — see "Options pricing" / "Self-recorded BankNifty history" below. Don't "fix" the backtest data loader to fetch BankNifty from the REST API over a date range — it will silently return only today, every time.
@@ -86,7 +85,7 @@ Strategy core (shared by live **and** backtest, keep it that way): `bn_signals.*
 ## Layout
 
 ```
-main.py                      FastAPI app + lifespan (DB init → settings load → scheduler.start); serves /, /scanner, /settings
+main.py                      FastAPI app + lifespan (DB init → settings load → scheduler.start); serves /, /settings
 app/config.py                static system config (incl. BN_INDEX_TOKEN/BN_ALL_STOCKS/BN_LEADER_STOCKS/BN_LOT_SIZE) + dynamic tunables
 app/state.py                 AppState singleton (candles_5m by token, bn_index_candles_5m, ltp, bn_index_ltp, active_trade, closed_trades, funds, bn_diagnostic, locks)
 app/models.py                Candle (slots), BNSignal, BNTrade, BNDiagnostic, enums
@@ -94,23 +93,34 @@ app/engine/
   bn_pricing.py               ATM strike/expiry/Black-Scholes/normal_cdf/estimate_iv — pure, no state
   bn_signals.py                sideways/momentum/leader-vote/candle-pattern/EMA-stack/composite-indicator gates
   bn_entry_exit.py            evaluate_entry/evaluate_exit — the shared live+backtest decision core; open_trade_from_signal/finalize_exit helpers
-  watchlist.py                fetch_active_watchlist — client status → full_watchlist (Scanner feature ONLY, untouched by the BN engine)
-  dynamic_zone.py             run_dynamic_zone_scan — independent equity ADR/dynamic-zone scanner (Scanner feature, unrelated to the BN strategy)
+  bn_breakout.py              swing/S-R/pivot breakout detection + weighted global signal — a c.html UI-parity port for the Stock Candles panel, entirely separate from the BN trading strategy above (never feeds evaluate_entry/evaluate_exit)
 app/services/
-  scheduler.py                phase driver + tick-wise engine + EOD + dashboard payload
+  scheduler.py                phase driver + tick-wise engine + EOD + dashboard payload + the 15m S/R refresh loop (Stock Candles panel only)
   market_data.py              single WS connection (BankNifty + 11 stocks); _process_tick updates candles_5m/bn_index_candles_5m/ltp/bn_index_ltp
   historical_data.py          REST client (batched parallel fetch, persistent httpx)
   bn_trade.py                 place_paper_order, check_tick_exit, force_close — paper-order lifecycle + funds/daily_pnl bookkeeping
   settings.py                 SPEC registry (labels/types/bounds/groups/bt flag), validation, override + funds persistence (BN_FUNDS_KEY)
   database.py                 asyncpg pool + schema + positions/daily_stats/backtest/app_settings/bn_index_bars tables
 app/backtest/                 data.py (SymbolSeries + BankNifty from bn_index_bars), engine.py (evaluate_entry/evaluate_exit-driven replay), portfolio.py, fills.py, metrics.py (unchanged, instrument-agnostic)
-app/api/dashboard.py          REST + WS endpoints (/api/status, /api/backtest[/{id}/trades|export.csv], /api/scanner/scan, /ws/dashboard, …)
+app/api/dashboard.py          REST + WS endpoints (/api/status, /api/backtest[/{id}/trades|export.csv], /ws/dashboard, …)
 app/ws/dashboard_ws.py        browser WS broadcast manager
-static/                       index.html, settings.html, scanner.html, js/dashboard.js, js/settings.js, js/scanner.js, css/
+static/                       index.html, settings.html, css/dashboard.css
+  js/dashboard.js              WS connect/render loop, backtest UI, local IndexedDB trade log, CSV export, auto-screenshot, Trade Conditions modal
+  js/clock.js                  analog IST clock — pure client-side, c.html port
+  js/breakout.js                Stock Candles panel renderer (global signal / breakout banner / 12-stock candle table / S-R table)
+  js/qtyAudit.js                Big Trades qty-audit — browser-local IndexedDB tick log, fed by TICK_UPDATE
+  js/kiteForm.js                Kite manual-order form — DECORATIVE ONLY (c.html port), never calls the real paper-trading engine
+  js/settings.js                Settings page renderer
 scripts/bn_smoke_test.py      throwaway dev tool — NOT shipped functionality; feeds real historical bars through evaluate_entry/evaluate_exit outside the app
 ```
 
 Backtest is triggered from the dashboard: `POST /api/backtest {from_date, to_date, slippage_bps?, overrides?}` runs in a background task and is polled via `GET /api/backtest/{id}`; results export at `…/export.csv`. There is no `timeframe`/`mode`/`capital` field — backtest is always 5m/intraday/1-lot.
+
+**Stock Candles panel (`bn_breakout.py` + the dashboard's `stockCandles`/`globalSignal`/`breakout`/`srLevels` payload fields)** is a c.html UI-parity port — a breakout/support-resistance scanner and `BN_INDEX_WEIGHTS`-weighted global signal over the same 12-instrument universe the BN strategy already streams. It is purely informational and **never** feeds `evaluate_entry`/`evaluate_exit` — don't wire it into the trading decision. 5m S/R is computed on the fly from in-memory candles every `STATE_UPDATE`; 15m S/R comes from a separate periodic REST refresh (`SchedulerService._refresh_15m_sr_loop`, every 5 min) since this app otherwise never streams/fetches 15m candles — the live WS subscription filters stay 5m-only.
+
+**The Kite manual-order form (`js/kiteForm.js`) and the Local Trade Log (browser IndexedDB, in `dashboard.js`) are deliberately NOT wired to the real paper-trading engine** — matching c.html's own behavior and an explicit user decision:
+- Kite form Submit/Exit only mutate local JS state + a client-side Black-Scholes preview (localStorage funds) — never call a backend endpoint, never touch `st.active_trade`.
+- The Local Trade Log is a second, browser-only record of the REAL server trades (mirrored from `STATE_UPDATE`'s `activeTrade`/`closedTrades`), kept deliberately separate from "Today's Trades" (the real, Postgres-backed history) rather than reading `/api/positions`. Its IndexedDB store is keyed by a derived `localId` (`${orderId}_ENTRY`/`${orderId}_EXIT`) and written with `put()`, not `add()` — a page reload always re-delivers the current trade state, so idempotent overwrite (not an in-memory dedupe set, which can't survive a refresh) is what prevents duplicate rows.
 
 ## WebSocket broadcast types
 
@@ -132,7 +142,6 @@ The `/ws/dashboard` endpoint broadcasts two distinct message shapes — **the pa
 - **Options cost model rates are placeholders** (`BN_COST_*` settings) — not verified against current India options STT/exchange-txn figures. Safe for relative backtest signal quality (win rate, R-multiple), not yet for trusting absolute ₹ P&L.
 - **Frontend DOM diffing:** `dashboard.js` maintains cell-level diffing via `_setCell(td, html, cls)` (no-ops when content is unchanged) and coalesces WS pushes into one paint per animation frame (`scheduleRender` + `requestAnimationFrame`). Do not replace this pattern with `tbody.innerHTML = ...` — it re-introduces flash.
 - **Secrets:** `.env` is gitignored; never put real keys in `config.py` defaults or `.env.example`.
-- **The Scanner feature (`/scanner`, `app/engine/{watchlist,dynamic_zone}.py`) is entirely independent of the BN options strategy** — it's a separate ADR/dynamic-zone screener over the full equity high-volume universe, predates this port, and must keep working. Never repurpose `st.full_watchlist`/`active_watchlist`/`token_to_name` for BN engine state — they are Scanner's fields exclusively.
 
 ## Conventions for edits
 

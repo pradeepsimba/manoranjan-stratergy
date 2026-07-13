@@ -63,12 +63,6 @@ def settings_page() -> FileResponse:
     return FileResponse("static/settings.html")
 
 
-@app.get("/scanner")
-def scanner_page() -> FileResponse:
-    return FileResponse("static/scanner.html")
-
-
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=False)

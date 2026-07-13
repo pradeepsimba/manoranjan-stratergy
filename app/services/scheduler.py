@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 import app.config as cfg
+from app.engine import bn_breakout
 from app.engine.bn_entry_exit import evaluate_entry
 from app.models import BNTrade, PositionStatus, TradingPhase
 from app.services import bn_trade
@@ -65,6 +66,11 @@ async def _sleep_toward(hour: int, minute: int) -> None:
 
 _LEADER_HISTORY_BARS = 25   # covers both pattern (last 3) and qty-avg (last 20) window
 
+# ── Stock Candles panel (c.html port, unrelated to the BN trading strategy) ──
+_STOCK_TABLE_BARS   = 15   # bars per stock sent for the live candle table
+_NUM_SIGNAL_CANDLES = 3    # c.html's default `numCandles` for updateGlobalSignal
+_SR_15M_REFRESH_S   = 300  # c.html's own findSupportResistance runs infrequently too
+
 
 class SchedulerService:
     def __init__(
@@ -88,6 +94,7 @@ class SchedulerService:
             asyncio.create_task(self._phase_driver()),
             asyncio.create_task(self._push_dashboard_loop()),
             asyncio.create_task(self._push_tick_updates_loop()),
+            asyncio.create_task(self._refresh_15m_sr_loop()),
         ]
 
     async def stop(self) -> None:
@@ -446,6 +453,34 @@ class SchedulerService:
             st.api_status = f"Load error: {e}"
             print(f"Historical load error: {e}")
 
+    # ── 15m support/resistance refresh (Stock Candles panel only) ────────────
+
+    async def _refresh_15m_sr_loop(self) -> None:
+        """
+        Port of c.html's findSupportResistance — computes 5m/15m support &
+        resistance for the Stock Candles panel. Unlike c.html (which re-fetches
+        BOTH intervals from scratch), this only fetches 15m here: 5m candles
+        are already resident in AppState (candles_5m/bn_index_candles_5m),
+        computed on the fly in _build_payload. Infrequent by design, matching
+        c.html's own occasional (not tick-wise) S/R refresh.
+        """
+        st = get_state()
+        while True:
+            try:
+                if st.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
+                    hist = await fetch_indicator_history(cfg.BN_ALL_STOCKS, "15m", days_back=7)
+                    bn_hist = await fetch_indicator_history(
+                        {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, "15m", days_back=1)
+                    hist.update(bn_hist)
+                    levels = {
+                        token: bn_breakout.detect_support_resistance(candles)
+                        for token, candles in hist.items() if candles
+                    }
+                    st.sr_15m_levels = levels
+            except Exception as e:
+                print(f"15m S/R refresh error: {e}")
+            await asyncio.sleep(_SR_15M_REFRESH_S)
+
     # ── Dashboard broadcast ───────────────────────────────────────────────────
 
     async def _push_dashboard_loop(self) -> None:
@@ -456,6 +491,18 @@ class SchedulerService:
             except Exception as e:
                 print(f"Dashboard push error: {e}")
             await asyncio.sleep(1)
+
+    def _collect_all_candles(self, st) -> dict:
+        """BankNifty index + all 11 BN stocks, keyed by TOKEN — for the Stock
+        Candles panel (breakout/S-R/global-signal), unrelated to the BN
+        trading strategy's own candle reads elsewhere in this file."""
+        out = {}
+        with st._bn_index_lock:
+            out[cfg.BN_INDEX_TOKEN] = list(st.bn_index_candles_5m)
+        for token in cfg.BN_ALL_STOCKS.values():
+            with st.candle_lock(token):
+                out[token] = list(st.candles_5m.get(token, []))
+        return out
 
     def _build_payload(self) -> dict:
         st = get_state()
@@ -495,6 +542,38 @@ class SchedulerService:
                 "atmPremium": d.atm_premium, "atmIv": d.atm_iv,
             }
 
+        # ── Stock Candles panel data (breakout banner / weighted global signal /
+        # S-R table) — a c.html UI-parity port, entirely separate from the BN
+        # trading strategy above; token_to_name only exists for serializing
+        # these token-keyed computations back to the name-keyed shape the
+        # frontend/rest of this payload already uses. ─────────────────────────
+        all_candles = self._collect_all_candles(st)
+        bn_candles  = all_candles.get(cfg.BN_INDEX_TOKEN, [])
+        token_to_name = {cfg.BN_INDEX_TOKEN: cfg.BN_INDEX_NAME,
+                        **{tok: name for name, tok in cfg.BN_ALL_STOCKS.items()}}
+
+        breakout = bn_breakout.compute_breakout_prediction(bn_candles, all_candles)
+
+        column_counts   = bn_breakout.compute_column_counts(all_candles, _NUM_SIGNAL_CANDLES)
+        latest_by_token = {tok: c[-1] for tok, c in all_candles.items() if c}
+        global_signal   = bn_breakout.compute_global_signal(column_counts, latest_by_token, cfg.BN_INDEX_TOKEN)
+
+        stock_candles = {
+            token_to_name.get(tok, tok): [
+                {"startTime": c.start_time, "open": c.open, "close": c.close,
+                 "high": c.high, "low": c.low, "volume": c.volume}
+                for c in candles[-_STOCK_TABLE_BARS:]
+            ]
+            for tok, candles in all_candles.items()
+        }
+        sr_levels = {
+            token_to_name.get(tok, tok): {
+                "m5":  bn_breakout.detect_support_resistance(candles),
+                "m15": st.sr_15m_levels.get(tok, {"supports": [], "resistances": []}),
+            }
+            for tok, candles in all_candles.items()
+        }
+
         return {
             "type":         "STATE_UPDATE",
             "clock":        clock,
@@ -507,6 +586,10 @@ class SchedulerService:
             "activeTrade":  active,
             "closedTrades": [_trade_dict(t) for t in st.closed_trades],
             "entryLoop":    diag,
+            "stockCandles": stock_candles,
+            "globalSignal": global_signal,
+            "breakout":     breakout,
+            "srLevels":     sr_levels,
         }
 
     async def _push_tick_updates_loop(self) -> None:

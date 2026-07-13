@@ -17,8 +17,7 @@ function connect() {
   ws.onmessage = (e) => {
     try {
       const d = JSON.parse(e.data);
-      // TICK_UPDATE (~100ms) only carries a price delta — not rendered here,
-      // the 1s STATE_UPDATE already refreshes everything this page shows.
+      if (d.type === 'TICK_UPDATE') { handleTickUpdate(d.prices); return; }
       if (d.type !== 'STATE_UPDATE') return;
       scheduleRender(d);
     } catch (err) { console.error(err); }
@@ -29,6 +28,22 @@ function connect() {
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 3000);
   };
+}
+
+// ── Live tick stream (100ms TICK_UPDATE) — feeds the Stock Candles panel's
+// live cell flash, the local qty-audit IndexedDB log, and CSV file export.
+// c.html did all three of these off its OWN second WebSocket connection to
+// the market-data server; here they're all driven by the single existing
+// /ws/dashboard connection instead (see the plan's "Scanner data" decision). ─
+
+window._lastBnLtp = 0;
+
+function handleTickUpdate(prices) {
+  if (!prices) return;
+  if (prices['BANKNIFTY'] != null) window._lastBnLtp = prices['BANKNIFTY'];
+  if (typeof applyStockTickPrices === 'function') applyStockTickPrices(prices);
+  if (typeof recordTickForAudit === 'function') recordTickForAudit(prices);
+  if (typeof appendTickToFile === 'function') appendTickToFile(prices);
 }
 
 // ── Render state ──────────────────────────────────────────────────────────────
@@ -88,6 +103,13 @@ function render(d) {
   }
 
   document.getElementById('stat-funds').textContent = d.funds != null ? '₹' + fmt2(d.funds) : '—';
+  const fundsEl2 = document.getElementById('stat-funds-2');
+  if (fundsEl2) fundsEl2.textContent = d.funds != null ? '₹' + fmt2(d.funds) : '—';
+  const pnlEl2 = document.getElementById('stat-pnl-2');
+  if (pnlEl2) {
+    pnlEl2.textContent = (pnl >= 0 ? '+' : '') + '₹' + fmt2(pnl);
+    pnlEl2.className = pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : '';
+  }
 
   const activeEl = document.getElementById('stat-active');
   if (d.activeTrade) {
@@ -101,6 +123,15 @@ function render(d) {
   renderTrade(d.activeTrade);
   renderClosedTrades(d.closedTrades || []);
   renderEntryLoop(d.entryLoop);
+
+  if (d.bnLtp) window._lastBnLtp = d.bnLtp;
+  if (typeof renderGlobalSignal === 'function') renderGlobalSignal(d.globalSignal);
+  if (typeof renderBreakoutBanner === 'function') renderBreakoutBanner(d.breakout);
+  if (typeof renderStockCandles === 'function') renderStockCandles(d.stockCandles);
+  if (typeof renderSrLevels === 'function') renderSrLevels(d.srLevels);
+
+  checkTradeTransitionForScreenshot(d.activeTrade);
+  updateLocalTradeLog(d.activeTrade, d.closedTrades || []);
 }
 
 // ── Active trade card ─────────────────────────────────────────────────────────
@@ -200,9 +231,13 @@ function renderEntryLoop(d) {
     ['Momentum', d.momentumOk ? `OK — ${escHtml(d.momentumReason || '')}` : `weak — ${escHtml(d.momentumReason || '')}`],
     ['Volume surge count', `${d.strongQty} leaders`],
     ['RSI', d.rsi != null ? Number(d.rsi).toFixed(1) : '—'],
-    ['MACD', d.macdDir || '—'],
+    ['MACD', `${d.macdDir || '—'}${d.macdVal != null ? ' (' + Number(d.macdVal).toFixed(2) + ')' : ''}`],
     ['EMA stack', d.emaBullish ? 'Bullish' : d.emaBearish ? 'Bearish' : 'Neutral'],
     ['BN score', `bull ${Number(d.bnBull || 0).toFixed(1)} / bear ${Number(d.bnBear || 0).toFixed(1)}`],
+    ['BN composite', d.bnBullish ? 'Bullish' : d.bnBearish ? 'Bearish' : 'Neutral'],
+    ['ATM strike/premium', d.atmStrike != null
+      ? `${d.atmStrike} @ ₹${fmt2(d.atmPremium)} (IV ${d.atmIv != null ? (d.atmIv * 100).toFixed(1) + '%' : '—'})`
+      : '—'],
   ];
   gates.innerHTML = rows2.map(([lbl, val]) =>
     `<div class="gate-row"><span class="g-lbl">${lbl}</span><span class="g-val">${val}</span></div>`
@@ -216,6 +251,196 @@ function renderEntryLoop(d) {
     reasonEl.textContent = 'All gates clear — ready to fire on the next qualifying bar.';
     reasonEl.className = 'no-trade-reason ready';
   }
+}
+
+// ── Collapsible sections (c.html's toggleSection) ─────────────────────────────
+
+function toggleSection(btn) {
+  const targetId = btn.getAttribute('data-target');
+  const body = document.getElementById(targetId);
+  if (!body) return;
+  const collapsed = body.style.display === 'none';
+  body.style.display = collapsed ? '' : 'none';
+  btn.textContent = collapsed ? '▼' : '▲';
+}
+
+// ── Local Trade Log (browser-local IndexedDB) ─────────────────────────────────
+// Port of c.html's initTradeDB/saveTrade/updateDashboard, but sourced from the
+// REAL activeTrade/closedTrades transitions in STATE_UPDATE (per the plan's
+// "Trade history" decision) rather than a second, independent decision path.
+
+let _tradesDb = null;
+let _tradeLogFilter = 'today';
+
+function initTradesDB() {
+  // version 2: keyPath 'localId' (not autoIncrement) so re-logging the same
+  // server trade after a page reload is an idempotent overwrite (put), not a
+  // duplicate row — STATE_UPDATE always re-delivers the current
+  // activeTrade/closedTrades on every reconnect, with no in-memory way to
+  // remember "already logged" across a refresh. Bumped from v1 (autoIncrement
+  // 'id') since onupgradeneeded only fires on a version change, never on a
+  // schema change alone.
+  const req = indexedDB.open('TradesDB', 2);
+  req.onupgradeneeded = (e) => {
+    const db = e.target.result;
+    if (db.objectStoreNames.contains('trades')) db.deleteObjectStore('trades');
+    const store = db.createObjectStore('trades', { keyPath: 'localId' });
+    store.createIndex('time', 'time', { unique: false });
+  };
+  req.onsuccess = (e) => { _tradesDb = e.target.result; renderTradeLog(); };
+  req.onerror = () => console.error('TradesDB unavailable');
+}
+
+const _writtenTradeLogIds = new Set();   // skip redundant put()s for a trade already logged THIS session
+
+function _saveLocalTrade(obj) {
+  if (!_tradesDb || _writtenTradeLogIds.has(obj.localId)) return;
+  _writtenTradeLogIds.add(obj.localId);
+  const tx = _tradesDb.transaction('trades', 'readwrite');
+  tx.objectStore('trades').put(obj);   // put (not add) — localId makes re-logging idempotent
+  tx.oncomplete = renderTradeLog;
+}
+
+function updateLocalTradeLog(activeTrade, closedTrades) {
+  if (activeTrade && activeTrade.orderId) {
+    _saveLocalTrade({
+      localId: `${activeTrade.orderId}_ENTRY`,
+      type: `${activeTrade.direction}_ENTRY`, price: activeTrade.entryIndexPrice,
+      time: activeTrade.entryTime || new Date().toISOString(),
+      confidence: activeTrade.confidence, pnl: null,
+    });
+  }
+
+  closedTrades.forEach(t => {
+    if (!t.orderId) return;
+    _saveLocalTrade({
+      localId: `${t.orderId}_EXIT`,
+      type: `${t.direction}_EXIT`, price: t.exitIndexPrice,
+      time: t.exitTime || new Date().toISOString(),
+      confidence: t.confidence, pnl: t.pnl,
+    });
+  });
+}
+
+function setTradeLogFilter(which) {
+  _tradeLogFilter = which;
+  document.getElementById('tl-filter-today').classList.toggle('active', which === 'today');
+  document.getElementById('tl-filter-all').classList.toggle('active', which === 'all');
+  renderTradeLog();
+}
+
+function clearTradeLog() {
+  if (!_tradesDb) return;
+  const tx = _tradesDb.transaction('trades', 'readwrite');
+  tx.objectStore('trades').clear();
+  tx.oncomplete = renderTradeLog;
+}
+
+function renderTradeLog() {
+  const tbody = document.getElementById('tradelog-tbody');
+  if (!_tradesDb || !tbody) return;
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+
+  const tx = _tradesDb.transaction('trades', 'readonly');
+  const rows = [];
+  tx.objectStore('trades').openCursor(null, 'prev').onsuccess = (ev) => {
+    const cursor = ev.target.result;
+    if (cursor) {
+      const row = cursor.value;
+      if (_tradeLogFilter === 'all' || new Date(row.time) >= todayStart) rows.push(row);
+      cursor.continue();
+    } else {
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">No local trades logged yet</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(r => {
+        const pnlCls = r.pnl > 0 ? 'pnl-pos' : r.pnl < 0 ? 'pnl-neg' : '';
+        return `<tr>
+          <td>${escHtml(r.type)}</td><td>${fmt2(r.price)}</td>
+          <td>${new Date(r.time).toLocaleTimeString()}</td>
+          <td>${r.confidence != null ? r.confidence + '%' : '—'}</td>
+          <td class="${pnlCls}">${r.pnl != null ? fmt2(r.pnl) : '—'}</td>
+        </tr>`;
+      }).join('');
+    }
+  };
+}
+
+// ── Auto-screenshot on entry (port of c.html's takeTradeScreenshot) ──────────
+
+let _hadActiveTrade = false;
+
+function checkTradeTransitionForScreenshot(activeTrade) {
+  const hasNow = !!activeTrade;
+  if (hasNow && !_hadActiveTrade && typeof html2canvas === 'function') {
+    const label = `${activeTrade.direction}_ENTRY_${activeTrade.entryIndexPrice}`;
+    html2canvas(document.body).then(canvas => {
+      const a = document.createElement('a');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      a.download = `${label}_${ts}.png`;
+      a.href = canvas.toDataURL('image/png');
+      a.click();
+    }).catch(() => {});
+  }
+  _hadActiveTrade = hasNow;
+}
+
+// ── CSV/file export (File System Access API, port of chooseOutputFile/
+// appendToFile/pickFields) — newline-delimited JSON of the same 4 fields as
+// c.html ({stockname, time, ltp, qty}); this feed carries no per-tick qty
+// field, so qty is always 0 here — expected, not a bug. ──────────────────────
+
+let _fileHandle = null;
+let _writableStream = null;
+
+async function chooseOutputFile() {
+  const statusEl = document.getElementById('fileexport-status');
+  if (!window.showSaveFilePicker) {
+    if (statusEl) statusEl.textContent = 'File System Access API not supported in this browser.';
+    return;
+  }
+  try {
+    _fileHandle = await window.showSaveFilePicker({
+      suggestedName: 'bn_ticks.txt',
+      types: [{ description: 'Text File', accept: { 'text/plain': ['.txt'] } }],
+    });
+    _writableStream = await _fileHandle.createWritable();
+    if (statusEl) statusEl.textContent = `Writing to ${_fileHandle.name}`;
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'File selection cancelled.';
+  }
+}
+
+async function appendTickToFile(prices) {
+  if (!_writableStream) return;
+  const now = new Date().toISOString();
+  for (const name of QTY_AUDIT_LEADER_STOCKS) {
+    if (prices[name] === undefined) continue;
+    const line = JSON.stringify({ stockname: name, time: now, ltp: prices[name], qty: 0 }) + '\n';
+    try { await _writableStream.write(line); } catch (e) { /* stream closed */ }
+  }
+}
+
+// ── Trade Conditions modal (read-only, sourced from /api/settings) ───────────
+
+function openConditionModal() {
+  const modal = document.getElementById('condition-modal');
+  const body  = document.getElementById('condition-modal-body');
+  modal.classList.remove('hidden');
+  fetch('/api/settings').then(r => r.json()).then(desc => {
+    const groups = (desc && desc.groups) || [];
+    body.innerHTML = groups.map(g => `
+      <h4 style="margin:10px 0 4px;color:var(--txt-2)">${escHtml(g.name)}</h4>
+      <table><tbody>
+        ${g.settings.map(s => `<tr><td>${escHtml(s.label)}</td><td>${escHtml(String(s.value))}</td></tr>`).join('')}
+      </tbody></table>
+    `).join('');
+  }).catch(() => { body.textContent = 'Could not load settings.'; });
+}
+
+function closeConditionModal() {
+  document.getElementById('condition-modal').classList.add('hidden');
 }
 
 // ── Backtest ───────────────────────────────────────────────────────────────────
@@ -550,4 +775,5 @@ fetch('/api/backtests')
   })
   .catch(() => { /* server not ready yet — form stays visible */ });
 
+initTradesDB();
 connect();

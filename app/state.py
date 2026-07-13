@@ -29,12 +29,6 @@ class AppState:
         self.ws_status:  str          = "—"
         self.api_status: str          = "—"
 
-        # ── Scanner universe (Scanner feature ONLY — the BN engine never
-        # writes these; it has its own fixed universe in cfg.BN_*) ───────────
-        self.active_watchlist: Dict[str, str] = {}
-        self.full_watchlist:   Dict[str, str] = {}
-        self.token_to_name:    Dict[str, str] = {}
-
         # ── Candle stores — BankNifty index + the 12 BN stocks, all keyed by
         # TOKEN. Capped at 300 bars (deque maxlen set on assignment). ─────────
         self.candles_5m: Dict[str, List[Candle]] = {}
@@ -61,6 +55,13 @@ class AppState:
 
         # ── Live-price ticker push (100ms delta broadcast) ────────────────────
         self.dirty_ticks_push: set = set()
+
+        # ── 15m support/resistance levels (Stock Candles panel only, unrelated
+        # to the BN trading strategy) — refreshed every 5 min via a periodic
+        # REST fetch (this app otherwise never streams 15m candles), keyed by
+        # TOKEN. 5m S/R for the same panel is computed on the fly from
+        # candles_5m/bn_index_candles_5m, no separate storage needed. ─────────
+        self.sr_15m_levels: Dict[str, Dict[str, List[float]]] = {}
 
         # Per-token locks: each instrument's candle list gets its own lock so
         # WS tick writes and the tick loop don't contend across unrelated tokens.
