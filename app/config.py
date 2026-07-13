@@ -64,6 +64,25 @@ BN_LEADER_STOCKS: Dict[str, str] = {
     "INDUSIND BANK":        "5258",
 }
 
+# Exact c.html STOCK_QTY_THRESHOLD table (per-stock, at 1m granularity),
+# mapped onto this repo's leader-stock names (Kotak's key here is "KOTAK
+# BANK", not c.html's "KOTAK MAHINDRA BANK" — same stock/token, see the
+# Kotak naming gotcha above). c.html compares these against a raw per-trade
+# qty field (tens/hundreds); this repo's WS feed only ever carries
+# cumulative 5m bar volume (hundreds of thousands/bar) — no such field
+# exists here. Ported literally anyway per explicit user direction; expect
+# this gate to be permanently satisfied against real bar volumes.
+BN_STOCK_QTY_THRESHOLD: Dict[str, float] = {
+    "HDFC BANK":            2000,
+    "ICICI BANK":           2000,
+    "STATE BANK OF INDIA":  1200,
+    "AXIS BANK":            900,
+    "KOTAK BANK":           1500,
+    "INDUSIND BANK":        600,
+}
+# c.html's getQtyMultiplier() for the "5m" branch — this repo is fixed at 5m.
+BN_QTY_INTERVAL_MULTIPLIER = 2
+
 # All 11 stocks fetched/displayed (matches c.html's own universe, 12 tokens
 # total together with the index) — the 6
 # beyond the leaders never feed the entry decision but are kept for display /
@@ -105,8 +124,6 @@ _DEFAULTS: Dict[str, Any] = {
     "BN_MOMENTUM_THRESHOLD":   28.0,   # fixed 5m momentum threshold (points)
     "BN_ATR_PERIOD":           10,
     "BN_SAME_DIRECTION_REQUIRED": 3,   # of 6 leaders must agree
-    "BN_QTY_AVG_PERIOD":       20,     # bars averaged for the volume-surge baseline
-    "BN_QTY_SURGE_MULTIPLIER": 1.5,    # latest bar volume must exceed avg × this
     "BN_ENTRY_COOLDOWN_S":     60,     # no new entry within this long of the last exit
 
     # BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring)

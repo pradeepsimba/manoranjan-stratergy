@@ -5,19 +5,21 @@ Shared Bank Nifty entry/exit decision core — called identically by the live
 scheduler and the backtest replay loop (this repo's hard convention: live and
 backtest must share one strategy core).
 
-Ported from c.html's checkTradeEntry/checkExit, with two deliberate
-deviations (see CLAUDE.md-style callouts inline):
+Ported from c.html's checkTradeEntry/checkExit, with one deliberate
+deviation (see CLAUDE.md-style callout inline):
   * No JS "pending signal" pre-qualification latch — the caller is expected
     to invoke evaluate_entry exactly once per newly-closed 5m bar (wall-clock
     bar-close detection lives in the caller), which achieves the same
     "fire right at candle close" outcome without extra state to keep in sync.
-  * The "strong quantity" gate uses a relative volume-surge test (latest bar
-    volume vs. its own recent average) instead of c.html's fixed absolute
-    per-stock thresholds — this repo's WS feed carries cumulative 5m bar
-    volume (hundreds of thousands/bar for these stocks), not c.html's raw
-    per-tick trade-quantity feed (tens/hundreds), so the source's absolute
-    numbers don't transfer across feeds. Verified empirically against real
-    historical data before choosing this design (see scripts/bn_smoke_test.py).
+
+The "strong quantity" gate is a LITERAL port of c.html's fixed absolute
+per-stock STOCK_QTY_THRESHOLD table (see cfg.BN_STOCK_QTY_THRESHOLD), by
+explicit user direction, despite a known unit mismatch: c.html compares a
+raw per-trade qty field (tens/hundreds, from a tick-level feed) against
+these thresholds, but this repo's WS feed only ever carries cumulative 5m
+bar volume (hundreds of thousands/bar) — there is no per-tick qty field at
+all (confirmed against market_data.py's tick payload). Expect this gate to
+be permanently satisfied against real bar volumes. Not a bug.
 """
 
 from dataclasses import dataclass
@@ -39,24 +41,19 @@ from app.models import BNDiagnostic, BNSignal, BNTrade, Candle, PositionStatus
 
 def _leader_qty_surge(leader_recent: Dict[str, List[Candle]]) -> Dict[str, bool]:
     """
-    Per-leader "strong quantity" flag: latest bar volume vs. the mean of the
-    preceding BN_QTY_AVG_PERIOD bars, surged by BN_QTY_SURGE_MULTIPLIER — the
-    same volume_surge shape the (deleted) equity engine used, reapplied here
-    per-leader instead of per-scanned-stock.
+    Literal port of c.html's per-stock STOCK_QTY_THRESHOLD check: latest bar
+    volume vs. cfg.BN_STOCK_QTY_THRESHOLD[name] * cfg.BN_QTY_INTERVAL_MULTIPLIER
+    — no averaging, no history window (see module docstring for the known
+    unit mismatch against this repo's bar-volume feed).
     """
     out: Dict[str, bool] = {}
-    period = cfg.BN_QTY_AVG_PERIOD
-    mult = cfg.BN_QTY_SURGE_MULTIPLIER
+    mult = cfg.BN_QTY_INTERVAL_MULTIPLIER
     for name, candles in leader_recent.items():
-        if len(candles) < 2:
+        if not candles:
             out[name] = False
             continue
-        history = candles[:-1][-period:]
-        if not history:
-            out[name] = False
-            continue
-        avg_vol = sum(c.volume for c in history) / len(history)
-        out[name] = avg_vol > 0 and candles[-1].volume > avg_vol * mult
+        threshold = cfg.BN_STOCK_QTY_THRESHOLD.get(name, 50) * mult
+        out[name] = candles[-1].volume >= threshold
     return out
 
 
@@ -64,7 +61,7 @@ def _confidence(direction_count: int, strong_qty_count: int, n_leaders: int) -> 
     """Port of c.html's calculateConfidence — 50% weight each on leader-vote and qty-surge breadth."""
     if n_leaders <= 0:
         return 0.0
-    return round((direction_count / n_leaders) * 50.0 + (strong_qty_count / n_leaders) * 50.0, 1)
+    return round((direction_count / n_leaders) * 50.0 + (strong_qty_count / n_leaders) * 50.0)
 
 
 def evaluate_entry(

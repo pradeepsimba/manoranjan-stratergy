@@ -63,9 +63,6 @@ SPEC: List[Dict[str, Any]] = [
     _s("BN_ATR_PERIOD", "ATR period (bars)", "int", "BN Strategy", min_=3, max_=50),
     _s("BN_SAME_DIRECTION_REQUIRED", "Leaders required to agree", "int", "BN Strategy",
        min_=1, max_=6, help_="Of the 6 leader stocks."),
-    _s("BN_QTY_AVG_PERIOD", "Volume-surge average window (bars)", "int", "BN Strategy", min_=5, max_=100),
-    _s("BN_QTY_SURGE_MULTIPLIER", "Volume-surge multiplier", "float", "BN Strategy",
-       min_=1.0, max_=10, step=0.1, help_="A leader's bar volume must exceed its own average × this."),
     _s("BN_ENTRY_COOLDOWN_S", "Post-exit cooldown (s)", "int", "BN Strategy", min_=0, max_=600),
 
     # ── BN Strategy — composite indicator gate ───────────────────────────────
