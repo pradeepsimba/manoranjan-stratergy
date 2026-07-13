@@ -182,7 +182,7 @@ body {
   flex-wrap: wrap;
 }
 
-.clock-wrap { text-align: right; flex-shrink: 0; }
+.clock-wrap { display: flex; align-items: center; gap: 10px; text-align: right; flex-shrink: 0; }
 
 .clock {
   font-size: 21px;
@@ -923,10 +923,6 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 .dash-collapsed .dash-body { display: none; }
 
 /* ── Analog clock face ────────────────────────────────────────────────────── */
-.analog-clock-wrap {
-  display: flex; align-items: center; justify-content: center;
-  padding: 14px 0;
-}
 .analog-face {
   position: relative; width: 150px; height: 150px; border-radius: 50%;
   background: radial-gradient(circle at 35% 30%, var(--surf-high), var(--surf-raised) 70%);
@@ -944,12 +940,23 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 .analog-hand.hour   { width: 4px; height: 38px; margin-top: -38px; margin-left: -2px; }
 .analog-hand.minute { width: 3px; height: 54px; margin-top: -54px; margin-left: -1.5px; }
 .analog-hand.second { width: 1.5px; height: 60px; margin-top: -60px; margin-left: -.75px; background: var(--accent-2); }
+/* Small header clock (top-right, next to the digital time) — hands/ticks
+   scaled down, no minute ticks/numbers (see clock.js's `small` branch). */
+.analog-face-sm {
+  width: 46px; height: 46px; flex-shrink: 0; border-width: 1px;
+}
+.analog-face-sm .analog-tick { height: 3px; width: 1px; }
+.analog-face-sm .analog-tick.hour { height: 5px; width: 1.5px; }
+.analog-face-sm .analog-hand.hour   { width: 2px; height: 11px; margin-top: -11px; margin-left: -1px; }
+.analog-face-sm .analog-hand.minute { width: 1.5px; height: 16px; margin-top: -16px; margin-left: -.75px; }
+.analog-face-sm .analog-hand.second { width: 1px; height: 18px; margin-top: -18px; margin-left: -.5px; }
+.analog-face-sm .analog-cap { width: 5px; height: 5px; margin-left: -2.5px; margin-top: -2.5px; }
+
 .analog-cap {
   position: absolute; left: 50%; top: 50%; width: 10px; height: 10px;
   margin-left: -5px; margin-top: -5px; border-radius: 50%;
   background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2);
 }
-.analog-digital { text-align: center; font-size: 12px; color: var(--txt-2); margin-top: 6px; }
 
 /* ── Stock Candles panel: live 12-stock table + global signal + breakout ──── */
 .global-signal-badge {
@@ -967,8 +974,8 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 }
 .breakout-banner b { color: var(--txt); }
 .candle-cell {
-  display: inline-block; min-width: 58px; padding: 3px 6px; border-radius: 4px;
-  font-size: 11px; text-align: center; font-weight: 600;
+  display: inline-block; min-width: 56px; padding: 3px 6px; border-radius: 4px;
+  font-size: 11px; text-align: center; font-weight: 600; white-space: nowrap;
 }
 .candle-cell.positive { background: var(--pos); color: #04130a; }
 .candle-cell.negative { background: var(--neg); color: #1a0505; }

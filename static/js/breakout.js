@@ -8,6 +8,7 @@
 // price deltas onto the most-recent column for a live "flash" feel.
 
 let _lastStockOrder = [];
+let _lastOpenByStock = {};   // {name: open price of the newest/forming bar} — for live tick point-move
 
 function renderGlobalSignal(gs) {
   const box = document.getElementById('global-signal-badge');
@@ -40,10 +41,37 @@ function renderBreakoutBanner(b) {
   `;
 }
 
+// Port of c.html's formatToTwoDecimals — TRUNCATES (floor), not rounds, and
+// always 2 decimals. For negatives this floors away from zero (e.g. -5.001
+// becomes "-5.01", not "-5.00") — an exact, deliberate quirk of the source.
+function _floorToTwo(num) {
+  if (typeof num !== 'number' || isNaN(num)) return 'N/A';
+  return (Math.floor(num * 100) / 100).toFixed(2);
+}
+
+// Port of c.html's getClassAndContent — diff = close - open. No sign at all
+// is shown (neither "+" nor "-") — direction is conveyed by cell color only;
+// "N/A" when data is missing.
 function _candleCellHtml(bar) {
-  if (!bar || !bar.open || !bar.close) return '<span class="candle-cell neutral">—</span>';
-  const cls = bar.close > bar.open ? 'positive' : (bar.close < bar.open ? 'negative' : 'neutral');
-  return `<span class="candle-cell ${cls}">${bar.close.toFixed(1)}</span>`;
+  if (!bar || !bar.close || !bar.open) return '<span class="candle-cell neutral">N/A</span>';
+  const diff = bar.close - bar.open;
+  const cls = diff > 0 ? 'positive' : diff < 0 ? 'negative' : 'neutral';
+  const content = _floorToTwo(Math.abs(diff));
+  const time = bar.startTime ? bar.startTime.substring(11, 16) : '';
+  const title = `${time} Open:${bar.open.toFixed(2)} Close:${bar.close.toFixed(2)}`;
+  return `<span class="candle-cell ${cls}" title="${title}">${content}</span>`;
+}
+
+// Port of c.html's renderTable header labels: leftmost (newest) column is
+// "Latest", then "Previous", "PrevPrev", then "Prev{rawIndex}" for anything
+// further back — rawIndex counted from the OLDEST end of the window, exactly
+// as c.html's `i` loop variable does (a source quirk, kept as-is).
+function _colLabel(posFromNewest, n) {
+  const i = n - 1 - posFromNewest;
+  if (i === n - 1) return 'Latest';
+  if (i === n - 2) return 'Previous';
+  if (i === n - 3) return 'PrevPrev';
+  return `Prev${i}`;
 }
 
 function renderStockCandles(stockCandles) {
@@ -53,10 +81,26 @@ function renderStockCandles(stockCandles) {
 
   const names = Object.keys(stockCandles);
   _lastStockOrder = names;
+  _lastOpenByStock = {};
+  names.forEach(n => {
+    const bars = stockCandles[n] || [];
+    if (bars.length) _lastOpenByStock[n] = bars[bars.length - 1].open;
+  });
   const maxBars = Math.max(0, ...names.map(n => (stockCandles[n] || []).length));
 
+  // Column header time subtext = that column's actual bar time, taken from
+  // BANKNIFTY specifically — matches c.html's renderTable, which only ever
+  // updates the header time span from the BankNifty index row (stock_symbol
+  // "26009"), on the theory that every instrument shares the same 5m bars.
+  const refBars = (stockCandles['BANKNIFTY'] || []).slice().reverse();
+
   let headHtml = '<th>Stock</th>';
-  for (let i = 0; i < maxBars; i++) headHtml += `<th>C${i}</th>`;
+  for (let i = 0; i < maxBars; i++) {
+    const label = _colLabel(i, maxBars);
+    const t = refBars[i] && refBars[i].startTime ? refBars[i].startTime.substring(11, 16) : '00';
+    headHtml += `<th>${label} (o-c)<br><span class="muted-text">${t}</span></th>`;
+  }
+  headHtml += '<th>BuyQtyPending</th><th>SellQtyPending</th>';
   head.innerHTML = headHtml;
 
   if (!names.length) {
@@ -68,6 +112,8 @@ function renderStockCandles(stockCandles) {
     const bars = (stockCandles[name] || []).slice().reverse();   // newest first, like c.html
     let row = `<tr data-stock="${name}"><td class="card-title">${name}</td>`;
     for (let i = 0; i < maxBars; i++) row += `<td data-col="${i}">${_candleCellHtml(bars[i])}</td>`;
+    // c.html always shows N/A here — this feed carries no buy/sell pending-qty field.
+    row += '<td class="neutral">N/A</td><td class="neutral">N/A</td>';
     return row + '</tr>';
   }).join('');
 }
@@ -98,10 +144,14 @@ function applyStockTickPrices(prices) {
   if (!prices) return;
   for (const name of _lastStockOrder) {
     const price = prices[name];
-    if (price === undefined) continue;
+    const open = _lastOpenByStock[name];
+    if (price === undefined || !open) continue;
     const row = document.querySelector(`#stock-table-body tr[data-stock="${CSS.escape(name)}"]`);
     if (!row) continue;
     const cell = row.querySelector('td[data-col="0"] .candle-cell');
-    if (cell) cell.textContent = Number(price).toFixed(1);
+    if (!cell) continue;
+    const diff = price - open;
+    cell.textContent = _floorToTwo(Math.abs(diff));
+    cell.className = 'candle-cell ' + (diff > 0 ? 'positive' : diff < 0 ? 'negative' : 'neutral');
   }
 }

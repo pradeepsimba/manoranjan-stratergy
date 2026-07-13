@@ -100,8 +100,11 @@
   </div>
 
   <div class="clock-wrap">
-    <div id="clock" class="clock">—:—:—</div>
-    <div class="clock-sub">IST</div>
+    <div class="analog-face analog-face-sm" id="analog-face"></div>
+    <div>
+      <div id="clock" class="clock">—:—:—</div>
+      <div class="clock-sub">IST</div>
+    </div>
   </div>
 
   <nav class="nav-seg" aria-label="Pages">
@@ -147,20 +150,6 @@
 
   <!-- LEFT: Trade Dashboard + Big Trades ───────────────────────────────────── -->
   <div class="col">
-
-    <!-- Analog clock (c.html top-right clock face, ported here into the flow) -->
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Clock (IST)</span>
-        <button class="dash-toggle" data-target="clock-body" onclick="toggleSection(this)">▼</button>
-      </div>
-      <div class="panel-body dash-body" id="clock-body">
-        <div class="analog-clock-wrap">
-          <div class="analog-face" id="analog-face"></div>
-        </div>
-        <div class="analog-digital" id="analog-digital">—:—:—</div>
-      </div>
-    </div>
 
     <div class="panel">
       <div class="panel-header">
