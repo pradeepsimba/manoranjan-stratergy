@@ -15,7 +15,7 @@ function loadSettings() {
   fetch('/api/settings')
     .then(r => r.json())
     .then(d => { specData = d; edits = {}; render(); })
-    .catch(e => toast('Failed to load settings: ' + e.message, false));
+    .catch(e => toast('Failed to load settings: ' + e.message, 'err'));
 }
 
 // (escHtml lives in the shared /js/util.js)
@@ -64,7 +64,7 @@ function rowHtml(s, nested) {
           ${escHtml(s.label)}
         </div>
         ${s.help ? `<div class="set-help">${escHtml(s.help)}</div>` : ''}
-        <div class="set-default">default: ${escHtml(fmtVal(s, s.default))}${s.bt ? '' : ' · live only'}</div>
+        <div class="set-default">default: ${escHtml(fmtVal(s, s.default))}</div>
       </div>
       <div class="set-ctl">
         ${controlHtml(s)}
@@ -219,9 +219,14 @@ function submitSettings(method, url, body, okMsg, failLabel, keepEdits) {
       const d = await r.json();
       if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
       specData = d; edits = keepEdits || {}; render();
-      toast(okMsg, true);
+      toast(okMsg, 'ok');
+      // Present when a Starting Funds change was just applied to THIS
+      // account (see app/api/market.py) — refresh the header figure to match.
+      if (typeof d.yourFunds === 'number' && typeof _refreshFundsDisplay === 'function') {
+        _refreshFundsDisplay(d.yourFunds);
+      }
     })
-    .catch(e => toast(failLabel + ': ' + e.message, false));
+    .catch(e => toast(failLabel + ': ' + e.message, 'err'));
 }
 
 function saveChanges() {
@@ -249,18 +254,7 @@ function resetAll() {
                  'All settings reset to defaults', 'Reset failed');
 }
 
-// ── Toast / theme ──────────────────────────────────────────────────────────────
-
-let toastTimer = null;
-function toast(msg, ok) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className = 'toast show ' + (ok ? 'ok' : 'err');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
-}
-
-// (toggleTheme lives in the shared /js/util.js)
+// (toast + toggleTheme live in the shared /js/util.js)
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 

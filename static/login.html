@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Alto — Paper Trading</title>
+  <meta name="description" content="Sign in to your Alto paper-trading account">
+  <link rel="stylesheet" href="/css/dashboard.css">
+  <script>
+    (function(){
+      var t = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M4 19V10M9 19V5M14 19V13M19 19V8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+        <span class="auth-brand-name">Alto</span>
+      </div>
+      <div class="auth-sub">Paper trading, done properly.</div>
+
+      <div class="auth-tabs">
+        <div class="auth-tab active" id="tab-login" onclick="setAuthTab('login')">Log in</div>
+        <div class="auth-tab" id="tab-register" onclick="setAuthTab('register')">Create account</div>
+      </div>
+
+      <form class="auth-form" id="auth-form" onsubmit="return submitAuth(event)">
+        <div class="field">
+          <label class="field-label" for="auth-username">Username</label>
+          <input class="field-input" id="auth-username" name="username" autocomplete="username" required minlength="3">
+        </div>
+        <div class="field">
+          <label class="field-label" for="auth-password">Password</label>
+          <input class="field-input" id="auth-password" name="password" type="password"
+                 autocomplete="current-password" required minlength="6">
+        </div>
+        <div class="auth-error" id="auth-error"></div>
+        <button class="btn-run" type="submit" id="auth-submit">Log in</button>
+        <div class="auth-hint" id="auth-hint">New here? Switch to "Create account" above — you'll start with a virtual funds balance to trade with.</div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/js/util.js"></script>
+  <script src="/js/auth.js"></script>
+</body>
+</html>

@@ -3,10 +3,17 @@ from __future__ import annotations
 import threading
 from typing import Dict, List, Optional
 
-from app.models import BNDiagnostic, BNTrade, Candle, TradingPhase
+from app.models import Candle, MarketPhase
 
 
 class AppState:
+    """
+    Process-wide singleton holding SHARED market data only (candles, live
+    prices, connection status). Per-user data (funds, holdings, positions,
+    orders) is never cached here — it lives in Postgres and is read per
+    request, since a process-wide singleton can't hold N users' account state.
+    """
+
     _instance: Optional["AppState"] = None
     _creation_lock = threading.Lock()
 
@@ -25,49 +32,25 @@ class AppState:
 
     def _init(self) -> None:
         # ── Session ───────────────────────────────────────────────────────────
-        self.phase:      TradingPhase = TradingPhase.PRE_MARKET
-        self.ws_status:  str          = "—"
-        self.api_status: str          = "—"
+        self.phase:      MarketPhase = MarketPhase.PRE_MARKET
+        self.ws_status:  str         = "—"
+        self.api_status: str         = "—"
 
-        # ── Candle stores — BankNifty index + the 12 BN stocks, all keyed by
-        # TOKEN. Capped at 300 bars (deque maxlen set on assignment). ─────────
-        self.candles_5m: Dict[str, List[Candle]] = {}
-        self.tick_version: Dict[str, int] = {}
-        self.bn_index_candles_5m: List[Candle] = []
+        # ── Candle stores — every tradable instrument, keyed by TOKEN. Capped
+        # at MAX_CANDLE_BUFFER bars (deque maxlen set on assignment). ─────────
+        self.candles_5m:   Dict[str, List[Candle]] = {}
+        self.tick_version: Dict[str, int]          = {}
 
-        # ── Live prices (keyed by SYMBOL NAME; BankNifty index kept separately) ─
-        self.ltp:          Dict[str, float] = {}
-        self.bn_index_ltp: float            = 0.0
-
-        # ── The single active Bank Nifty options trade ────────────────────────
-        self.active_trade:   Optional[BNTrade] = None
-        self.closed_trades:  List[BNTrade]     = []   # today's closed trades
-        self.last_trade_candle: Optional[str]  = None  # dedupe same-5m-bar re-entry
-        self.last_exit_time: Optional[str]     = None  # ISO timestamp, 60s cooldown
-        self.daily_pnl:      float             = 0.0
-        # Running paper-account balance — persists ACROSS days (see database's
-        # _BN_FUNDS key), unlike daily_pnl which resets every EOD.
-        self.funds: float = 0.0
-
-        # ── Latest entry-loop diagnostic ("why didn't it fire") for the dashboard ─
-        self.bn_diagnostic: Optional[BNDiagnostic] = None
-        self.last_evaluated_bar: Optional[str]     = None   # dedupe: one eval per closed bar
+        # ── Live prices, keyed by TOKEN ────────────────────────────────────────
+        self.ltp: Dict[str, float] = {}
 
         # ── Live-price ticker push (100ms delta broadcast) ────────────────────
         self.dirty_ticks_push: set = set()
 
-        # ── 15m support/resistance levels (Stock Candles panel only, unrelated
-        # to the BN trading strategy) — refreshed every 5 min via a periodic
-        # REST fetch (this app otherwise never streams 15m candles), keyed by
-        # TOKEN. 5m S/R for the same panel is computed on the fly from
-        # candles_5m/bn_index_candles_5m, no separate storage needed. ─────────
-        self.sr_15m_levels: Dict[str, Dict[str, List[float]]] = {}
-
         # Per-token locks: each instrument's candle list gets its own lock so
-        # WS tick writes and the tick loop don't contend across unrelated tokens.
+        # WS tick writes and readers don't contend across unrelated tokens.
         self._token_locks:      Dict[str, threading.Lock] = {}
         self._token_locks_meta: threading.Lock            = threading.Lock()
-        self._bn_index_lock: threading.Lock = threading.Lock()
 
     def candle_lock(self, token: str) -> threading.Lock:
         """Return (and lazily create) the per-token candle lock."""

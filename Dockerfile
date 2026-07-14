@@ -1,31 +1,19 @@
-# ── NSE Paper Trader — production image ─────────────────────────────────────────
+# ── Alto — Equity Paper Trading Terminal — production image ─────────────────────
 FROM python:3.12-slim
 
-# Asia/Kolkata is required: the scheduler drives phases off IST wall-clock.
+# Asia/Kolkata is required: the scheduler drives market phases off IST wall-clock.
 ENV TZ=Asia/Kolkata \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# tzdata so zoneinfo can resolve Asia/Kolkata; curl for the healthcheck;
-# build-essential + wget to compile the TA-Lib C library the Python wheel binds to.
+# tzdata so zoneinfo can resolve Asia/Kolkata; curl for the healthcheck.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata curl wget build-essential \
+ && apt-get install -y --no-install-recommends tzdata curl \
  && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
  && echo $TZ > /etc/timezone \
  && rm -rf /var/lib/apt/lists/*
-
-# ── TA-Lib C library (required by the `TA-Lib` Python package) ──────────────────
-RUN wget -q https://github.com/TA-Lib/ta-lib/releases/download/v0.6.4/ta-lib-0.6.4-src.tar.gz \
- && tar -xzf ta-lib-0.6.4-src.tar.gz \
- && cd ta-lib-0.6.4 \
- && ./configure --prefix=/usr \
- && make -j"$(nproc)" \
- && make install \
- && cd .. \
- && rm -rf ta-lib-0.6.4 ta-lib-0.6.4-src.tar.gz \
- && ldconfig
 
 WORKDIR /app
 
@@ -45,7 +33,7 @@ USER appuser
 
 EXPOSE 8080
 
-# Liveness: the dashboard status endpoint responds even before market open.
+# Liveness: the status endpoint responds even before market open.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://localhost:8080/api/status || exit 1
 

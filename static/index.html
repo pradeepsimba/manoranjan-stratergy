@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bank Nifty Options Paper Trader</title>
-  <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
+  <title>Alto — Terminal</title>
+  <meta name="description" content="Live equity paper-trading terminal">
   <link rel="stylesheet" href="/css/dashboard.css">
   <script>
     (function(){
@@ -12,417 +12,146 @@
       document.documentElement.setAttribute('data-theme', t);
     })();
   </script>
-  <style>
-    /* Backtest per-run overrides */
-    .bt-adv { margin: 8px 0 4px; }
-    .bt-adv summary {
-      font-size: 11px; color: var(--txt-2); cursor: pointer; user-select: none;
-    }
-    .bt-adv[open] summary { color: var(--prime); }
-    .bt-ovr {
-      width: 100%; margin-top: 6px; font-family: monospace; font-size: 11px;
-      resize: vertical; text-align: left;
-    }
-    .bt-adv-hint { font-size: 10px; color: var(--txt-3); margin-top: 4px; }
-    .bt-adv-hint a { color: var(--prime); }
-
-    /* Backtest run meta */
-    .bt-meta {
-      display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center;
-      margin-bottom: 10px;
-    }
-    .bt-meta .tag {
-      display: inline-flex; align-items: center; gap: 5px;
-      padding: 3px 9px; border-radius: var(--r-pill);
-      background: var(--surf); border: 1px solid var(--edge-soft);
-      font-size: 11px; color: var(--txt-2);
-    }
-    .bt-meta .tag b { color: var(--txt); font-weight: 700; }
-    .bt-meta .strat { font-size: 11px; color: var(--txt-2); }
-    .bt-meta .strat b { color: var(--txt); }
-
-    /* Backtest visualization: equity curve + outcome breakdown */
-    .bt-viz {
-      display: grid;
-      grid-template-columns: 1.7fr 1fr;
-      gap: 12px;
-      margin-bottom: 12px;
-    }
-    .bt-viz-oc { display: flex; flex-direction: column; justify-content: center; }
-    @media (max-width: 640px) { .bt-viz { grid-template-columns: 1fr; } }
-
-    /* Trade panel */
-    .trade-card {
-      display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 14px;
-      padding: 10px 2px;
-    }
-    .trade-cell { display: flex; flex-direction: column; gap: 2px; }
-    .trade-cell .lbl { font-size: 10px; color: var(--txt-3); text-transform: uppercase; letter-spacing: .03em; }
-    .trade-cell .val { font-size: 14px; font-weight: 700; color: var(--txt); }
-    @media (max-width: 640px) { .trade-card { grid-template-columns: repeat(2, 1fr); } }
-
-    /* Entry loop diagnostics */
-    .gate-row {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 5px 0; border-bottom: 1px solid var(--edge-soft); font-size: 12px;
-    }
-    .gate-row:last-child { border-bottom: none; }
-    .gate-row .g-lbl { color: var(--txt-2); }
-    .gate-row .g-val { font-weight: 600; }
-    .no-trade-reason {
-      margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm);
-      background: var(--surf); border: 1px solid var(--edge-soft);
-      font-size: 12px; color: var(--txt-2);
-    }
-    .no-trade-reason.ready { color: var(--pos); border-color: var(--pos); }
-  </style>
 </head>
 <body>
-
-<!-- ── Top App Bar ──────────────────────────────────────────────────────────── -->
-<header class="app-bar">
-  <div class="brand">
-    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <polyline points="3,17 8,10 12,14 17,7 21,11"
-        stroke="currentColor" stroke-width="2"
-        stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    <div class="brand-text">
-      <span class="brand-name">Bank Nifty Options</span>
-      <span class="brand-sub" id="last-bar-time">Live</span>
-    </div>
-  </div>
-
-  <div class="status-row">
-    <span id="phase-badge" class="badge gray">—</span>
-    <span id="ws-status"  class="badge gray">Connecting…</span>
-    <span id="api-status" class="badge gray">API —</span>
-  </div>
-
-  <div class="clock-wrap">
-    <div id="clock" class="clock">—:—:—</div>
-    <div class="clock-sub">IST</div>
-  </div>
-
-  <nav class="nav-seg" aria-label="Pages">
-    <a href="/" class="active">Dashboard</a>
-    <a href="/settings">Settings</a>
-  </nav>
-
-  <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" aria-label="Toggle theme">
-    <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
-      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
-        stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-    </svg>
-    <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
-        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-  </button>
-</header>
-
-<!-- ── Stat strip ──────────────────────────────────────────────────────────── -->
-<div class="stat-strip">
-  <div class="stat-card">
-    <span class="stat-label">BANKNIFTY</span>
-    <span class="stat-value" id="stat-bnltp">—</span>
-  </div>
-  <div class="stat-card" id="card-pnl">
-    <span class="stat-label">Daily P&amp;L</span>
-    <span class="stat-value" id="stat-pnl">—</span>
-  </div>
-  <div class="stat-card">
-    <span class="stat-label">Funds</span>
-    <span class="stat-value" id="stat-funds">—</span>
-  </div>
-  <div class="stat-card">
-    <span class="stat-label">Active Trade</span>
-    <span class="stat-value" id="stat-active">—</span>
-  </div>
-</div>
-
-<!-- ── Main grid ───────────────────────────────────────────────────────────── -->
-<div class="main-grid">
-
-  <!-- LEFT: Trade Dashboard + Big Trades ───────────────────────────────────── -->
-  <div class="col">
-
-    <!-- Analog clock (c.html top-right clock face, ported here into the flow) -->
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Clock (IST)</span>
-        <button class="dash-toggle" data-target="clock-body" onclick="toggleSection(this)">▼</button>
+  <header class="app-bar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M4 19V10M9 19V5M14 19V13M19 19V8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
       </div>
-      <div class="panel-body dash-body" id="clock-body">
-        <div class="analog-clock-wrap">
-          <div class="analog-face" id="analog-face"></div>
+      <div>
+        <span class="brand-name">Alto</span>
+        <span class="brand-sub">Paper Trading</span>
+      </div>
+    </div>
+    <nav class="nav-seg">
+      <a href="/" class="active">Terminal</a>
+      <a href="/holdings">Holdings</a>
+      <a href="/positions">Positions</a>
+      <a href="/orders">Orders</a>
+      <a href="/console">Console</a>
+      <a href="/settings">Settings</a>
+    </nav>
+    <div class="app-bar-right">
+      <span class="badge gray" id="phase-badge">—</span>
+      <span class="badge gray" id="ws-status">—</span>
+      <span class="bar-divider"></span>
+      <div class="clock-wrap funds-chip"><div class="clock" id="stat-funds" style="font-size:16px">₹0.00</div><div class="clock-sub">Funds</div></div>
+      <div class="clock-wrap"><div class="clock" id="clock">--:--:--</div><div class="clock-sub">IST</div></div>
+      <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke-linecap="round"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button class="btn-mini" onclick="logout()">Log out</button>
+    </div>
+  </header>
+
+  <div class="main-grid">
+    <div class="col">
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">Watchlist</span></div>
+        <div class="watchlist-search">
+          <input class="field-input" id="wl-search" placeholder="Search stocks…" oninput="filterWatchlist()">
         </div>
-        <div class="analog-digital" id="analog-digital">—:—:—</div>
+        <div class="watchlist-list" id="watchlist-list">
+          <div class="muted-text" style="padding:20px;text-align:center">Loading…</div>
+        </div>
       </div>
     </div>
 
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Trade Dashboard</span>
-        <span id="trade-badge" class="badge gray">none</span>
-      </div>
-      <div class="panel-body dash-body" id="trade-dashboard-body">
-        <div class="funds-bar">
-          <span>Funds: <b id="stat-funds-2">—</b></span>
-          <span>Daily P&amp;L: <b id="stat-pnl-2">—</b></span>
-          <button class="btn-mini" onclick="openConditionModal()">Trade Conditions</button>
-        </div>
-
-        <!-- Kite manual order form — DECORATIVE ONLY, exactly like c.html:
-             local UI state only, never calls the real paper-trading engine. -->
-        <div class="kite-toggle-row">
-          <div class="kite-toggle active buy" id="kite-buy" onclick="kiteSetType('BUY')">BUY (CE)</div>
-          <div class="kite-toggle sell" id="kite-sell" onclick="kiteSetType('SELL')">SELL (PE)</div>
-        </div>
-        <div class="kite-form">
-          <div class="field">
-            <label class="field-label">Qty</label>
-            <input class="field-input" id="kite-qty" type="number" min="30" step="30" value="30">
+    <div class="col">
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">Chart</span></div>
+        <div class="panel-body">
+          <div class="symbol-header" id="symbol-header">
+            <div>
+              <span class="symbol-name" id="sym-name">Select a stock</span>
+              <span class="symbol-token" id="sym-token"></span>
+            </div>
+            <div style="text-align:right">
+              <div class="symbol-price" id="sym-price">—</div>
+              <div class="symbol-change" id="sym-change"></div>
+            </div>
           </div>
-          <div class="field">
-            <label class="field-label">Order Type</label>
-            <select class="field-input" id="kite-ordtype" onchange="kiteSetOrdType(this.value)">
-              <option value="MARKET">Market</option>
-              <option value="LIMIT">Limit</option>
-            </select>
-          </div>
-          <div class="field">
-            <label class="field-label">Price</label>
-            <input class="field-input" id="kite-price" type="number" step="0.05" disabled>
-          </div>
-          <div class="field">
-            <label class="field-label">Avail. Funds</label>
-            <input class="field-input" id="kite-funds" type="text" disabled value="—">
-          </div>
-        </div>
-        <div class="kite-actions">
-          <button class="btn-run" onclick="kiteSubmitOrder()">Submit (simulated)</button>
-          <button class="btn-mini" onclick="manualExit()">Exit (simulated)</button>
-        </div>
-        <div class="kite-status" id="kite-status">No simulated position.</div>
-
-        <div id="trade-empty" class="empty-cell">No active trade</div>
-        <div id="trade-card" class="trade-card" style="display:none"></div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Today's Trades</span>
-        <span id="closed-count" class="badge gray">0</span>
-      </div>
-      <div class="tbl-wrap">
-        <table class="cardify">
-          <thead><tr>
-            <th>Dir</th><th>Option</th><th>Entry Idx</th><th>Exit Idx</th>
-            <th>Entry Prem</th><th>Exit Prem</th><th>Outcome</th><th>P&amp;L ₹</th>
-          </tr></thead>
-          <tbody id="closed-tbody">
-            <tr><td colspan="8" class="empty-cell">No trades yet today</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Local Trade Log (browser-only)</span>
-        <div>
-          <button class="btn-mini" onclick="setTradeLogFilter('today')" id="tl-filter-today">Today</button>
-          <button class="btn-mini" onclick="setTradeLogFilter('all')" id="tl-filter-all">All</button>
-          <button class="btn-mini" onclick="clearTradeLog()">Clear</button>
+          <div class="ohlc-row" id="ohlc-row"></div>
+          <div id="price-chart" style="margin-top:10px"></div>
         </div>
       </div>
-      <div class="panel-body">
-        <div class="muted-text" style="margin-bottom:6px">
-          Stored in this browser's IndexedDB only — a separate log from
-          "Today's Trades" above (which is the real, server-side history).
-        </div>
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">Recent Orders</span><a class="btn-mini" href="/orders">View all</a></div>
         <div class="tbl-wrap">
           <table class="cardify">
-            <thead><tr><th>Type</th><th>Price</th><th>Time</th><th>Confidence</th><th>P&amp;L</th></tr></thead>
-            <tbody id="tradelog-tbody">
-              <tr><td colspan="5" class="empty-cell">No local trades logged yet</td></tr>
-            </tbody>
+            <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num-col">Qty</th><th>Type</th><th>Status</th></tr></thead>
+            <tbody id="recent-orders-tbody"><tr><td colspan="6" class="empty-cell">No orders yet</td></tr></tbody>
           </table>
         </div>
       </div>
     </div>
 
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Big Trades — Qty Audit (browser-only)</span>
-        <button class="btn-mini" onclick="auditStockQtyStorage()">DB Check</button>
+    <div class="col">
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">Place Order</span></div>
+        <div class="panel-body">
+          <form class="order-ticket-form" id="order-form" onsubmit="return submitOrder(event)">
+            <div class="side-toggle-row">
+              <div class="side-toggle active buy" id="side-buy" onclick="setSide('BUY')">BUY</div>
+              <div class="side-toggle sell" id="side-sell" onclick="setSide('SELL')">SELL</div>
+            </div>
+            <div class="field">
+              <label class="field-label">Instrument</label>
+              <input class="field-input" id="ticket-symbol" disabled placeholder="Select from watchlist">
+            </div>
+            <div class="order-ticket-row">
+              <div class="field">
+                <label class="field-label">Qty</label>
+                <input class="field-input" id="ticket-qty" type="number" min="1" value="1" oninput="updateTicketSummary()">
+              </div>
+              <div class="field">
+                <label class="field-label">Product</label>
+                <div class="seg-row" style="margin:0">
+                  <div class="seg-btn active" id="prod-cnc" onclick="setProduct('CNC')">CNC</div>
+                  <div class="seg-btn" id="prod-mis" onclick="setProduct('MIS')">MIS</div>
+                </div>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label">Order Type</label>
+              <div class="seg-row" style="margin:0">
+                <div class="seg-btn active" id="type-market" onclick="setOrderType('MARKET')">Market</div>
+                <div class="seg-btn" id="type-limit" onclick="setOrderType('LIMIT')">Limit</div>
+              </div>
+            </div>
+            <div class="field" id="limit-price-field" style="display:none">
+              <label class="field-label">Limit Price</label>
+              <input class="field-input" id="ticket-price" type="number" step="0.05" min="0" oninput="updateTicketSummary()">
+            </div>
+            <div class="ticket-summary" id="ticket-summary">Select an instrument to see estimated order value.</div>
+            <button class="btn-run" type="submit" id="ticket-submit" disabled>Select an instrument</button>
+            <div class="ticket-status" id="ticket-status"></div>
+          </form>
+        </div>
       </div>
-      <div class="panel-body">
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">Open Positions</span><a class="btn-mini" href="/positions">View all</a></div>
         <div class="tbl-wrap">
           <table class="cardify">
-            <thead><tr><th>Stock</th><th>Bucket</th><th>Qty (Σ ticks)</th></tr></thead>
-            <tbody id="bigtrade-tbody">
-              <tr><td colspan="3" class="empty-cell">Waiting for ticks…</td></tr>
-            </tbody>
+            <thead><tr><th>Symbol</th><th>Side</th><th class="num-col">Qty</th><th class="num-col">P&amp;L</th></tr></thead>
+            <tbody id="quick-positions-tbody"><tr><td colspan="4" class="empty-cell">No open positions</td></tr></tbody>
           </table>
-        </div>
-        <div class="audit-line" id="bigtrade-audit">DB not checked yet.</div>
-        <div class="kite-actions" style="margin-top:8px">
-          <button class="btn-mini" onclick="chooseOutputFile()">Choose Output File…</button>
-          <span class="muted-text" id="fileexport-status">No file selected.</span>
         </div>
       </div>
     </div>
-
   </div>
 
-  <!-- RIGHT: Entry Loop Monitor + Stock Candles + Backtest ─────────────────── -->
-  <div class="col">
-
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Entry Loop Monitor</span>
-        <span id="entry-time" class="badge gray">—</span>
-      </div>
-      <div class="panel-body">
-        <div class="tbl-wrap">
-          <table class="cardify">
-            <thead><tr><th>Leader</th><th>Open</th><th>Close</th><th>Volume</th><th>Surge</th></tr></thead>
-            <tbody id="leader-tbody">
-              <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div id="gate-rows"></div>
-        <div id="no-trade-reason" class="no-trade-reason">—</div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Stock Candles</span>
-        <button class="dash-toggle" data-target="stock-candles-body" onclick="toggleSection(this)">▼</button>
-      </div>
-      <div class="panel-body dash-body" id="stock-candles-body">
-        <div class="global-signal-badge" id="global-signal-badge">GLOBAL SIGNAL: —</div>
-        <div class="breakout-banner" id="breakout-banner">No breakout detected.</div>
-        <div class="tbl-wrap">
-          <table class="cardify" id="stock-table">
-            <thead><tr id="stock-table-head"><th>Stock</th></tr></thead>
-            <tbody id="stock-table-body">
-              <tr><td class="empty-cell">Waiting for data…</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="tbl-wrap" style="margin-top:10px">
-          <table class="sr-table" id="sr-table">
-            <thead><tr>
-              <th>Stock</th><th>5m Support</th><th>5m Resistance</th>
-              <th>15m Support</th><th>15m Resistance</th>
-            </tr></thead>
-            <tbody id="sr-table-body">
-              <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Backtest</span>
-        <div class="bt-header-right">
-          <button id="btn-export" class="btn-export" onclick="exportCsv()" style="display:none">
-            ↓ Export CSV
-          </button>
-          <span id="bt-status" class="badge gray">idle</span>
-        </div>
-      </div>
-      <div class="panel-body">
-        <div id="bt-history" class="bt-hist-wrap" style="display:none">
-          <div class="bt-hist-label">Recent Runs</div>
-          <div id="bt-hist-list" class="bt-hist-list"></div>
-        </div>
-
-        <div class="bt-controls">
-          <div class="field">
-            <label class="field-label" for="bt-from">From</label>
-            <input class="field-input" id="bt-from" type="date">
-          </div>
-          <div class="field">
-            <label class="field-label" for="bt-to">To</label>
-            <input class="field-input" id="bt-to" type="date">
-          </div>
-          <div class="field">
-            <label class="field-label" for="bt-slip">Slippage bps</label>
-            <input class="field-input" id="bt-slip" type="number"
-              min="0" step="0.5" value="2" style="width:90px">
-          </div>
-          <button class="btn-run" onclick="runBacktest()">Run</button>
-        </div>
-        <div class="bt-adv-hint" style="margin-bottom:6px">
-          BankNifty history is self-recorded day by day as the live engine runs
-          (the market-data server has no historical archive for the index itself) —
-          the runnable date range grows over time.
-        </div>
-        <details class="bt-adv">
-          <summary>Strategy overrides for this run (optional)</summary>
-          <textarea id="bt-overrides" class="field-input bt-ovr" rows="3"
-            placeholder='{"BN_TARGET_POINTS": 40, "BN_SAME_DIRECTION_REQUIRED": 4}'></textarea>
-          <div class="bt-adv-hint">
-            JSON of setting keys → values, applied to this run only (live trading is untouched).
-            Keys are the same as on the <a href="/settings">Settings page</a>.
-          </div>
-        </details>
-        <div id="bt-meta" class="bt-meta" style="display:none"></div>
-        <div id="bt-summary"></div>
-        <div id="bt-viz" class="bt-viz" style="display:none">
-          <div class="bt-viz-eq">
-            <div class="chart-title">Equity Curve <span class="cnum" id="bt-eq-net">—</span></div>
-            <div id="bt-equity"></div>
-          </div>
-          <div class="bt-viz-oc">
-            <div class="chart-title">Outcomes</div>
-            <div id="bt-outcomes"></div>
-          </div>
-        </div>
-        <div class="tbl-wrap bt-tbl">
-          <table>
-            <thead><tr>
-              <th>Dir</th><th>Option</th><th>Entry Idx</th><th>Entry Time</th>
-              <th>Exit Idx</th><th>Exit Time</th><th>Outcome</th>
-              <th>Entry Prem</th><th>Exit Prem</th><th>Net ₹</th><th>R</th>
-            </tr></thead>
-            <tbody id="bt-trades">
-              <tr><td colspan="11" class="empty-cell">No trades yet</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-  </div>
-
-</div>
-
-<!-- ── Trade Conditions modal (read-only, sourced from /api/settings) ──────── -->
-<div class="modal-overlay hidden" id="condition-modal" onclick="if(event.target===this) closeConditionModal()">
-  <div class="modal-box">
-    <span class="modal-close" onclick="closeConditionModal()">✕</span>
-    <h3>Trade Conditions (live values)</h3>
-    <div id="condition-modal-body">Loading…</div>
-  </div>
-</div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="/js/util.js"></script>
-<script src="/js/clock.js"></script>
-<script src="/js/breakout.js"></script>
-<script src="/js/qtyAudit.js"></script>
-<script src="/js/kiteForm.js"></script>
-<script src="/js/dashboard.js"></script>
+  <script src="/js/util.js"></script>
+  <script src="/js/app.js"></script>
+  <script src="/js/watchlist.js"></script>
+  <script src="/js/orderTicket.js"></script>
 </body>
 </html>

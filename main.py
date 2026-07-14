@@ -6,13 +6,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
-from app.api.dashboard import router, set_services
+import app.config as cfg
+from app.api import auth as auth_api
+from app.api import market as market_api
+from app.api import trading as trading_api
 from app.services.database import DatabaseService
 from app.services.market_data import MarketDataService
 from app.services.scheduler import SchedulerService
 from app.services.settings import load_and_apply as load_settings
-from app.ws.dashboard_ws import ws_manager
+from app.ws.account_ws import account_ws_manager
+from app.ws.market_ws import market_ws_manager
 
 # ── Global service instances ──────────────────────────────────────────────────
 
@@ -25,17 +30,20 @@ mkt_service = MarketDataService()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db_service.init()
+    app.state.db = db_service
     # Apply persisted runtime settings BEFORE the scheduler reads any timing.
     await load_settings(db_service)
 
     scheduler = SchedulerService(
         db          = db_service,
         market_data = mkt_service,
-        ws_manager  = ws_manager,
+        market_ws   = market_ws_manager,
+        account_ws  = account_ws_manager,
     )
     await scheduler.start()
 
-    set_services(db_service, scheduler)
+    market_api.set_db(db_service)
+    trading_api.set_db(db_service)
 
     yield
 
@@ -45,9 +53,13 @@ async def lifespan(app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Bank Nifty Options Paper Trader", lifespan=lifespan)
+app = FastAPI(title="Paper Trading Terminal", lifespan=lifespan)
 
-app.include_router(router)
+app.add_middleware(SessionMiddleware, secret_key=cfg.SESSION_SECRET)
+
+app.include_router(auth_api.router)
+app.include_router(market_api.router)
+app.include_router(trading_api.router)
 
 app.mount("/css", StaticFiles(directory="static/css"), name="css")
 app.mount("/js",  StaticFiles(directory="static/js"),  name="js")
@@ -56,6 +68,31 @@ app.mount("/js",  StaticFiles(directory="static/js"),  name="js")
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse("static/index.html")
+
+
+@app.get("/login")
+def login_page() -> FileResponse:
+    return FileResponse("static/login.html")
+
+
+@app.get("/holdings")
+def holdings_page() -> FileResponse:
+    return FileResponse("static/holdings.html")
+
+
+@app.get("/positions")
+def positions_page() -> FileResponse:
+    return FileResponse("static/positions.html")
+
+
+@app.get("/orders")
+def orders_page() -> FileResponse:
+    return FileResponse("static/orders.html")
+
+
+@app.get("/console")
+def console_page() -> FileResponse:
+    return FileResponse("static/console.html")
 
 
 @app.get("/settings")

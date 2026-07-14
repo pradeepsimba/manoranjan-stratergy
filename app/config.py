@@ -3,20 +3,17 @@ from __future__ import annotations
 """
 Configuration — static system settings plus the DYNAMIC tunables layer.
 
-Static values (endpoints, credentials, structural pool/buffer sizes, the
-Bank Nifty instrument universe) are plain module attributes and require a
-restart to change.
+Static values (endpoints, credentials, structural pool/buffer sizes, the seed
+stock catalog) are plain module attributes and require a restart to change.
 
 Everything else lives in _DEFAULTS and is resolved through the module-level
 __getattr__ (PEP 562) with this precedence:
 
-    1. thread-local overrides  — a running backtest's per-run parameters,
-                                 active only inside its worker threads
-    2. runtime overrides       — dashboard Settings page, persisted in the
-                                 app_settings table and applied at startup
-    3. the hard default below
+    1. runtime overrides — the Settings page, persisted in the app_settings
+                            table and applied at startup
+    2. the hard default below
 
-`import app.config as cfg; cfg.BN_TARGET_POINTS` therefore always returns the
+`import app.config as cfg; cfg.STARTING_FUNDS` therefore always returns the
 CURRENT value. Code must read cfg attributes at call time — never copy them
 into module-level constants or default-argument values, or they freeze at
 import and stop being dynamic.
@@ -26,13 +23,12 @@ app/services/settings.py — add new tunables in BOTH places.
 """
 
 import os
-import threading
-from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, List, Optional
 
 # ── Static: custom market data server ────────────────────────────────────────
 API_HOST          = "35.234.219.141"
 API_URL_TEMPLATE  = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
+CLIENTSTATUS_URL  = f"https://{API_HOST}:8000/api/clientstatus/"
 WS_URL            = f"ws://{API_HOST}:8083/historical-data"
 
 # ── Static: credentials / DSN ─────────────────────────────────────────────────
@@ -40,162 +36,131 @@ POSTGRES_DSN = os.getenv(
     "POSTGRES_DSN",
     "postgresql://postgres:password@localhost/trading_db",
 )
+SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-insecure-secret-change-me")
 
 # ── Static: data intervals ────────────────────────────────────────────────────
 INTERVAL_5M = "5m"
 
-# ── Static: Bank Nifty options strategy universe ──────────────────────────────
-# Verified against the live market-data server (2026-07-09): these are the
-# SAME instrument tokens the c.html prototype uses (Kite-style tokens), and
-# they return real 5m OHLCV from this repo's existing historical/WS server —
-# no separate options-chain data source needed anywhere (see bn_pricing.py).
-BN_INDEX_NAME = "BANKNIFTY"
-BN_INDEX_TOKEN = "26009"
-
-# The 6 stocks that actually drive the trade decision (leader-vote + BN
-# composite indicator gate).
-BN_LEADER_STOCKS: Dict[str, str] = {
-    "HDFC BANK":            "1333",
-    "ICICI BANK":           "4963",
-    "AXIS BANK":            "5900",
-    "STATE BANK OF INDIA":  "3045",
-    "KOTAK BANK":           "1922",   # server's canonical name for this token (NOT "Kotak Mahindra Bank")
-    "INDUSIND BANK":        "5258",
-}
-
-# Exact c.html STOCK_QTY_THRESHOLD table (per-stock, at 1m granularity),
-# mapped onto this repo's leader-stock names (Kotak's key here is "KOTAK
-# BANK", not c.html's "KOTAK MAHINDRA BANK" — same stock/token, see the
-# Kotak naming gotcha above). c.html compares these against a raw per-trade
-# qty field (tens/hundreds); this repo's WS feed only ever carries
-# cumulative 5m bar volume (hundreds of thousands/bar) — no such field
-# exists here. Ported literally anyway per explicit user direction; expect
-# this gate to be permanently satisfied against real bar volumes.
-BN_STOCK_QTY_THRESHOLD: Dict[str, float] = {
-    "HDFC BANK":            2000,
-    "ICICI BANK":           2000,
-    "STATE BANK OF INDIA":  1200,
-    "AXIS BANK":            900,
-    "KOTAK BANK":           1500,
-    "INDUSIND BANK":        600,
-}
-# c.html's getQtyMultiplier() for the "5m" branch — this repo is fixed at 5m.
-BN_QTY_INTERVAL_MULTIPLIER = 2
-
-# All 11 stocks fetched/displayed (matches c.html's own universe, 12 tokens
-# total together with the index) — the 6
-# beyond the leaders never feed the entry decision but are kept for display /
-# future use per an explicit user decision, not because they're needed.
-BN_ALL_STOCKS: Dict[str, str] = {
-    **BN_LEADER_STOCKS,
-    "AU SMALL FINANCE BANK": "21238",
-    "FEDERAL BANK":          "1023",
-    "IDFC FIRST BANK":       "11184",
-    "PUNJAB NATIONAL BANK":  "10666",
-    "CANARA BANK":           "10794",
-}
-
-# Exact c.html INDEX_WEIGHTS table (Nifty Bank per-stock weight, % as of
-# the source's "Oct 30, 2025" snapshot) — keyed by TOKEN (c.html keys this
-# by `stock_symbol`, and this repo's own candles_5m is likewise token-keyed;
-# see CLAUDE.md's "candles_5m is keyed by TOKEN" convention). Same 11 stocks
-# as BN_ALL_STOCKS, no new universe needed. Used for the weighted
-# global-signal/contribution-analysis port (app/engine/bn_breakout.py).
-BN_INDEX_WEIGHTS: Dict[str, float] = {
-    "1333":  31.86,   # HDFC BANK
-    "4963":  20.14,   # ICICI BANK
-    "3045":  17.83,   # STATE BANK OF INDIA
-    "1922":  8.79,    # KOTAK BANK
-    "5900":  7.96,    # AXIS BANK
-    "5258":  2.92,    # INDUSIND BANK
-    "10666": 2.86,    # PUNJAB NATIONAL BANK
-    "10794": 2.40,    # CANARA BANK
-    "11184": 1.40,    # IDFC FIRST BANK
-    "21238": 1.35,    # AU SMALL FINANCE BANK
-    "1023":  1.19,    # FEDERAL BANK
-}
-
-# BankNifty exchange lot size — a contract-spec fact, not a user tunable.
-BN_LOT_SIZE = 30
-
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
-HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
-MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
+HIST_BATCH_SIZE     = 100   # max stocks per single historical API request
+MAX_CANDLE_BUFFER   = 300   # per-symbol in-memory candle buffer (deque maxlen)
+WS_FILTER_BATCH_SIZE = 40   # max (symbol, interval) pairs per single WS connection
 
-# Backtest v1 is intraday/5m only — nothing in c.html holds an option position
-# across days, so positional (delivery / 1d) replay is not built.
-BACKTEST_TIMEFRAMES = ["5m"]
-BACKTEST_MODES      = ["intraday"]
-SCAN_WORKERS        = 4    # per-day backtest parallelism (ThreadPoolExecutor)
+# ── Static: instrument discovery seed ─────────────────────────────────────────
+# Fallback candidate catalog (name -> token), used ONLY if the live
+# `/api/clientstatus/` call fails at discovery time. This is a snapshot of
+# that same endpoint's real response (fetched 2026-07-13) — every name here is
+# the server's own canonical stockname text, so there's no "wrong name"
+# guesswork (the Kotak-naming trap from the old BN engine doesn't apply: these
+# names come straight from the source of truth). Discovery still verifies
+# each one actually has historical candle data before marking it tradable —
+# being listed here doesn't guarantee OHLC history exists (e.g. a very
+# recent IPO). NIFTY 50 / BANKNIFTY are indices, excluded — this platform
+# trades individual equities only.
+SEED_STOCK_CANDIDATES: Dict[str, str] = {
+    "360 One WAM": "13061", "ABB": "13", "Adani Energy Solutions": "10217",
+    "Adani Enterprises": "25", "Adani Green Energy": "3563",
+    "Adani Ports & SEZ": "15083", "Aditya Birla Capital": "21614",
+    "Alkem Laboratories": "11703", "Amber Enterprises": "1185",
+    "Ambuja Cements": "1270", "Angel One": "324", "APL Apollo Tubes": "25780",
+    "Apollo Hospitals": "157", "Ashok Leyland": "212", "Asian Paints": "236",
+    "Astral": "14418", "AU Small Finance Bank": "21238",
+    "Aurobindo Pharma": "275", "Avenue Supermarts DMart": "19913",
+    "AXIS BANK": "5900", "Bajaj Auto": "16669", "Bajaj Finance": "317",
+    "Bajaj Finserv": "16675", "Bajaj Holdings & Investments": "305",
+    "Bandhan Bank": "2263", "Bank of Baroda": "4668", "Bank of India": "4745",
+    "Bharat Dynamics": "2144", "Bharat Electronics": "383",
+    "Bharat Forge": "422", "Bharat Heavy Electricals": "438",
+    "Bharat Petroleum": "526", "Bharti Airtel": "10604", "Biocon": "11373",
+    "Blue Star": "8311", "Bosch": "2181", "Britannia Industries": "547",
+    "BSE": "19585", "CAMS": "342", "Canara Bank": "10794", "CDSL": "21174",
+    "CENTRAL BANK OF INDIA": "14894", "CG Power & Industrial Solutions": "760",
+    "Cholamandalam Investment": "685", "Cipla": "694", "Coal India": "20374",
+    "Cochin Shipyard": "21508", "Coforge": "11543", "Colgate Palmolive": "15141",
+    "Container Corporation of India": "4749", "Crompton Greaves": "17094",
+    "Cummins": "1901", "Dabur India": "772", "Dalmia Bharat": "8075",
+    "Delhivery": "9599", "Divis Laboratories": "10940", "DLF": "14732",
+    "Dr Reddys Laboratories": "881", "Eicher Motors": "910",
+    "Exide Industries": "676", "Federal Bank": "1023", "Force Motors": "11573",
+    "Fortis Healthcare": "14592", "GAIL": "4717",
+    "Glenmark Pharmaceuticals": "7406", "GMR Airports": "13528",
+    "Godfrey Phillips": "1181", "Godrej Consumer Products": "10099",
+    "Godrej Properties": "17875", "Grasim Industries": "1232",
+    "Havells": "9819", "HCL Technologies": "7229", "HDFC AMC": "4244",
+    "HDFC Bank": "1333", "HDFC Life Insurance": "467", "Hero Motocorp": "1348",
+    "Hindalco Industries": "1363", "Hindustan Aeronautics": "2303",
+    "Hindustan Petroleum": "1406", "Hindustan Unilever": "1394",
+    "Hindustan Zinc": "1424", "Hitachi Energy": "18457",
+    "Hyundai Motor India": "25844", "ICICI BANK": "4963",
+    "ICICI Lombard General Insurance": "21770",
+    "ICICI Prudential Life Insurance": "18652", "IDFC First Bank": "11184",
+    "Indian Bank": "14309", "Indian Energy Exchange": "220",
+    "Indian Hotels Company": "1512", "Indian Oil Corporation": "1624",
+    "INDRAPRASTHA GAS": "11262", "Indus Towers": "29135",
+    "Indusind Bank": "5258", "Info Edge": "13751", "INFOSYS": "1594",
+    "Inox Wind": "7852", "Interglobe Aviation": "11195", "IREDA": "20261",
+    "IRFC": "2029", "ITC": "1660", "Jindal Steel": "6733",
+    "Jio Financial Services": "18143", "JSW Energy": "17869",
+    "JSW Steel": "11723", "Jubilant FoodWorks": "18096",
+    "Kalyan Jewellers": "2955", "Kaynes Technology India": "12092",
+    "KEI Industries": "13310", "KFin Technologies": "13359",
+    "Kotak Bank": "1922", "KPIT Technologies": "9683",
+    "Larsen & Toubro": "11483", "Laurus Labs": "19234",
+    "LIC Housing Finance": "1997", "LIC of India": "9480", "Lupin": "10440",
+    "Mahindra & Mahindra": "2031", "Manappuram Finance": "19061",
+    "Marico": "4067", "Maruti Suzuki": "10999",
+    "Max Financial Services": "2142", "Max Healthcare Institute": "22377",
+    "Mazagon Dock Shipbuilders": "509", "MCX": "31181",
+    "Motilal Oswal Financial Services": "14947", "Mphasis": "4503",
+    "Muthoot Finance": "23650", "NALCO": "6364", "NBCC": "31415",
+    "Nestle": "17963", "NHPC": "17400", "Nippon Life India AMC": "357",
+    "NMDC": "15332", "NTPC": "11630", "Nuvama Wealth Management": "18721",
+    "Nykaa": "6545", "Oberoi Realty": "20242",
+    "Oil & Natural Gas Corporation": "2475", "Oil India": "17438",
+    "One 97 Communications": "6705",
+    "Oracle Financial Services Software": "10738", "Page Industries": "14413",
+    "Patanjali Foods": "17029", "PB FinTech": "6656",
+    "Persistent Systems": "18365", "PG Electroplast": "25358",
+    "Phoenix Mills": "14552", "PI Industries": "24184",
+    "Pidilite Industries": "2664", "PNB Housing Finance": "18908",
+    "Polycab": "9590", "Power Finance Corporation": "14299",
+    "Power Grid Corporation of India": "14977",
+    "Prestige Estates Projects": "20302", "Punjab National Bank": "10666",
+    "Radico Khaitan": "10990", "Rail Vikas Nigam": "9552", "RBL Bank": "18391",
+    "REC": "15355", "Reliance Industries": "2885",
+    "Samvardhana Motherson International": "4204", "SBI Cards": "17971",
+    "SBI Life Insurance": "21808", "Shree Cement": "3103",
+    "Shriram Finance": "4306", "Siemens": "3150", "Solar Industries": "13332",
+    "Sona BLW Precision Forgings": "4684", "SRF": "3273",
+    "State Bank of India": "3045", "Steel Authority of India": "2963",
+    "Sun Pharmaceutical": "3351", "Supreme Industries": "3363",
+    "Suzlon Energy": "12018", "Swiggy": "27066",
+    "Tata Consultancy Services": "11536", "Tata Consumer Products": "3432",
+    "Tata Elxsi": "3411", "TATA MOTORS": "3456", "Tata Power": "3426",
+    "Tata Steel": "3499", "TATA TECHNOLOGIES": "20293", "Tech Mahindra": "13538",
+    "Titan": "3506", "Torrent Pharmaceuticals": "3518", "Trent": "1964",
+    "Tube Investment": "312", "TVS Motors": "8479", "UltraTech Cement": "11532",
+    "Union Bank of India": "10753", "UNO Minda": "14154", "UPL": "11287",
+    "Varun Beverages": "18921", "VEDANTA": "3063", "Vodafone Idea": "14366",
+    "Voltas": "3718", "Wipro": "3787", "Yes Bank": "11915",
+    "Zydus Life Science": "7929",
+}
 
 # ── Dynamic tunables — hard defaults ──────────────────────────────────────────
 _DEFAULTS: Dict[str, Any] = {
-    # Session timings (IST) — SCAN_START/CUTOFF reproduce c.html's real
-    # 09:30-15:00 trading window using the existing phase-driver machinery.
-    "PREMARKET_HOUR":   9,  "PREMARKET_MIN":   0,
-    "MARKET_OPEN_HOUR": 9,  "MARKET_OPEN_MIN": 15,   # historical load + WS subscribe
-    "SCAN_START_HOUR":  9,  "SCAN_START_MIN":  30,   # entries allowed from here
-    "CUTOFF_HOUR":      15, "CUTOFF_MIN":      0,    # no new entries after this
-    "SESSION_END_HOUR": 15, "SESSION_END_MIN": 30,   # terminate session
+    # Session timings (IST)
+    "MARKET_OPEN_HOUR":  9,  "MARKET_OPEN_MIN":  15,   # historical load + WS subscribe + orders open
+    "MARKET_CLOSE_HOUR": 15, "MARKET_CLOSE_MIN": 30,   # session end / daily reset
+    "MIS_SQUAREOFF_HOUR": 15, "MIS_SQUAREOFF_MIN": 20, # auto square-off all open MIS positions
 
-    # BN Strategy — sideways / momentum / leader-vote / volume-surge gates
-    "BN_SIDEWAYS_RANGE_MIN":   12.0,   # min 5-bar BankNifty close range to trade
-    "BN_MOMENTUM_THRESHOLD":   28.0,   # fixed 5m momentum threshold (points)
-    "BN_ATR_PERIOD":           10,
-    "BN_SAME_DIRECTION_REQUIRED": 3,   # of 6 leaders must agree
-    "BN_ENTRY_COOLDOWN_S":     60,     # no new entry within this long of the last exit
+    # Accounts
+    "STARTING_FUNDS": 500_000.0,   # ₹ — seeds a new user's virtual funds balance
 
-    # BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring)
-    "BN_INDICATOR_LOOKBACK_BARS": 200,
-    "BN_RSI_PERIOD":       14,
-    "BN_EMA_FAST":         20,
-    "BN_EMA_SLOW":         50,
-    "BN_MACD_FAST":        12,
-    "BN_MACD_SLOW":        26,
-    "BN_RSI_BULL_LEVEL":   58,
-    "BN_RSI_BEAR_LEVEL":   42,
-    "BN_RSI_OVERBOUGHT":   72,
-    "BN_RSI_OVERSOLD":     28,
-    "BN_EMA_EXTENSION_PCT": 1.2,
-    "BN_SCORE_MIN":        2.0,
-    "BN_SCORE_MARGIN":     0.9,
-
-    # BN Risk — target/stop/trailing on the underlying BankNifty index (points)
-    "BN_TARGET_POINTS":     35.0,
-    "BN_STOPLOSS_POINTS":   18.0,
-    "BN_BREAKEVEN_TRIGGER": 12.0,
-    "BN_TRAIL_TRIGGER":     18.0,
-    "BN_TRAIL_DISTANCE":    12.0,
-    "BN_STARTING_FUNDS":    100_000.0,   # ₹ — seeds the persisted funds balance once
-
-    # BN Options Pricing — synthetic Black-Scholes premium, no real option data
-    "BN_RISK_FREE_RATE": 0.065,
-    "BN_IV_MIN":         0.20,
-    "BN_IV_MAX":         0.70,
-    "BN_IV_DEFAULT":     0.28,
-    "BN_IV_LOOKBACK_BARS": 50,
-    "BN_IV_MANUAL_ENABLED": False,
-    "BN_IV_MANUAL_VALUE":   0.30,
-
-    # BN Options Costs — placeholder rates (India options STT/txn charges
-    # change periodically; confirm current figures before trusting absolute
-    # backtest ₹ P&L — relative signal quality is insensitive to this).
-    "BN_COST_BROKERAGE_FLAT": 20.0,      # ₹ per executed order, flat
-    "BN_COST_STT_SELL_PCT":   0.001,     # STT on sell-side premium value
-    "BN_COST_TXN_PCT":        0.0005,    # exchange transaction charge
-    "BN_COST_GST_PCT":        0.18,      # GST on (brokerage + txn)
-    "BN_COST_SEBI_PCT":       0.000001,  # SEBI turnover fee
-
-    # Tick-wise engine
-    "TICK_EVAL_INTERVAL_MS": 100,
-
-    # Backtest
-    "BACKTEST_WARMUP_DAYS": 7,
-    "SLIPPAGE_BPS":         2.0,
+    # Engine cadence
+    "TICK_EVAL_INTERVAL_MS": 100,   # limit-order matching / mark-to-market loop
 }
 
 _runtime_overrides: Dict[str, Any] = {}
-_thread_ctx = threading.local()
 
 # Bumped on every runtime-override mutation (Settings page apply/reset) — the
 # single choke point for "did a dynamic tunable change".
@@ -210,9 +175,6 @@ def __getattr__(name: str) -> Any:
         raise AttributeError(
             f"module 'app.config' has no attribute {name!r}"
         ) from None
-    local = getattr(_thread_ctx, "overrides", None)
-    if local is not None and name in local:
-        return local[name]
     return _runtime_overrides.get(name, default)
 
 
@@ -256,22 +218,3 @@ def clear_runtime_overrides(keys: Optional[List[str]] = None) -> None:
         for k in keys:
             _runtime_overrides.pop(k, None)
     _settings_generation += 1
-
-
-# ── Per-thread overrides (backtest workers ONLY — never the event loop) ──────
-
-@contextmanager
-def thread_overrides(overrides: Dict[str, Any]) -> Iterator[None]:
-    """
-    Scope config overrides to the current thread. Used by backtest day-workers
-    so a run's parameters never leak into the live engine, whose event loop
-    keeps reading the global runtime values.
-    """
-    prev = getattr(_thread_ctx, "overrides", None)
-    merged = dict(prev) if prev else {}
-    merged.update(overrides)
-    _thread_ctx.overrides = merged
-    try:
-        yield
-    finally:
-        _thread_ctx.overrides = prev

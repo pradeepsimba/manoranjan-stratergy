@@ -1,38 +1,37 @@
 from __future__ import annotations
 
 """
-Timing orchestrator — drives the Bank Nifty options paper-trading session:
+Timing orchestrator for the equity paper-trading platform:
 
-  PRE_MARKET  → idle (fixed instrument universe — nothing to fetch/screen)
-  WAIT_ZONE   → 09:15: historical data load + WebSocket subscribe
-  ACTIVE      → 09:30: evaluate every newly-closed 5m BankNifty bar; manage
-                the single active trade's exit every ~100ms
-  CUTOFF      → 15:00: no new entries; exit management keeps running
-  CLOSED      → 15:30: square off, log daily summary
+  PRE_MARKET -> idle, no live feed
+  OPEN       -> market-data feed running; orders accepted; every tick,
+                resting LIMIT orders on that token are checked for a fill
+  CLOSED     -> at MIS_SQUAREOFF time: auto square-off every open MIS
+                position; at MARKET_CLOSE: stop the feed for the day
+
+Nothing here decides WHAT to trade — see app/engine/orders.py for the
+(non-strategy) order-matching mechanics this loop calls into.
 """
 
 import asyncio
 import json
 from collections import deque as _deque
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, Dict, List
 from zoneinfo import ZoneInfo
 
-import numpy as np
-
 import app.config as cfg
-from app.engine import bn_breakout
-from app.engine.bn_entry_exit import evaluate_entry
-from app.models import BNTrade, PositionStatus, TradingPhase
-from app.services import bn_trade
+from app.engine import orders as order_engine
+from app.models import MarketPhase
 from app.services.historical_data import fetch_indicator_history
+from app.services.instrument_discovery import discover_and_verify
 from app.services.market_data import MarketDataService
-from app.services.settings import BN_FUNDS_KEY
 from app.state import get_state
 
 if TYPE_CHECKING:
     from app.services.database import DatabaseService
-    from app.ws.dashboard_ws import DashboardWSManager
+    from app.ws.account_ws import AccountWSManager
+    from app.ws.market_ws import MarketWSManager
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -57,19 +56,11 @@ def _past(hour: int, minute: int) -> bool:
 
 async def _sleep_toward(hour: int, minute: int) -> None:
     """
-    Sleep TOWARD hour:minute in ≤30s chunks instead of one long sleep. The
+    Sleep TOWARD hour:minute in <=30s chunks instead of one long sleep. The
     phase driver re-evaluates its branch conditions every wake-up, so runtime
     changes to the session timings take effect within seconds.
     """
     await asyncio.sleep(min(_seconds_until(hour, minute), 30.0))
-
-
-_LEADER_HISTORY_BARS = 25   # covers both pattern (last 3) and qty-avg (last 20) window
-
-# ── Stock Candles panel (c.html port, unrelated to the BN trading strategy) ──
-_STOCK_TABLE_BARS   = 15   # bars per stock sent for the live candle table
-_NUM_SIGNAL_CANDLES = 3    # c.html's default `numCandles` for updateGlobalSignal
-_SR_15M_REFRESH_S   = 300  # c.html's own findSupportResistance runs infrequently too
 
 
 class SchedulerService:
@@ -77,104 +68,97 @@ class SchedulerService:
         self,
         db:          "DatabaseService",
         market_data: "MarketDataService",
-        ws_manager:  "DashboardWSManager",
+        market_ws:   "MarketWSManager",
+        account_ws:  "AccountWSManager",
     ) -> None:
-        self._db    = db
-        self._mkt   = market_data
-        self._ws    = ws_manager
+        self._db      = db
+        self._mkt     = market_data
+        self._mkt_ws  = market_ws
+        self._acct_ws = account_ws
         self._tasks: List[asyncio.Task] = []
-        # Once-per-day guards: the phase driver wakes every ≤30s (so timing
-        # settings are dynamic), so premarket/EOD must self-deduplicate by date.
-        self._premarket_date: str | None = None
-        self._eod_date:       str | None = None
+        # Once-per-day guard: the phase driver wakes every <=30s (so timing
+        # settings are dynamic), so square-off must self-deduplicate by date.
+        self._squareoff_date: str | None = None
+        self._instruments: List[Dict[str, str]] = []   # cached [{"token","name"}]
 
     async def start(self) -> None:
-        await self._load_funds()
+        await self._ensure_instruments()
+        # Load last-known candles immediately, independent of phase/live feed,
+        # so the UI has a last-close price to show even if the process starts
+        # while the market is CLOSED/PRE_MARKET (AppState is in-memory only
+        # and doesn't survive a restart). The OPEN-phase handler below still
+        # reloads + starts the feed on its own schedule.
+        await self._load_all_historical()
         self._tasks = [
             asyncio.create_task(self._phase_driver()),
-            asyncio.create_task(self._push_dashboard_loop()),
-            asyncio.create_task(self._push_tick_updates_loop()),
-            asyncio.create_task(self._refresh_15m_sr_loop()),
+            asyncio.create_task(self._tick_loop()),
+            asyncio.create_task(self._push_market_state_loop()),
         ]
 
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self._mkt.stop()
 
-    async def _load_funds(self) -> None:
-        st = get_state()
+    async def _ensure_instruments(self) -> None:
         try:
-            stored = await self._db.get_app_settings()
+            count = await self._db.count_instruments()
         except Exception as e:
-            print(f"Funds load failed (using default): {e}")
-            stored = {}
-        funds = stored.get(BN_FUNDS_KEY)
-        st.funds = float(funds) if isinstance(funds, (int, float)) else cfg.BN_STARTING_FUNDS
-
-    async def _persist_funds(self) -> None:
+            print(f"Instrument count check failed: {e}")
+            count = 0
+        if count == 0:
+            print("=== No tradable instruments on record — running discovery ===")
+            try:
+                rows = await discover_and_verify()
+                await self._db.upsert_instruments(rows)
+            except Exception as e:
+                print(f"Instrument discovery failed: {e}")
         try:
-            await self._db.set_app_settings({BN_FUNDS_KEY: get_state().funds})
+            rows = await self._db.get_tradable_instruments()
+            self._instruments = [{"token": r["token"], "name": r["name"]} for r in rows]
         except Exception as e:
-            print(f"Funds persist failed: {e}")
+            print(f"Loading tradable instruments failed: {e}")
+            self._instruments = []
 
     # ── Phase driver ──────────────────────────────────────────────────────────
 
     async def _phase_driver(self) -> None:
         st = get_state()
+        eod_date: str | None = None
         while True:
             try:
                 now = _now()
                 if now.weekday() >= 5:
+                    st.phase = MarketPhase.CLOSED
                     await asyncio.sleep(3600)
                     continue
 
                 h, m  = now.hour, now.minute
                 today = now.strftime("%Y-%m-%d")
 
-                if h < cfg.PREMARKET_HOUR or (h == cfg.PREMARKET_HOUR and m < cfg.PREMARKET_MIN):
-                    st.phase = TradingPhase.PRE_MARKET
-                    await _sleep_toward(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN)
-
-                elif h < cfg.MARKET_OPEN_HOUR or (h == cfg.MARKET_OPEN_HOUR and m < cfg.MARKET_OPEN_MIN):
-                    if self._premarket_date != today:
-                        st.phase = TradingPhase.PRE_MARKET
-                        self._premarket_date = today
+                if h < cfg.MARKET_OPEN_HOUR or (h == cfg.MARKET_OPEN_HOUR and m < cfg.MARKET_OPEN_MIN):
+                    st.phase = MarketPhase.PRE_MARKET
                     await _sleep_toward(cfg.MARKET_OPEN_HOUR, cfg.MARKET_OPEN_MIN)
 
-                elif h < cfg.SESSION_END_HOUR or (h == cfg.SESSION_END_HOUR and m < cfg.SESSION_END_MIN):
-                    if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
-                        st.phase = TradingPhase.CUTOFF
-                    elif _past(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN):
-                        st.phase = TradingPhase.ACTIVE
-                    else:
-                        st.phase = TradingPhase.WAIT_ZONE
-
-                    # Mid-session restart: rebuild today's trade/PnL state from
-                    # the DB BEFORE the WS starts.
-                    if not st.closed_trades and st.active_trade is None:
-                        await self._restore_from_db()
-
+                elif h < cfg.MARKET_CLOSE_HOUR or (h == cfg.MARKET_CLOSE_HOUR and m < cfg.MARKET_CLOSE_MIN):
+                    st.phase = MarketPhase.OPEN
                     if not self._mkt._running:
-                        st.api_status = "Recovery: loading historical data…"
-                        await self._run_wait_zone()
+                        await self._run_market_open()
 
-                    # Restore phase (the loads above can take a while).
-                    if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
-                        st.phase = TradingPhase.CUTOFF
-                    elif _past(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN):
-                        st.phase = TradingPhase.ACTIVE
-                    else:
-                        st.phase = TradingPhase.WAIT_ZONE
+                    if (_past(cfg.MIS_SQUAREOFF_HOUR, cfg.MIS_SQUAREOFF_MIN)
+                            and self._squareoff_date != today):
+                        await self._run_mis_squareoff()
+                        self._squareoff_date = today
 
-                    await self._run_active_phase()
+                    await asyncio.sleep(1)
 
                 else:
-                    st.phase = TradingPhase.CLOSED
-                    if self._eod_date != today:
+                    st.phase = MarketPhase.CLOSED
+                    if eod_date != today:
                         await self._run_eod()
-                        self._eod_date = today
-                    await _sleep_toward(cfg.PREMARKET_HOUR, cfg.PREMARKET_MIN)
+                        eod_date = today
+                    await _sleep_toward(cfg.MARKET_OPEN_HOUR, cfg.MARKET_OPEN_MIN)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -183,434 +167,103 @@ class SchedulerService:
 
     # ── Phase handlers ────────────────────────────────────────────────────────
 
-    async def _run_wait_zone(self) -> None:
-        st = get_state()
-        st.phase = TradingPhase.WAIT_ZONE
-        print("=== WAIT ZONE: Loading historical data ===")
+    async def _run_market_open(self) -> None:
+        print("=== MARKET OPEN: loading historical data + starting live feed ===")
         await self._load_all_historical()
-        if self._mkt._running:
-            await self._mkt.stop()
-        self._mkt.start()
+        self._mkt.start(self._instruments)
 
-    async def _run_active_phase(self) -> None:
-        """
-        Tick-wise engine. Every TICK_EVAL_INTERVAL_MS:
-          • Exit management for the active trade (always, if one is open).
-          • Entry evaluation the instant a NEW BankNifty 5m bar closes.
-        Only 7 instruments' RSI/MACD/EMA math — cheap enough to run directly
-        on the event loop, no thread pool needed (unlike the equity engine's
-        hundreds-of-symbols scan).
-        """
-        print("=== ACTIVE: tick-wise engine open ===")
+    async def _run_mis_squareoff(self) -> None:
         st = get_state()
-
-        while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
-            try:
-                if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
-                    st.phase = TradingPhase.CUTOFF
-                elif _past(cfg.SCAN_START_HOUR, cfg.SCAN_START_MIN):
-                    st.phase = TradingPhase.ACTIVE
-                else:
-                    st.phase = TradingPhase.WAIT_ZONE
-
-                await self._tick_exits()
-                await self._tick_entries()
-            except Exception as e:
-                print(f"Tick loop error: {e}")
-
-            await asyncio.sleep(max(0.0, cfg.TICK_EVAL_INTERVAL_MS / 1000.0))
-
-    async def _tick_exits(self) -> None:
-        st = get_state()
-        if st.active_trade is None or st.bn_index_ltp <= 0:
-            return
-        with st._bn_index_lock:
-            bn_candles = list(st.bn_index_candles_5m)
-        if not bn_candles:
-            return
-        closes = np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
-        lookback = closes[-cfg.BN_IV_LOOKBACK_BARS:] if closes.size > cfg.BN_IV_LOOKBACK_BARS else closes
+        price_lookup = dict(st.ltp)
         try:
-            closed = bn_trade.check_tick_exit(_now(), st.bn_index_ltp, lookback)
-            if closed:
-                await self._db.update_position_exit(
-                    order_id=closed.order_id, exit_price=closed.exit_index_price,
-                    exit_time=closed.exit_time, pnl=closed.pnl,
-                    exit_premium=closed.exit_premium,
-                )
-                await self._persist_funds()
+            events = await order_engine.eod_square_off_all_mis(self._db, price_lookup)
         except Exception as e:
-            print(f"Tick exit error: {e}")
-
-    async def _tick_entries(self) -> None:
-        st = get_state()
-        if st.phase != TradingPhase.ACTIVE or st.active_trade is not None:
+            print(f"MIS square-off error: {e}")
             return
-
-        with st._bn_index_lock:
-            bn_candles = list(st.bn_index_candles_5m)
-        if not bn_candles:
-            return
-
-        bar_time = bn_candles[-1].start_time
-        if bar_time == st.last_evaluated_bar:
-            return   # already evaluated this bar — wait for the NEXT close
-        st.last_evaluated_bar = bar_time
-
-        bn_recent = bn_candles[-max(20, cfg.BN_ATR_PERIOD + 5):]
-        closes = np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
-        bn_closes_lookback = closes[-cfg.BN_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.BN_INDICATOR_LOOKBACK_BARS else closes
-
-        leader_recent = {}
-        for name, token in cfg.BN_LEADER_STOCKS.items():
-            with st.candle_lock(token):
-                leader_recent[name] = list(st.candles_5m.get(token, []))[-_LEADER_HISTORY_BARS:]
-
-        last_exit_time = (datetime.fromisoformat(st.last_exit_time)
-                          if st.last_exit_time else None)
-        now = _now()
-        signal, diagnostic = evaluate_entry(now, bn_recent, bn_closes_lookback,
-                                            leader_recent, last_exit_time)
-        st.bn_diagnostic = diagnostic
-
-        if signal is None or signal.bar_time == st.last_trade_candle:
-            return
-
-        trade = bn_trade.place_paper_order(signal, now)
-        try:
-            await self._db.save_position(trade)
-        except Exception as e:
-            print(f"DB save_position error: {e}")
-
-    async def _restore_from_db(self) -> None:
-        """
-        Restart recovery: rebuild today's trade/P&L state from the DB, so the
-        60s cooldown and daily stats survive a crash.
-        """
-        st = get_state()
-        try:
-            rows = await self._db.get_today_positions()
-        except Exception as e:
-            print(f"Recovery: could not reload today's positions: {e}")
-            return
-        if not rows:
-            return
-
-        def _f(v) -> float:
-            return float(v) if v is not None else 0.0
-
-        for r in rows:
-            status = (PositionStatus(r["status"])
-                      if r.get("status") in ("OPEN", "CLOSED") else PositionStatus.OPEN)
-            trade = BNTrade(
-                direction=str(r.get("direction") or "BUY"),
-                entry_index_price=_f(r.get("entry_price")),
-                entry_time=str(r.get("entry_time") or ""),
-                target=_f(r.get("target")),
-                current_sl=_f(r.get("stop_loss")),
-                strike=int(r.get("strike") or 0),
-                option_type=str(r.get("option_type") or "CE"),
-                expiry=str(r.get("expiry") or ""),
-                entry_premium=_f(r.get("entry_premium")),
-                lot_size=int(r.get("quantity") or cfg.BN_LOT_SIZE),
-                order_id=str(r.get("order_id") or ""),
-                status=status,
-                exit_index_price=float(r["exit_price"]) if r.get("exit_price") is not None else None,
-                exit_time=r.get("exit_time"),
-                exit_premium=float(r["exit_premium"]) if r.get("exit_premium") is not None else None,
-                pnl=_f(r.get("pnl")),
-            )
-            if status == PositionStatus.CLOSED:
-                st.closed_trades.append(trade)
-                st.daily_pnl += trade.pnl
-                if trade.exit_time:
-                    st.last_exit_time = trade.exit_time
-            else:
-                st.active_trade = trade
-                st.last_trade_candle = trade.entry_time[:16]
-
-        print(
-            f"=== RECOVERY: restored {'1 open' if st.active_trade else '0 open'} / "
-            f"{len(st.closed_trades)} closed trades | daily P&L ₹{st.daily_pnl:+.2f} ==="
-        )
+        for ev in events:
+            user_id = ev.pop("user_id", None)
+            if user_id is not None:
+                await self._acct_ws.send_to_user(user_id, json.dumps(ev, default=str))
+        print(f"=== MIS square-off: {len(events)} position(s) closed ===")
 
     async def _run_eod(self) -> None:
-        st = get_state()
-
-        if not st.closed_trades and st.active_trade is None:
-            await self._restore_from_db()
-
-        if st.active_trade is not None and st.bn_index_ltp > 0:
-            with st._bn_index_lock:
-                bn_candles = list(st.bn_index_candles_5m)
-            if bn_candles:
-                closes = np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
-                lookback = closes[-cfg.BN_IV_LOOKBACK_BARS:] if closes.size > cfg.BN_IV_LOOKBACK_BARS else closes
-                closed = bn_trade.force_close(_now(), st.bn_index_ltp, lookback)
-                if closed:
-                    try:
-                        await self._db.update_position_exit(
-                            order_id=closed.order_id, exit_price=closed.exit_index_price,
-                            exit_time=closed.exit_time, pnl=closed.pnl,
-                            exit_premium=closed.exit_premium,
-                        )
-                    except Exception as e:
-                        print(f"EOD square-off DB error: {e}")
-
+        print("=== EOD: stopping live feed for the day ===")
         await self._mkt.stop()
-        await self._persist_funds()
-
-        # Grow our own BankNifty history archive (see save_bn_index_bars) —
-        # the external server never gives us more than "today", so this is
-        # the only way multi-day backtesting becomes possible over time.
-        with st._bn_index_lock:
-            bn_snapshot = list(st.bn_index_candles_5m)
-        if bn_snapshot:
-            try:
-                await self._db.save_bn_index_bars(bn_snapshot)
-            except Exception as e:
-                print(f"BN index history save error: {e}")
-
-        trades  = st.closed_trades
-        total   = len(trades)
-        winners = sum(1 for t in trades if t.pnl > 0)
-
-        peak = cum = max_dd = 0.0
-        for t in sorted(trades, key=lambda x: (x.exit_time or "")):
-            cum += t.pnl
-            peak = max(peak, cum)
-            max_dd = max(max_dd, peak - cum)
-
-        if total > 0 or st.daily_pnl != 0.0:
-            try:
-                await self._db.upsert_daily_stats(
-                    total_trades=total, winning_trades=winners,
-                    total_pnl=st.daily_pnl, gemini_shortlist=None,
-                    max_drawdown=round(max_dd, 2),
-                )
-            except Exception as e:
-                print(f"EOD stats error: {e}")
-        else:
-            print("=== EOD: no session state in this process — daily_stats write skipped ===")
-
-        print(f"=== EOD: {total} trades | {winners} winners | Daily PnL ₹{st.daily_pnl:+.2f} ===")
-
-        st.active_trade = None
-        st.closed_trades.clear()
-        st.last_trade_candle = None
-        st.last_exit_time = None
-        st.last_evaluated_bar = None
-        st.bn_diagnostic = None
-        st.daily_pnl = 0.0
-        st.ltp.clear()
-        st.candles_5m.clear()
-        # bn_index_candles_5m is intentionally NOT cleared here — see
-        # _load_all_historical: this market-data server has no historical
-        # ARCHIVE for the BankNifty index (confirmed empirically — every
-        # from_date/to_date range returns only the current day's bars,
-        # unlike individual stocks and NIFTY 50, which both return full
-        # multi-day history). The composite indicator gate needs
-        # BN_INDICATOR_LOOKBACK_BARS (default 200) bars to converge, so the
-        # ONLY way to ever have that much BankNifty history is to let live
-        # WS ticks accumulate across real trading days (capped at
-        # MAX_CANDLE_BUFFER=300, ~4 sessions) — clearing it nightly would
-        # mean the gate never converges, ever.
 
     # ── Historical data loader ────────────────────────────────────────────────
 
     async def _load_all_historical(self) -> None:
-        """
-        Loads 5 days of history for the 11 BN stocks (fully archived on this
-        server) and merges TODAY's BankNifty bars into whatever's already
-        accumulated in bn_index_candles_5m from prior live sessions — the
-        BankNifty history fetch itself only ever returns today (see the note
-        in _run_eod), so this is a same-day upsert, never a multi-day load.
-        """
         st = get_state()
+        if not self._instruments:
+            return
+        watchlist = {i["name"]: i["token"] for i in self._instruments}
         try:
-            hist = await fetch_indicator_history(cfg.BN_ALL_STOCKS, cfg.INTERVAL_5M, days_back=5)
-            for token_key, candles in hist.items():
-                st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
-                st.tick_version[token_key] = st.tick_version.get(token_key, 0) + 1
-
-            bn_hist = await fetch_indicator_history(
-                {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, cfg.INTERVAL_5M, days_back=1)
-            bn_today = bn_hist.get(cfg.BN_INDEX_TOKEN, [])
-            with st._bn_index_lock:
-                # Upsert (not replace) — reuses MarketDataService's own merge
-                # logic so there's exactly ONE implementation of "how a
-                # BankNifty bar gets folded into bn_index_candles_5m",
-                # whether it arrives via this REST catch-up or a live WS tick.
-                for c in bn_today:
-                    MarketDataService._upsert_list(st.bn_index_candles_5m, c)
-                if len(st.bn_index_candles_5m) > cfg.MAX_CANDLE_BUFFER:
-                    del st.bn_index_candles_5m[:len(st.bn_index_candles_5m) - cfg.MAX_CANDLE_BUFFER]
-
+            hist = await fetch_indicator_history(watchlist, cfg.INTERVAL_5M, days_back=5)
+            for token, candles in hist.items():
+                st.candles_5m[token] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
+                st.tick_version[token] = st.tick_version.get(token, 0) + 1
             st.api_status = "API OK"
-            print(f"Historical load complete: {len(st.candles_5m)} stocks | "
-                  f"BankNifty buffer now {len(st.bn_index_candles_5m)} bars")
+            print(f"Historical load complete: {len(hist)}/{len(self._instruments)} instruments")
         except Exception as e:
             st.api_status = f"Load error: {e}"
             print(f"Historical load error: {e}")
 
-    # ── 15m support/resistance refresh (Stock Candles panel only) ────────────
+    # ── Tick loop: limit-order matching + live-price ticker delta ────────────
+    # ONE consumer of dirty_ticks_push (draining it in two different loops
+    # would race over who gets which tokens each cycle) — every dirty token
+    # is checked against resting LIMIT orders AND folded into the broadcast
+    # delta, in the same pass.
 
-    async def _refresh_15m_sr_loop(self) -> None:
-        """
-        Port of c.html's findSupportResistance — computes 5m/15m support &
-        resistance for the Stock Candles panel. Unlike c.html (which re-fetches
-        BOTH intervals from scratch), this only fetches 15m here: 5m candles
-        are already resident in AppState (candles_5m/bn_index_candles_5m),
-        computed on the fly in _build_payload. Infrequent by design, matching
-        c.html's own occasional (not tick-wise) S/R refresh.
-        """
+    async def _tick_loop(self) -> None:
         st = get_state()
         while True:
             try:
-                if st.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
-                    hist = await fetch_indicator_history(cfg.BN_ALL_STOCKS, "15m", days_back=7)
-                    bn_hist = await fetch_indicator_history(
-                        {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, "15m", days_back=1)
-                    hist.update(bn_hist)
-                    levels = {
-                        token: bn_breakout.detect_support_resistance(candles)
-                        for token, candles in hist.items() if candles
-                    }
-                    st.sr_15m_levels = levels
-            except Exception as e:
-                print(f"15m S/R refresh error: {e}")
-            await asyncio.sleep(_SR_15M_REFRESH_S)
-
-    # ── Dashboard broadcast ───────────────────────────────────────────────────
-
-    async def _push_dashboard_loop(self) -> None:
-        while True:
-            try:
-                if self._ws.count() > 0:
-                    await self._ws.broadcast(json.dumps(self._build_payload(), default=str))
-            except Exception as e:
-                print(f"Dashboard push error: {e}")
-            await asyncio.sleep(1)
-
-    def _collect_all_candles(self, st) -> dict:
-        """BankNifty index + all 11 BN stocks, keyed by TOKEN — for the Stock
-        Candles panel (breakout/S-R/global-signal), unrelated to the BN
-        trading strategy's own candle reads elsewhere in this file."""
-        out = {}
-        with st._bn_index_lock:
-            out[cfg.BN_INDEX_TOKEN] = list(st.bn_index_candles_5m)
-        for token in cfg.BN_ALL_STOCKS.values():
-            with st.candle_lock(token):
-                out[token] = list(st.candles_5m.get(token, []))
-        return out
-
-    def _build_payload(self) -> dict:
-        st = get_state()
-        clock = _now().strftime("%H:%M:%S")
-
-        def _trade_dict(t) -> dict:
-            return {
-                "direction": t.direction, "entryIndexPrice": t.entry_index_price,
-                "entryTime": t.entry_time, "target": t.target, "currentSl": t.current_sl,
-                "slStage": t.sl_stage, "strike": t.strike, "optionType": t.option_type,
-                "expiry": t.expiry, "entryPremium": t.entry_premium,
-                "lotSize": t.lot_size, "orderId": t.order_id, "status": t.status.value,
-                "exitIndexPrice": t.exit_index_price, "exitTime": t.exit_time,
-                "exitPremium": t.exit_premium, "pnl": t.pnl,
-                "indexPnlPoints": t.index_pnl_points, "confidence": t.confidence,
-                "currentPremium": t.current_premium, "currentIv": t.current_iv,
-            }
-
-        active = None
-        if st.active_trade is not None:
-            active = _trade_dict(st.active_trade)
-            active["currentIndexPrice"] = st.bn_index_ltp
-
-        diag = None
-        if st.bn_diagnostic is not None:
-            d = st.bn_diagnostic
-            diag = {
-                "time": d.time, "bnLtp": d.bn_ltp, "green": d.green, "red": d.red,
-                "strongQty": d.strong_qty, "leaderRows": d.leader_rows,
-                "leaderSignal": d.leader_signal, "sidewaysRange": d.sideways_range,
-                "momentumOk": d.momentum_ok, "momentumReason": d.momentum_reason,
-                "rsi": d.rsi, "macdDir": d.macd_dir, "macdVal": d.macd_val,
-                "emaBullish": d.ema_bullish, "emaBearish": d.ema_bearish,
-                "bnBull": d.bn_bull, "bnBear": d.bn_bear,
-                "bnBullish": d.bn_bullish, "bnBearish": d.bn_bearish,
-                "noTradeReason": d.no_trade_reason, "atmStrike": d.atm_strike,
-                "atmPremium": d.atm_premium, "atmIv": d.atm_iv,
-            }
-
-        # ── Stock Candles panel data (breakout banner / weighted global signal /
-        # S-R table) — a c.html UI-parity port, entirely separate from the BN
-        # trading strategy above; token_to_name only exists for serializing
-        # these token-keyed computations back to the name-keyed shape the
-        # frontend/rest of this payload already uses. ─────────────────────────
-        all_candles = self._collect_all_candles(st)
-        bn_candles  = all_candles.get(cfg.BN_INDEX_TOKEN, [])
-        token_to_name = {cfg.BN_INDEX_TOKEN: cfg.BN_INDEX_NAME,
-                        **{tok: name for name, tok in cfg.BN_ALL_STOCKS.items()}}
-
-        breakout = bn_breakout.compute_breakout_prediction(bn_candles, all_candles)
-
-        column_counts   = bn_breakout.compute_column_counts(all_candles, _NUM_SIGNAL_CANDLES)
-        latest_by_token = {tok: c[-1] for tok, c in all_candles.items() if c}
-        global_signal   = bn_breakout.compute_global_signal(column_counts, latest_by_token, cfg.BN_INDEX_TOKEN)
-
-        stock_candles = {
-            token_to_name.get(tok, tok): [
-                {"startTime": c.start_time, "open": c.open, "close": c.close,
-                 "high": c.high, "low": c.low, "volume": c.volume}
-                for c in candles[-_STOCK_TABLE_BARS:]
-            ]
-            for tok, candles in all_candles.items()
-        }
-        sr_levels = {
-            token_to_name.get(tok, tok): {
-                "m5":  bn_breakout.detect_support_resistance(candles),
-                "m15": st.sr_15m_levels.get(tok, {"supports": [], "resistances": []}),
-            }
-            for tok, candles in all_candles.items()
-        }
-
-        return {
-            "type":         "STATE_UPDATE",
-            "clock":        clock,
-            "phase":        st.phase.value,
-            "wsStatus":     st.ws_status,
-            "apiStatus":    st.api_status,
-            "bnLtp":        st.bn_index_ltp,
-            "dailyPnl":     round(st.daily_pnl, 2),
-            "funds":        round(st.funds, 2),
-            "activeTrade":  active,
-            "closedTrades": [_trade_dict(t) for t in st.closed_trades],
-            "entryLoop":    diag,
-            "stockCandles": stock_candles,
-            "globalSignal": global_signal,
-            "breakout":     breakout,
-            "srLevels":     sr_levels,
-        }
-
-    async def _push_tick_updates_loop(self) -> None:
-        """Live-price ticker delta — every ~100ms in all active/wait/cutoff phases."""
-        st = get_state()
-        while True:
-            try:
-                if (self._ws.count() > 0
-                        and st.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF)):
+                if st.phase == MarketPhase.OPEN:
                     dirty, st.dirty_ticks_push = st.dirty_ticks_push, set()
                     if dirty:
-                        prices = {}
-                        if cfg.BN_INDEX_TOKEN in dirty:
-                            prices[cfg.BN_INDEX_NAME] = st.bn_index_ltp
-                        for sym in cfg.BN_ALL_STOCKS:
-                            if cfg.BN_ALL_STOCKS[sym] in dirty:
-                                prices[sym] = st.ltp.get(sym, 0.0)
-                        if prices:
-                            await self._ws.broadcast(
-                                json.dumps({"type": "TICK_UPDATE", "prices": prices}, default=str)
+                        await self._match_limit_orders(dirty)
+                        if self._mkt_ws.count() > 0:
+                            prices = {tok: st.ltp.get(tok, 0.0) for tok in dirty}
+                            await self._mkt_ws.broadcast(
+                                json.dumps({"type": "WATCHLIST_TICK", "prices": prices}, default=str)
                             )
             except Exception as e:
-                print(f"Tick delta push error: {e}")
-            await asyncio.sleep(0.1)
+                print(f"Tick loop error: {e}")
+            await asyncio.sleep(max(0.01, cfg.TICK_EVAL_INTERVAL_MS / 1000.0))
+
+    async def _match_limit_orders(self, tokens: set) -> None:
+        st = get_state()
+        for token in tokens:
+            ltp = st.ltp.get(token, 0.0)
+            if ltp <= 0:
+                continue
+            try:
+                events = await order_engine.match_pending_limit_orders(self._db, token, ltp)
+            except Exception as e:
+                print(f"Limit-match error for {token}: {e}")
+                continue
+            for ev in events:
+                order = ev.get("order")
+                if order:
+                    await self._acct_ws.send_to_user(order["user_id"], json.dumps(ev, default=str))
+
+    # ── Shared market-data broadcast (public, no auth) ────────────────────────
+
+    async def _push_market_state_loop(self) -> None:
+        while True:
+            try:
+                if self._mkt_ws.count() > 0:
+                    await self._mkt_ws.broadcast(json.dumps(self._build_market_payload(), default=str))
+            except Exception as e:
+                print(f"Market state push error: {e}")
+            await asyncio.sleep(1)
+
+    def _build_market_payload(self) -> Dict[str, Any]:
+        st = get_state()
+        return {
+            "type":      "MARKET_STATE",
+            "clock":     _now().strftime("%H:%M:%S"),
+            "phase":     st.phase.value,
+            "wsStatus":  st.ws_status,
+            "apiStatus": st.api_status,
+        }

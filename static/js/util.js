@@ -1,10 +1,74 @@
 'use strict';
 
 // ── Shared page utilities ──────────────────────────────────────────────────────
-// Included by every page BEFORE its page script (index/dashboard.js,
-// settings/settings.js). Keep helpers that must behave identically across
-// pages here — duplicating them per page lets a fix land on one page and
-// miss the others.
+// Included by every page BEFORE its page script. Keep helpers that must
+// behave identically across pages here — duplicating them per page lets a
+// fix land on one page and miss the others.
+
+// ── JSON fetch wrapper — throws Error(message) on any non-2xx response,
+// using the server's {detail} body when present (FastAPI's HTTPException
+// shape) so callers can just try/catch and toast the message. ─────────────────
+async function apiFetch(url, opts) {
+  const res = await fetch(url, Object.assign({
+    headers: { 'Content-Type': 'application/json' },
+  }, opts || {}));
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* no/invalid JSON body */ }
+  if (!res.ok) {
+    const msg = (body && (body.detail || body.message)) || (res.status + ' ' + res.statusText);
+    throw new Error(msg);
+  }
+  return body;
+}
+
+function apiGet(url) { return apiFetch(url); }
+function apiPost(url, data) { return apiFetch(url, { method: 'POST', body: JSON.stringify(data || {}) }); }
+function apiDelete(url) { return apiFetch(url, { method: 'DELETE' }); }
+
+// ── WebSocket connect-with-reconnect — every page's live channel(s) use this
+// same shape (3s backoff, JSON-parsed messages dispatched to onMessage). ────────
+function connectWS(path, onMessage, onStatus) {
+  let ws = null;
+  let reconnectTimer = null;
+  let closedByCaller = false;
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(proto + '://' + location.host + path);
+    ws.onopen = function () {
+      clearTimeout(reconnectTimer);
+      if (onStatus) onStatus('Connected');
+    };
+    ws.onmessage = function (e) {
+      try { onMessage(JSON.parse(e.data)); } catch (err) { console.error(err); }
+    };
+    ws.onclose = ws.onerror = function () {
+      if (onStatus) onStatus('Disconnected');
+      if (!closedByCaller) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 3000);
+      }
+    };
+  }
+  connect();
+  return {
+    close: function () { closedByCaller = true; clearTimeout(reconnectTimer); if (ws) ws.close(); },
+  };
+}
+
+// ── Number/date formatters shared across every table/panel ─────────────────────
+function fmt2(n) {
+  return (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtInt(n) { return (Number(n) || 0).toLocaleString('en-IN'); }
+function fmtDT(s) {
+  if (!s) return '—';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return escHtml(s);
+  return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function pnlClass(v) { return v > 0 ? 'pnl-pos' : (v < 0 ? 'pnl-neg' : ''); }
+function pnlSign(v) { return (v > 0 ? '+' : '') + fmt2(v); }
 
 // HTML-escape for interpolating untrusted text (stock symbols, setting values)
 // into innerHTML templates.
@@ -56,6 +120,8 @@ function toast(msg, type, ms) {
 // points: [[label, value], ...]. Renders an area+line with gridlines, a zero
 // baseline (when the range crosses zero) and a hover crosshair + tooltip.
 // fmt(value) formats the tooltip figure. Returns nothing; paints into `container`.
+var _chartGradSeq = 0;
+
 function lineChart(container, points, opts) {
   opts = opts || {};
   const fmt = opts.fmt || function (v) { return String(v); };
@@ -116,14 +182,46 @@ function lineChart(container, points, opts) {
     d += (i === 0 ? 'M' : 'L') + px.toFixed(1) + ' ' + py.toFixed(1) + ' ';
   });
   area = d + 'L' + x(n - 1).toFixed(1) + ' ' + (H - PB) + ' L' + x(0).toFixed(1) + ' ' + (H - PB) + ' Z';
+
+  // Top-to-bottom fade instead of a flat tint — reads as depth, not a flat swatch.
+  const gradId = 'chartGrad' + (++_chartGradSeq);
+  const defs = document.createElementNS(NS, 'defs');
+  const grad = document.createElementNS(NS, 'linearGradient');
+  grad.setAttribute('id', gradId);
+  grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0');
+  grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
+  const stop1 = document.createElementNS(NS, 'stop');
+  stop1.setAttribute('offset', '0%'); stop1.style.stopColor = col; stop1.style.stopOpacity = '0.32';
+  const stop2 = document.createElementNS(NS, 'stop');
+  stop2.setAttribute('offset', '100%'); stop2.style.stopColor = col; stop2.style.stopOpacity = '0';
+  grad.appendChild(stop1); grad.appendChild(stop2);
+  defs.appendChild(grad);
+  svg.appendChild(defs);
+
   const areaEl = document.createElementNS(NS, 'path');
   areaEl.setAttribute('class', 'area-fill'); areaEl.setAttribute('d', area);
-  areaEl.style.fill = col;   // .style resolves var(); a presentation attr would not
+  areaEl.style.fill = 'url(#' + gradId + ')';
+  areaEl.style.opacity = '1';
   svg.appendChild(areaEl);
   const lineEl = document.createElementNS(NS, 'path');
   lineEl.setAttribute('class', 'line-path'); lineEl.setAttribute('d', d);
   lineEl.style.stroke = col;
   svg.appendChild(lineEl);
+
+  // Persistent last-price marker — dashed line to the right edge + a dot,
+  // the classic "current level" readout on a live-price terminal chart.
+  const lastX = x(n - 1), lastY = y(vals[n - 1]);
+  const lastLine = document.createElementNS(NS, 'line');
+  lastLine.setAttribute('class', 'chart-last-line');
+  lastLine.setAttribute('x1', PL); lastLine.setAttribute('x2', W - PR);
+  lastLine.setAttribute('y1', lastY); lastLine.setAttribute('y2', lastY);
+  lastLine.style.stroke = col;
+  svg.appendChild(lastLine);
+  const lastDot = document.createElementNS(NS, 'circle');
+  lastDot.setAttribute('class', 'chart-last-dot');
+  lastDot.setAttribute('cx', lastX); lastDot.setAttribute('cy', lastY); lastDot.setAttribute('r', 3.5);
+  lastDot.style.fill = col;
+  svg.appendChild(lastDot);
 
   // crosshair + hover dot
   const cross = document.createElementNS(NS, 'line');

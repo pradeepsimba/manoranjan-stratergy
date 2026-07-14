@@ -3,6 +3,5 @@ uvicorn[standard]
 websockets
 httpx
 asyncpg
-numpy
-TA-Lib
+itsdangerous
 python-dotenv

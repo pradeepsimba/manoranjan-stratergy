@@ -7,6 +7,7 @@ services:
       # Connects to PostgreSQL running on the host machine.
       # host.docker.internal resolves to the host via the mapping below (Linux).
       POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://postgres:postgres@host.docker.internal:5432/trading_db}
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-to-a-long-random-string}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
