@@ -106,7 +106,6 @@ app/api/dashboard.py          REST + WS endpoints (/api/status, /api/backtest[/{
 app/ws/dashboard_ws.py        browser WS broadcast manager
 static/                       index.html, settings.html, css/dashboard.css
   js/dashboard.js              WS connect/render loop, backtest UI, local IndexedDB trade log, CSV export, auto-screenshot, Trade Conditions modal
-  js/clock.js                  analog IST clock — pure client-side, c.html port
   js/breakout.js                Stock Candles panel renderer (global signal / breakout banner / 12-stock candle table / S-R table)
   js/qtyAudit.js                Big Trades qty-audit — browser-local IndexedDB tick log, fed by TICK_UPDATE
   js/kiteForm.js                Kite manual-order form — DECORATIVE ONLY (c.html port), never calls the real paper-trading engine

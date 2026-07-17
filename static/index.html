@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
-  <link rel="stylesheet" href="/css/dashboard.css">
+  <link rel="stylesheet" href="/css/dashboard.css?v=4">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -100,7 +100,6 @@
   </div>
 
   <div class="clock-wrap">
-    <div class="analog-face analog-face-sm" id="analog-face"></div>
     <div>
       <div id="clock" class="clock">—:—:—</div>
       <div class="clock-sub">IST</div>
@@ -246,15 +245,18 @@
 
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Big Trades — Qty Audit (browser-only)</span>
-        <button class="btn-mini" onclick="auditStockQtyStorage()">DB Check</button>
+        <span class="panel-title">🔥 Big Trades <span id="bigtrade-status" class="muted-text">Loading...</span></span>
+        <div>
+          <button class="btn-mini" onclick="auditStockQtyStorage()">DB Check</button>
+          <button class="dash-toggle" data-target="bigtrade-body" onclick="toggleSection(this)">▼</button>
+        </div>
       </div>
-      <div class="panel-body">
-        <div class="tbl-wrap">
-          <table class="cardify">
-            <thead><tr><th>Stock</th><th>Bucket</th><th>Qty (Σ ticks)</th></tr></thead>
+      <div class="panel-body dash-body" id="bigtrade-body">
+        <div class="tbl-wrap" style="overflow-x:auto">
+          <table id="bigtrade-table">
+            <thead id="bigtrade-thead"></thead>
             <tbody id="bigtrade-tbody">
-              <tr><td colspan="3" class="empty-cell">Waiting for ticks…</td></tr>
+              <tr><td class="empty-cell">Waiting for ticks…</td></tr>
             </tbody>
           </table>
         </div>
@@ -407,11 +409,10 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="/js/util.js"></script>
-<script src="/js/clock.js"></script>
-<script src="/js/breakout.js"></script>
-<script src="/js/qtyAudit.js"></script>
-<script src="/js/kiteForm.js"></script>
-<script src="/js/dashboard.js"></script>
+<script src="/js/util.js?v=4"></script>
+<script src="/js/breakout.js?v=4"></script>
+<script src="/js/qtyAudit.js?v=4"></script>
+<script src="/js/kiteForm.js?v=4"></script>
+<script src="/js/dashboard.js?v=4"></script>
 </body>
 </html>

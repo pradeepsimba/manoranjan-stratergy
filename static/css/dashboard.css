@@ -182,7 +182,7 @@ body {
   flex-wrap: wrap;
 }
 
-.clock-wrap { display: flex; align-items: center; gap: 10px; text-align: right; flex-shrink: 0; }
+.clock-wrap { text-align: right; flex-shrink: 0; }
 
 .clock {
   font-size: 21px;
@@ -922,41 +922,6 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 .dash-toggle:hover { color: var(--prime); }
 .dash-collapsed .dash-body { display: none; }
 
-/* ── Analog clock face ────────────────────────────────────────────────────── */
-.analog-face {
-  position: relative; width: 150px; height: 150px; border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, var(--surf-high), var(--surf-raised) 70%);
-  border: 2px solid var(--edge); box-shadow: var(--sh-3);
-}
-.analog-tick {
-  position: absolute; left: 50%; top: 50%; width: 2px; height: 6px;
-  background: var(--txt-3); transform-origin: 50% 0;
-}
-.analog-tick.hour { height: 10px; width: 3px; background: var(--txt-2); }
-.analog-hand {
-  position: absolute; left: 50%; top: 50%; transform-origin: 50% 100%;
-  border-radius: 3px; background: var(--txt);
-}
-.analog-hand.hour   { width: 4px; height: 38px; margin-top: -38px; margin-left: -2px; }
-.analog-hand.minute { width: 3px; height: 54px; margin-top: -54px; margin-left: -1.5px; }
-.analog-hand.second { width: 1.5px; height: 60px; margin-top: -60px; margin-left: -.75px; background: var(--accent-2); }
-/* Small header clock (top-right, next to the digital time) — hands/ticks
-   scaled down, no minute ticks/numbers (see clock.js's `small` branch). */
-.analog-face-sm {
-  width: 46px; height: 46px; flex-shrink: 0; border-width: 1px;
-}
-.analog-face-sm .analog-tick { height: 3px; width: 1px; }
-.analog-face-sm .analog-tick.hour { height: 5px; width: 1.5px; }
-.analog-face-sm .analog-hand.hour   { width: 2px; height: 11px; margin-top: -11px; margin-left: -1px; }
-.analog-face-sm .analog-hand.minute { width: 1.5px; height: 16px; margin-top: -16px; margin-left: -.75px; }
-.analog-face-sm .analog-hand.second { width: 1px; height: 18px; margin-top: -18px; margin-left: -.5px; }
-.analog-face-sm .analog-cap { width: 5px; height: 5px; margin-left: -2.5px; margin-top: -2.5px; }
-
-.analog-cap {
-  position: absolute; left: 50%; top: 50%; width: 10px; height: 10px;
-  margin-left: -5px; margin-top: -5px; border-radius: 50%;
-  background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2);
-}
 
 /* ── Stock Candles panel: live 12-stock table + global signal + breakout ──── */
 .global-signal-badge {

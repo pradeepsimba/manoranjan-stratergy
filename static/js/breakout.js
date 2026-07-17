@@ -82,9 +82,18 @@ function renderStockCandles(stockCandles) {
   const names = Object.keys(stockCandles);
   _lastStockOrder = names;
   _lastOpenByStock = {};
+  // Shared with qtyAudit.js (window-level, no module system here) — the
+  // WS feed's TICK_UPDATE only ever carries LTP, never a per-tick trade
+  // quantity, so the Big Trades panel uses each stock's latest 5m bar
+  // volume (real, non-zero) as the closest available "quantity" proxy —
+  // the same substitution this app already makes for the qty-surge gate.
+  window._lastVolumeByStock = window._lastVolumeByStock || {};
   names.forEach(n => {
     const bars = stockCandles[n] || [];
-    if (bars.length) _lastOpenByStock[n] = bars[bars.length - 1].open;
+    if (bars.length) {
+      _lastOpenByStock[n] = bars[bars.length - 1].open;
+      window._lastVolumeByStock[n] = bars[bars.length - 1].volume;
+    }
   });
   const maxBars = Math.max(0, ...names.map(n => (stockCandles[n] || []).length));
 
