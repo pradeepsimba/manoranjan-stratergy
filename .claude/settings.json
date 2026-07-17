@@ -63,7 +63,9 @@
       "Bash(timeout 30 python \"C:\\\\Users\\\\VIGNES~1.263\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Vigneshvaran-2632-Desktop-manoranjan-stratergy\\\\f76ea1d9-c516-45e6-b761-1075f476183c\\\\scratchpad\\\\peek_ws.py\")",
       "Bash(curl -s -c /tmp/altocookies.txt -X POST http://localhost:8001/api/auth/register -H \"Content-Type: application/json\" -d '{\"username\":\"diagtest_ws\",\"password\":\"diagtest12345\"}' -D -)",
       "Bash(python -c \"import starlette; print\\(starlette.__version__\\)\")",
-      "Bash(curl -s http://localhost:8001/api/auth/me -H \"Cookie: session=eyJ1c2VyX2lkIjogMzR9.alnIUw.EmQQf_L1QOsm8ItHh3Jsdz-TBeo\")"
+      "Bash(curl -s http://localhost:8001/api/auth/me -H \"Cookie: session=eyJ1c2VyX2lkIjogMzR9.alnIUw.EmQQf_L1QOsm8ItHh3Jsdz-TBeo\")",
+      "Bash(timeout 5 curl -s -N \"ws://localhost:8001/ws/market\")",
+      "Bash(echo \"exit=$?\")"
     ],
     "deny": []
   },

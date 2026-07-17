@@ -43,7 +43,7 @@ _LTP_PAT = re.compile(r"LTP\s*([\d.]+)")
 _SNAP_QTY_PAT  = re.compile(r"\bQty\s+(\d+)")
 _SNAP_BUY_PAT  = re.compile(r"BuyQty\s+(\d+)")
 _SNAP_SELL_PAT = re.compile(r"SellQty\s+(\d+)")
-_SNAP_OI_PAT   = re.compile(r"\bOI\s+(\d+)")
+_SNAP_OI_PAT   = re.compile(r"\bOI\s+(\d+)\s*\(([-\d.]+)%\)")
 _SNAP_UC_PAT   = re.compile(r"\bUC\s+([\d.]+)")
 _SNAP_LC_PAT   = re.compile(r"\bLC\s+([\d.]+)")
 _SNAP_ROW_PAT  = re.compile(r"\d+\)\s+([\d.]+)\s+x\s+(\d+)")
@@ -66,11 +66,13 @@ def _parse_snap(snap: str) -> Optional[Dict[str, Any]]:
         return cast(m.group(1)) if m else None
 
     try:
+        oi_match = _SNAP_OI_PAT.search(header)
         return {
             "ltpQty":       _search(_SNAP_QTY_PAT, int),
             "buyQty":       _search(_SNAP_BUY_PAT, int),
             "sellQty":      _search(_SNAP_SELL_PAT, int),
-            "oi":           _search(_SNAP_OI_PAT, int),
+            "oi":           int(oi_match.group(1))   if oi_match else None,
+            "oiChangePct":  float(oi_match.group(2)) if oi_match else None,
             "upperCircuit": _search(_SNAP_UC_PAT, float),
             "lowerCircuit": _search(_SNAP_LC_PAT, float),
             "bids": [{"price": float(p), "qty": int(q)} for p, q in _SNAP_ROW_PAT.findall(bids_section)],

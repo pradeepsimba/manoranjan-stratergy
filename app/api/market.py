@@ -141,7 +141,7 @@ def get_depth(token: str) -> Dict[str, Any]:
     — see MarketDataService._parse_snap for how this is derived from the feed."""
     st = get_state()
     d = st.depth.get(token)
-    return d or {"ltpQty": None, "buyQty": None, "sellQty": None, "oi": None,
+    return d or {"ltpQty": None, "buyQty": None, "sellQty": None, "oi": None, "oiChangePct": None,
                  "upperCircuit": None, "lowerCircuit": None, "bids": [], "asks": []}
 
 

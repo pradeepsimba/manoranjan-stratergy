@@ -68,12 +68,32 @@ function selectInstrument(token) {
 }
 
 // ── Market depth ("snap") panel for whichever instrument is selected ────────
+// Surfaces every field the feed's "snap" string carries: 5-level bid/ask
+// book, cumulative buy/sell qty, open interest (+ its day change %), and the
+// upper/lower circuit price band. (The feed's separate "quote"/"ltp" fields
+// carry no information beyond what's already in "snap" plus the scalar LTP
+// this app already tracks, so there's nothing further to parse out of those.)
+
+function _depthStatsHtml(d) {
+  var items = [
+    ['Buy Qty',  d.buyQty  != null ? fmtInt(d.buyQty)  : '—'],
+    ['Sell Qty', d.sellQty != null ? fmtInt(d.sellQty) : '—'],
+    ['OI',       d.oi != null ? fmtInt(d.oi) + (d.oiChangePct != null ? ' (' + pnlSign(d.oiChangePct) + '%)' : '') : '—'],
+    ['Upper Circuit', d.upperCircuit != null ? fmt2(d.upperCircuit) : '—'],
+    ['Lower Circuit', d.lowerCircuit != null ? fmt2(d.lowerCircuit) : '—'],
+  ];
+  return items.map(function (it) {
+    return '<div class="ohlc-item"><span class="ohlc-lbl">' + it[0] + '</span><span class="ohlc-val">' + it[1] + '</span></div>';
+  }).join('');
+}
 
 function _depthPanelHtml(d) {
-  var bids = (d && d.bids) || [];
-  var asks = (d && d.asks) || [];
+  if (!d) return '<div class="depth-empty">No depth data yet</div>';
+  var bids = d.bids || [];
+  var asks = d.asks || [];
+  var statsHtml = '<div class="depth-stats">' + _depthStatsHtml(d) + '</div>';
   if (!bids.length && !asks.length) {
-    return '<div class="depth-empty">No depth data yet</div>';
+    return statsHtml + '<div class="depth-empty">No order-book levels yet</div>';
   }
   var rows = Math.max(bids.length, asks.length);
   var bidHtml = '<div class="depth-col-hdr">Bids (price × qty)</div>';
@@ -87,7 +107,7 @@ function _depthPanelHtml(d) {
       (a ? '<span class="depth-price">' + fmt2(a.price) + '</span><span class="depth-qty">' + a.qty + '</span>' : '') +
     '</div>';
   }
-  return bidHtml + askHtml;
+  return statsHtml + '<div class="depth-grid">' + bidHtml + askHtml + '</div>';
 }
 
 async function loadDepth(token) {

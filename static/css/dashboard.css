@@ -488,15 +488,17 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .ohlc-lbl { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--txt-3); }
 .ohlc-val { font-size: 12px; font-weight: 600; color: var(--txt); font-variant-numeric: tabular-nums; }
 
-/* ── Market depth (5-level bid/ask "snap") ─────────────────────────────────── */
-.depth-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--edge-soft); }
+/* ── Market depth (5-level bid/ask "snap" + buy/sell qty, OI, circuit limits) ─ */
+.depth-panel { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--edge-soft); }
+.depth-stats { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
+.depth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
 .depth-col-hdr { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--txt-3); padding-bottom: 4px; }
 .depth-row { display: flex; justify-content: space-between; font-size: 11.5px; font-variant-numeric: tabular-nums; padding: 2px 0; }
 .depth-row .depth-price { font-weight: 700; }
 .depth-row.bid .depth-price { color: var(--pos); }
 .depth-row.ask .depth-price { color: var(--neg); }
 .depth-qty { color: var(--txt-3); }
-.depth-empty { font-size: 11.5px; color: var(--txt-3); grid-column: 1 / -1; }
+.depth-empty { font-size: 11.5px; color: var(--txt-3); }
 
 /* ── Compact bid/ask line under a watchlist row's LTP ──────────────────────── */
 .wl-depth { font-size: 10px; color: var(--txt-3); margin-top: 2px; font-variant-numeric: tabular-nums; }
