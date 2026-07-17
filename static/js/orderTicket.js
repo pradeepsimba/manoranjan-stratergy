@@ -1,9 +1,22 @@
 'use strict';
 
 // ── Order ticket + this page's mini order/position tables (index.html only) ───
-var _side      = 'BUY';
-var _product   = 'CNC';
-var _orderType = 'MARKET';
+var _side        = 'BUY';
+var _product     = 'MIS';
+var _orderType   = 'MARKET';
+var _misLeverage = 5;   // refreshed from /api/settings; MIS margin = order value / this
+
+async function _loadLeverage() {
+  try {
+    var settings = await apiGet('/api/settings');
+    settings.groups.forEach(function (g) {
+      g.settings.forEach(function (s) {
+        if (s.key === 'MIS_LEVERAGE') _misLeverage = s.value;
+      });
+    });
+    updateTicketSummary();
+  } catch (e) { /* keep previous/default leverage on transient failure */ }
+}
 
 function setSide(s) {
   _side = s;
@@ -16,6 +29,7 @@ function setProduct(p) {
   _product = p;
   document.getElementById('prod-cnc').classList.toggle('active', p === 'CNC');
   document.getElementById('prod-mis').classList.toggle('active', p === 'MIS');
+  updateTicketSummary();
 }
 
 function setOrderType(t) {
@@ -49,7 +63,13 @@ function updateTicketSummary() {
     ? (parseFloat(document.getElementById('ticket-price').value) || 0)
     : inst.ltp;
   var value = qty * price;
-  summary.innerHTML = 'Est. order value: <b>₹' + fmt2(value) + '</b> &middot; ' + qty + ' &times; ₹' + fmt2(price);
+  if (_product === 'MIS') {
+    var margin = value / _misLeverage;
+    summary.innerHTML = 'Margin required: <b>₹' + fmt2(margin) + '</b> &middot; ' + qty + ' &times; ₹' + fmt2(price) +
+      ' &middot; ' + _misLeverage + 'x leverage (order value ₹' + fmt2(value) + ')';
+  } else {
+    summary.innerHTML = 'Est. order value: <b>₹' + fmt2(value) + '</b> &middot; ' + qty + ' &times; ₹' + fmt2(price);
+  }
   btn.textContent = _side + ' ' + inst.name;
 }
 
@@ -157,4 +177,5 @@ window.addEventListener('account:update', function () {
 document.addEventListener('DOMContentLoaded', function () {
   loadRecentOrders();
   loadQuickPositions();
+  _loadLeverage();
 });

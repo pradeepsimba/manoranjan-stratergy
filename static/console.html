@@ -128,10 +128,26 @@
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Account Journal</span>
-        <span class="muted-text">Running balance reconciled to current funds</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="muted-text">Running balance reconciled to current funds</span>
+          <div class="nav-seg" style="padding:2px">
+            <a href="#" class="active" id="jview-list" onclick="setJournalView('list');return false;">List</a>
+            <a href="#" id="jview-calendar" onclick="setJournalView('calendar');return false;">Calendar</a>
+          </div>
+        </div>
       </div>
       <div class="journal-wrap" id="journal-wrap">
         <div class="empty-cell">Loading…</div>
+      </div>
+      <div id="journal-calendar-wrap" style="display:none">
+        <div class="cal-nav">
+          <button class="btn-mini" onclick="calShiftMonth(-1)">‹ Prev</button>
+          <span class="cal-month-label" id="cal-month-label"></span>
+          <button class="btn-mini" onclick="calShiftMonth(1)">Next ›</button>
+        </div>
+        <p class="muted-text" style="padding:0 16px 6px">Each day shows its net cash flow (buys −, sells +) — not realized P&amp;L. Click a day for its entries.</p>
+        <div class="cal-grid" id="cal-grid"></div>
+        <div id="cal-day-detail"></div>
       </div>
     </div>
   </section>

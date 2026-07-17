@@ -56,25 +56,88 @@
     <div class="stat-card"><span class="stat-label">Open Positions</span><span class="stat-value" id="sum-open-count">0</span></div>
     <div class="stat-card" id="sum-open-pnl-card"><span class="stat-label">Open P&amp;L</span><span class="stat-value" id="sum-open-pnl">₹0.00</span></div>
     <div class="stat-card" id="sum-realized-pnl-card"><span class="stat-label">Realized Today</span><span class="stat-value" id="sum-realized-pnl">₹0.00</span></div>
+    <div class="stat-card"><span class="stat-label">Win Rate (Today)</span><span class="stat-value" id="sum-winrate">—</span><span class="stat-sub" id="sum-winrate-sub"></span></div>
   </div>
 
   <div class="page-grid">
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Positions</span>
-        <div class="nav-seg" style="padding:2px">
-          <a href="#" class="active" id="filter-open" onclick="setPositionFilter('OPEN');return false;">Open</a>
-          <a href="#" id="filter-closed" onclick="setPositionFilter('CLOSED');return false;">Closed Today</a>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="nav-seg" style="padding:2px">
+            <a href="#" class="active" id="filter-open" onclick="setPositionFilter('OPEN');return false;">Open</a>
+            <a href="#" id="filter-closed" onclick="setPositionFilter('CLOSED');return false;">Closed Today</a>
+          </div>
+          <button class="btn-mini danger" id="close-all-btn" style="display:none" onclick="openCloseAllModal()">Close All</button>
         </div>
       </div>
       <div class="tbl-wrap">
         <table class="cardify">
           <thead>
             <tr><th>Symbol</th><th>Side</th><th class="num-col">Qty</th><th class="num-col">Avg. Price</th>
-                <th class="num-col">LTP / Exit</th><th class="num-col">P&amp;L</th><th></th></tr>
+                <th class="num-col">LTP / Exit</th><th class="num-col">P&amp;L</th><th class="num-col">Margin Used</th>
+                <th>Target / SL</th><th></th></tr>
           </thead>
-          <tbody id="positions-tbody"><tr><td colspan="7" class="empty-cell">Loading…</td></tr></tbody>
+          <tbody id="positions-tbody"><tr><td colspan="9" class="empty-cell">Loading…</td></tr></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="trigger-modal">
+    <div class="modal-box">
+      <span class="modal-close" onclick="closeTriggerModal()">&times;</span>
+      <h3>Set Target / Stop-Loss</h3>
+      <div class="order-ticket-row" style="margin-bottom:10px">
+        <div class="field">
+          <label class="field-label">Target Price</label>
+          <input class="field-input" id="trigger-target" type="number" step="0.05" min="0" placeholder="Optional">
+        </div>
+        <div class="field">
+          <label class="field-label">Qty to sell at Target</label>
+          <input class="field-input" id="trigger-target-qty" type="number" min="1" placeholder="Full qty">
+        </div>
+      </div>
+      <div class="order-ticket-row" style="margin-bottom:14px">
+        <div class="field">
+          <label class="field-label">Stop-Loss Price</label>
+          <input class="field-input" id="trigger-sl" type="number" step="0.05" min="0" placeholder="Optional">
+        </div>
+        <div class="field">
+          <label class="field-label">Qty to sell at SL</label>
+          <input class="field-input" id="trigger-sl-qty" type="number" min="1" placeholder="Full qty">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-mini" style="height:34px" onclick="clearTriggers()">Clear both</button>
+        <button class="btn-run" onclick="saveTriggers()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="exit-modal">
+    <div class="modal-box" style="max-width:320px">
+      <span class="modal-close" onclick="closeExitModal()">&times;</span>
+      <h3>Exit Position</h3>
+      <p class="muted-text" id="exit-modal-symbol" style="margin:-8px 0 14px;font-size:13px"></p>
+      <div class="field" style="margin-bottom:14px">
+        <label class="field-label">Quantity</label>
+        <input class="field-input" id="exit-qty" type="number" min="1">
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-run danger" onclick="confirmExit()">Exit</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="close-all-modal">
+    <div class="modal-box" style="max-width:360px">
+      <span class="modal-close" onclick="closeCloseAllModal()">&times;</span>
+      <h3>Close All Positions</h3>
+      <p id="close-all-summary" style="font-size:13px;color:var(--txt-2);margin-bottom:14px"></p>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-mini" style="height:34px" onclick="closeCloseAllModal()">Cancel</button>
+        <button class="btn-run danger" onclick="confirmCloseAll()">Close All</button>
       </div>
     </div>
   </div>

@@ -44,6 +44,13 @@ class AppState:
         # ── Live prices, keyed by TOKEN ────────────────────────────────────────
         self.ltp: Dict[str, float] = {}
 
+        # ── Level-1 market depth, keyed by TOKEN — parsed from the feed's
+        # "snap" field (see MarketDataService._parse_snap): up to 5 bid/ask
+        # levels plus last-trade qty, buy/sell qty, OI, and circuit limits.
+        # Same "no lock, atomic single-key dict assignment" treatment as
+        # `ltp` above — not protected by candle_lock. ─────────────────────────
+        self.depth: Dict[str, dict] = {}
+
         # ── Live-price ticker push (100ms delta broadcast) ────────────────────
         self.dirty_ticks_push: set = set()
 

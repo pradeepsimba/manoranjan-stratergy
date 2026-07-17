@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS holdings (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(user_id, token)
 );
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_price NUMERIC(12,2);
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_loss_price NUMERIC(12,2);
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS target_qty INTEGER;
+ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_loss_qty INTEGER;
+CREATE INDEX IF NOT EXISTS idx_holdings_token_trigger ON holdings(token)
+    WHERE qty > 0 AND (target_price IS NOT NULL OR stop_loss_price IS NOT NULL);
 
 CREATE TABLE IF NOT EXISTS positions (
     id            SERIAL PRIMARY KEY,
@@ -84,6 +90,30 @@ CREATE TABLE IF NOT EXISTS positions (
     closed_at     TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS target_price NUMERIC(12,2);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS stop_loss_price NUMERIC(12,2);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS target_qty INTEGER;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS stop_loss_qty INTEGER;
+-- Timestamp of the most recent exit event (partial reduce OR full close) — unlike
+-- closed_at (only set on a full close), this is updated on every exit so "realized
+-- today" reporting can tell a still-OPEN, partially-reduced position's booked P&L
+-- apart from an older day's.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS last_exit_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_positions_token_trigger ON positions(token)
+    WHERE status = 'OPEN' AND (target_price IS NOT NULL OR stop_loss_price IS NOT NULL);
+
+-- Margin currently blocked against this position (MIS is leveraged; CNC never
+-- shorts so holdings have no margin concept). Positions opened before this
+-- column existed used the old cash-only rule, which moved funds DIFFERENTLY
+-- by side: a BUY-to-open DEBITED qty*avg_price (so margin_used must be set to
+-- +qty*avg_price, refunded in full on close); a SELL-to-open (a short) instead
+-- CREDITED qty*avg_price up front, so margin_used must backfill to the
+-- NEGATIVE of that amount — a close's "margin_used + pnl" refund formula then
+-- nets out to just the ordinary exit-time cash flow instead of re-crediting
+-- an amount the user was already paid once at entry.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS margin_used NUMERIC(12,2) NOT NULL DEFAULT 0;
+UPDATE positions SET margin_used = CASE WHEN side = 'BUY' THEN qty * avg_price ELSE -(qty * avg_price) END
+    WHERE status = 'OPEN' AND margin_used = 0;
 
 CREATE TABLE IF NOT EXISTS app_settings (
     key        TEXT PRIMARY KEY,
@@ -305,21 +335,27 @@ class DatabaseService:
         return dict(row)
 
     async def get_realized_pnl_total(self, user_id: int) -> Dict[str, Any]:
+        """Sums realized_pnl across ALL positions, not just CLOSED ones — a partial
+        exit (reduce_position) books realized_pnl onto a position that stays OPEN
+        (qty remaining), and that booked P&L must count immediately, not only once
+        the position is eventually fully closed out."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT
-                  COALESCE(SUM(realized_pnl), 0)              AS realized,
-                  COUNT(*)                                    AS closed,
-                  COUNT(*) FILTER (WHERE realized_pnl > 0)    AS wins,
-                  COUNT(*) FILTER (WHERE realized_pnl < 0)    AS losses
-                FROM positions WHERE user_id=$1 AND status='CLOSED'
+                  COALESCE(SUM(realized_pnl), 0)                    AS realized,
+                  COUNT(*) FILTER (WHERE realized_pnl IS NOT NULL)  AS closed,
+                  COUNT(*) FILTER (WHERE realized_pnl > 0)          AS wins,
+                  COUNT(*) FILTER (WHERE realized_pnl < 0)          AS losses
+                FROM positions WHERE user_id=$1
                 """,
                 user_id,
             )
         return dict(row)
 
     async def get_realized_pnl_by_symbol(self, user_id: int) -> List[Dict[str, Any]]:
+        """Same partial-exit fix as get_realized_pnl_total — a position with booked
+        realized_pnl counts here even while still OPEN (qty partially reduced)."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -328,7 +364,7 @@ class DatabaseService:
                        COUNT(*)                       AS trades,
                        COALESCE(SUM(realized_pnl), 0) AS realized_pnl
                 FROM positions
-                WHERE user_id=$1 AND status='CLOSED'
+                WHERE user_id=$1 AND realized_pnl IS NOT NULL
                 GROUP BY symbol, token
                 ORDER BY realized_pnl DESC
                 """,
@@ -374,16 +410,107 @@ class DatabaseService:
         return dict(row)
 
     async def reduce_holding_sell(self, user_id: int, token: str, qty: int) -> Dict[str, Any]:
-        """Reduce a holding's qty by `qty` (caller has already validated sufficient qty exists)."""
+        """Reduce a holding's qty by `qty` (caller has already validated sufficient qty exists).
+        If this fully liquidates the holding (qty -> 0), also clears target_price/
+        stop_loss_price (and their qtys) — holdings rows are reused via ON CONFLICT upsert
+        on a later BUY (unlike positions, which always INSERT a fresh row), so a stale
+        trigger left in place would silently reactivate against a future, unrelated cost basis."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                UPDATE holdings SET qty = qty - $3, updated_at = NOW()
+                UPDATE holdings
+                SET qty = qty - $3,
+                    target_price    = CASE WHEN qty - $3 <= 0 THEN NULL ELSE target_price END,
+                    target_qty      = CASE WHEN qty - $3 <= 0 THEN NULL ELSE target_qty END,
+                    stop_loss_price = CASE WHEN qty - $3 <= 0 THEN NULL ELSE stop_loss_price END,
+                    stop_loss_qty   = CASE WHEN qty - $3 <= 0 THEN NULL ELSE stop_loss_qty END,
+                    updated_at = NOW()
                 WHERE user_id=$1 AND token=$2 RETURNING *
                 """,
                 user_id, token, qty,
             )
         return dict(row)
+
+    # ── Target / Stop-Loss triggers ──────────────────────────────────────────
+    # target_qty/stop_loss_qty are each independently optional: NULL means "exit
+    # the full open qty when that trigger fires" (backward-compatible default);
+    # a number means "exit only this many, leave the rest open".
+
+    async def set_position_triggers(self, position_id: int, user_id: int,
+                                     target_price: Optional[float],
+                                     stop_loss_price: Optional[float],
+                                     target_qty: Optional[int] = None,
+                                     stop_loss_qty: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE positions SET target_price=$3, stop_loss_price=$4,
+                                     target_qty=$5, stop_loss_qty=$6
+                WHERE id=$1 AND user_id=$2 AND status='OPEN' RETURNING *
+                """,
+                position_id, user_id, target_price, stop_loss_price, target_qty, stop_loss_qty,
+            )
+        return dict(row) if row else None
+
+    async def set_holding_triggers(self, user_id: int, token: str,
+                                   target_price: Optional[float],
+                                   stop_loss_price: Optional[float],
+                                   target_qty: Optional[int] = None,
+                                   stop_loss_qty: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE holdings SET target_price=$3, stop_loss_price=$4,
+                                    target_qty=$5, stop_loss_qty=$6, updated_at=NOW()
+                WHERE user_id=$1 AND token=$2 AND qty > 0 RETURNING *
+                """,
+                user_id, token, target_price, stop_loss_price, target_qty, stop_loss_qty,
+            )
+        return dict(row) if row else None
+
+    async def clear_position_trigger(self, position_id: int, which: str) -> None:
+        """Clear only the ONE side ('target' or 'stop_loss') that just fired, leaving
+        the other side (if set) active for the remaining open qty."""
+        col_price, col_qty = (("target_price", "target_qty") if which == "target"
+                              else ("stop_loss_price", "stop_loss_qty"))
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE positions SET {col_price}=NULL, {col_qty}=NULL WHERE id=$1",
+                position_id,
+            )
+
+    async def clear_holding_trigger(self, user_id: int, token: str, which: str) -> None:
+        col_price, col_qty = (("target_price", "target_qty") if which == "target"
+                              else ("stop_loss_price", "stop_loss_qty"))
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE holdings SET {col_price}=NULL, {col_qty}=NULL WHERE user_id=$1 AND token=$2",
+                user_id, token,
+            )
+
+    async def get_open_positions_with_triggers(self, token: str) -> List[Dict[str, Any]]:
+        """OPEN positions (any user) on `token` with an active target/SL — called once per
+        dirty token per tick, so this must stay cheap (see idx_positions_token_trigger)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM positions WHERE token=$1 AND status='OPEN'
+                  AND (target_price IS NOT NULL OR stop_loss_price IS NOT NULL)
+                """,
+                token,
+            )
+        return [dict(r) for r in rows]
+
+    async def get_holdings_with_triggers(self, token: str) -> List[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM holdings WHERE token=$1 AND qty > 0
+                  AND (target_price IS NOT NULL OR stop_loss_price IS NOT NULL)
+                """,
+                token,
+            )
+        return [dict(r) for r in rows]
 
     # ── Positions (MIS / intraday) ───────────────────────────────────────────
 
@@ -420,43 +547,50 @@ class DatabaseService:
         return [dict(r) for r in rows]
 
     async def open_position(self, user_id: int, token: str, symbol: str, side: str,
-                            qty: int, price: float) -> Dict[str, Any]:
+                            qty: int, price: float, margin_used: float = 0) -> Dict[str, Any]:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                INSERT INTO positions (user_id, token, symbol, side, qty, avg_price, status)
-                VALUES ($1,$2,$3,$4,$5,$6,'OPEN')
+                INSERT INTO positions (user_id, token, symbol, side, qty, avg_price, status, margin_used)
+                VALUES ($1,$2,$3,$4,$5,$6,'OPEN',$7)
                 RETURNING *
                 """,
-                user_id, token, symbol, side, qty, price,
+                user_id, token, symbol, side, qty, price, margin_used,
             )
         return dict(row)
 
-    async def add_to_position(self, position_id: int, qty: int, price: float) -> Dict[str, Any]:
-        """Add `qty` more to an existing OPEN position, recomputing the weighted average price."""
+    async def add_to_position(self, position_id: int, qty: int, price: float,
+                              margin_delta: float = 0) -> Dict[str, Any]:
+        """Add `qty` more to an existing OPEN position, recomputing the weighted average
+        price and adding the fresh margin blocked for the added qty."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE positions
                 SET qty = qty + $2,
-                    avg_price = ((avg_price * qty) + ($3 * $2)) / (qty + $2)
+                    avg_price = ((avg_price * qty) + ($3 * $2)) / (qty + $2),
+                    margin_used = margin_used + $4
                 WHERE id=$1 RETURNING *
                 """,
-                position_id, qty, price,
+                position_id, qty, price, margin_delta,
             )
         return dict(row)
 
-    async def reduce_position(self, position_id: int, qty: int, realized_pnl_delta: float) -> Dict[str, Any]:
-        """Partially close a position by `qty`, accumulating realized P&L."""
+    async def reduce_position(self, position_id: int, qty: int, realized_pnl_delta: float,
+                              margin_refund: float = 0) -> Dict[str, Any]:
+        """Partially close a position by `qty`, accumulating realized P&L and releasing
+        the proportional share of margin that was blocking it."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE positions
                 SET qty = qty - $2,
-                    realized_pnl = COALESCE(realized_pnl, 0) + $3
+                    realized_pnl = COALESCE(realized_pnl, 0) + $3,
+                    margin_used = margin_used - $4,
+                    last_exit_at = NOW()
                 WHERE id=$1 RETURNING *
                 """,
-                position_id, qty, realized_pnl_delta,
+                position_id, qty, realized_pnl_delta, margin_refund,
             )
         return dict(row)
 
@@ -467,7 +601,8 @@ class DatabaseService:
                 """
                 UPDATE positions
                 SET status='CLOSED', qty=0, exit_price=$2,
-                    realized_pnl = COALESCE(realized_pnl, 0) + $3, closed_at=NOW()
+                    realized_pnl = COALESCE(realized_pnl, 0) + $3,
+                    margin_used=0, closed_at=NOW(), last_exit_at=NOW()
                 WHERE id=$1 RETURNING *
                 """,
                 position_id, exit_price, realized_pnl_delta,

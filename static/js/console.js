@@ -9,6 +9,9 @@ var _tradebook   = [];
 var _tradeFilter = 'ALL';
 var _journal     = [];
 var _loaded      = { overview: false, tradebook: false, journal: false };
+var _journalView   = 'list';
+var _calMonth      = null;   // Date (first-of-month currently shown in the calendar)
+var _calSelectedDay = null;  // 'YYYY-MM-DD', or null if none picked
 
 // ── Tab switching (lazy-load each view on first visit) ──────────────────────────
 function setConsoleTab(tab) {
@@ -146,22 +149,133 @@ async function loadJournal() {
     wrap.innerHTML = '<div class="empty-cell">Failed to load journal</div>';
     return;
   }
-  if (!_journal.length) { wrap.innerHTML = '<div class="empty-cell">No account activity yet</div>'; return; }
-  wrap.innerHTML = _journalHtml(_journal);
+  wrap.innerHTML = _journal.length
+    ? _journalHtml(_journal)
+    : '<div class="empty-cell">No account activity yet</div>';
+  if (_journalView === 'calendar') renderCalendar();
+}
+
+function setJournalView(view) {
+  _journalView = view;
+  document.getElementById('jview-list').classList.toggle('active', view === 'list');
+  document.getElementById('jview-calendar').classList.toggle('active', view === 'calendar');
+  document.getElementById('journal-wrap').style.display = view === 'list' ? '' : 'none';
+  document.getElementById('journal-calendar-wrap').style.display = view === 'calendar' ? '' : 'none';
+  if (view === 'calendar') renderCalendar();
+}
+
+// ── Journal calendar (client-side grouping of the same /api/journal data) ───
+
+function _pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+function _dateKey(s) {
+  var d = new Date(s);
+  if (isNaN(d.getTime())) return null;
+  return d.getFullYear() + '-' + _pad2(d.getMonth() + 1) + '-' + _pad2(d.getDate());
+}
+
+function _journalByDay() {
+  var map = {};
+  _journal.forEach(function (e) {
+    var key = _dateKey(e.at);
+    if (!key) return;
+    if (!map[key]) map[key] = { cash: 0, count: 0, entries: [] };
+    map[key].cash += e.cashFlow;
+    map[key].count += 1;
+    map[key].entries.push(e);
+  });
+  return map;
+}
+
+function calShiftMonth(delta) {
+  _calMonth.setMonth(_calMonth.getMonth() + delta);
+  _calSelectedDay = null;
+  renderCalendar();
+}
+
+function renderCalendar() {
+  if (!_journal.length) {
+    document.getElementById('cal-month-label').textContent = '';
+    document.getElementById('cal-grid').innerHTML = '<div class="empty-cell" style="grid-column:1/-1">No account activity yet</div>';
+    document.getElementById('cal-day-detail').innerHTML = '';
+    return;
+  }
+  if (!_calMonth) {
+    var latest = _journal.length ? new Date(_journal[0].at) : new Date();
+    _calMonth = isNaN(latest.getTime()) ? new Date() : new Date(latest.getFullYear(), latest.getMonth(), 1);
+  }
+  var byDay = _journalByDay();
+  var y = _calMonth.getFullYear(), m = _calMonth.getMonth();
+  document.getElementById('cal-month-label').textContent =
+    _calMonth.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+
+  var firstDow     = new Date(y, m, 1).getDay();   // 0=Sun
+  var daysInMonth  = new Date(y, m + 1, 0).getDate();
+  var todayKey     = _dateKey(new Date().toISOString());
+  var dows         = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  var html = dows.map(function (d) { return '<div class="cal-dow">' + d + '</div>'; }).join('');
+  for (var i = 0; i < firstDow; i++) html += '<div class="cal-cell empty"></div>';
+
+  for (var day = 1; day <= daysInMonth; day++) {
+    var key = y + '-' + _pad2(m + 1) + '-' + _pad2(day);
+    var info = byDay[key];
+    var classes = 'cal-cell';
+    if (info) classes += ' has-data';
+    if (key === todayKey) classes += ' today';
+    if (key === _calSelectedDay) classes += ' selected';
+
+    var inner = '<div class="cal-day-num">' + day + '</div>';
+    if (info) {
+      var cashCls = info.cash > 0 ? 'pnl-pos' : (info.cash < 0 ? 'pnl-neg' : 'muted-text');
+      var cashTxt = info.cash === 0 ? '—' : (info.cash > 0 ? '+' : '−') + '₹' + fmt2(Math.abs(info.cash));
+      inner += '<div class="cal-day-cash ' + cashCls + '">' + cashTxt + '</div>';
+      inner += '<div class="cal-day-count">' + info.count + ' trade' + (info.count === 1 ? '' : 's') + '</div>';
+    }
+    html += '<div class="' + classes + '"' + (info ? ' onclick="selectCalDay(\'' + key + '\')"' : '') + '>' + inner + '</div>';
+  }
+
+  document.getElementById('cal-grid').innerHTML = html;
+  _renderCalDayDetail(byDay);
+}
+
+function selectCalDay(key) {
+  _calSelectedDay = _calSelectedDay === key ? null : key;
+  renderCalendar();
+}
+
+function _renderCalDayDetail(byDay) {
+  var wrap = document.getElementById('cal-day-detail');
+  var info = _calSelectedDay ? byDay[_calSelectedDay] : null;
+  if (!info) { wrap.innerHTML = ''; return; }
+  var label = new Date(_calSelectedDay + 'T00:00:00').toLocaleDateString('en-IN',
+    { weekday: 'long', day: '2-digit', month: 'short', year: 'numeric' });
+  wrap.innerHTML = '<div class="journal-day" style="position:static">' + escHtml(label) + '</div>' +
+    info.entries.map(_journalRowHtml).join('');
 }
 
 function _journalHtml(entries) {
+  var byDay = _journalByDay();
   var out = '';
   var lastDay = null;
   entries.forEach(function (e) {
     var day = _dayLabel(e.at);
     if (day !== lastDay) {
-      out += '<div class="journal-day">' + escHtml(day) + '</div>';
+      out += '<div class="journal-day">' + escHtml(day) + _journalDayTotalHtml(byDay[_dateKey(e.at)]) + '</div>';
       lastDay = day;
     }
     out += _journalRowHtml(e);
   });
   return out;
+}
+
+// Same net-cash-flow figure the calendar view shows per day (NOT realized
+// P&L — a pure-buy day nets negative here without being a "loss").
+function _journalDayTotalHtml(info) {
+  if (!info) return '';
+  var cls = info.cash > 0 ? 'pnl-pos' : (info.cash < 0 ? 'pnl-neg' : 'muted-text');
+  var txt = info.cash === 0 ? '—' : (info.cash > 0 ? '+' : '−') + '₹' + fmt2(Math.abs(info.cash));
+  return '<span class="journal-day-total ' + cls + '">' + txt + '</span>';
 }
 
 function _journalRowHtml(e) {

@@ -31,6 +31,21 @@ class PlaceOrderRequest(BaseModel):
     limit_price:  Optional[float] = None
 
 
+class SetTriggersRequest(BaseModel):
+    target_price:    Optional[float] = None
+    stop_loss_price: Optional[float] = None
+    target_qty:      Optional[int] = None
+    stop_loss_qty:   Optional[int] = None
+
+
+class ExitPositionRequest(BaseModel):
+    qty: Optional[int] = None
+
+
+class SellHoldingRequest(BaseModel):
+    qty: Optional[int] = None
+
+
 def _round(v: Any) -> float:
     return round(float(v), 2) if v is not None else 0.0
 
@@ -56,23 +71,38 @@ def _serialize_holding(h: Dict[str, Any], ltp: float) -> Dict[str, Any]:
         "avgPrice": _round(avg), "ltp": _round(ltp),
         "currentValue": _round(ltp * qty), "investedValue": _round(avg * qty),
         "pnl": _round(pnl),
+        "targetPrice": _round(h["target_price"]) if h.get("target_price") is not None else None,
+        "stopLossPrice": _round(h["stop_loss_price"]) if h.get("stop_loss_price") is not None else None,
+        "targetQty": h.get("target_qty"),
+        "stopLossQty": h.get("stop_loss_qty"),
     }
 
 
 def _serialize_position(p: Dict[str, Any], ltp: float) -> Dict[str, Any]:
     qty, avg, side = int(p["qty"]), float(p["avg_price"]), p["side"]
+    realized_pnl = float(p["realized_pnl"]) if p.get("realized_pnl") is not None else 0.0
     if p["status"] == "OPEN" and ltp > 0:
         pnl = (ltp - avg) * qty if side == "BUY" else (avg - ltp) * qty
     else:
-        pnl = float(p["realized_pnl"]) if p.get("realized_pnl") is not None else 0.0
+        pnl = realized_pnl
     return {
         "id": p["id"], "token": p["token"], "symbol": p["symbol"], "side": side,
         "qty": qty, "avgPrice": _round(avg), "ltp": _round(ltp),
         "status": p["status"],
         "exitPrice": _round(p["exit_price"]) if p.get("exit_price") is not None else None,
         "pnl": _round(pnl),
+        # Booked P&L from any exit so far (partial or full) — unlike "pnl" above
+        # (live unrealized mark while OPEN), this is always populated so a partial
+        # exit's profit is visible before the position is fully closed out.
+        "realizedPnl": _round(realized_pnl),
         "openedAt": p["opened_at"].isoformat() if p.get("opened_at") else None,
         "closedAt": p["closed_at"].isoformat() if p.get("closed_at") else None,
+        "lastExitAt": p["last_exit_at"].isoformat() if p.get("last_exit_at") else None,
+        "targetPrice": _round(p["target_price"]) if p.get("target_price") is not None else None,
+        "stopLossPrice": _round(p["stop_loss_price"]) if p.get("stop_loss_price") is not None else None,
+        "targetQty": p.get("target_qty"),
+        "stopLossQty": p.get("stop_loss_qty"),
+        "marginUsed": _round(p["margin_used"]) if p.get("margin_used") is not None else 0.0,
     }
 
 
@@ -127,6 +157,37 @@ async def list_holdings(user: Dict[str, Any] = Depends(get_current_user)) -> Lis
     return [_serialize_holding(r, st.ltp.get(r["token"], 0.0)) for r in rows]
 
 
+@router.post("/holdings/{token}/triggers")
+async def set_holding_triggers(token: str, req: SetTriggersRequest,
+                               user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    try:
+        holding = await order_engine.set_holding_triggers(
+            _db, user["id"], token, req.target_price, req.stop_loss_price,
+            req.target_qty, req.stop_loss_qty)
+    except OrderRejected as e:
+        raise HTTPException(400, str(e))
+    st = get_state()
+    return {"holding": _serialize_holding(holding, st.ltp.get(token, 0.0))}
+
+
+@router.post("/holdings/{token}/sell")
+async def sell_holding(token: str, req: SellHoldingRequest = SellHoldingRequest(),
+                       user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    st = get_state()
+    try:
+        ltp = st.ltp.get(token, 0.0)
+        event = await order_engine.exit_holding(_db, user["id"], token, ltp, req.qty)
+    except OrderRejected as e:
+        raise HTTPException(400, str(e))
+    event["order"] = _serialize_order(event["order"])
+    event["holding"] = _serialize_holding(event["holding"], st.ltp.get(token, 0.0))
+    return event
+
+
 # ── Positions (MIS) ───────────────────────────────────────────────────────────
 
 @router.get("/positions")
@@ -139,8 +200,18 @@ async def list_positions(status: Optional[str] = None,
     return [_serialize_position(r, st.ltp.get(r["token"], 0.0)) for r in rows]
 
 
+@router.post("/positions/close-all")
+async def close_all_positions(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    st = get_state()
+    events = await order_engine.close_all_positions(_db, user["id"], dict(st.ltp))
+    return {"closed": len(events)}
+
+
 @router.post("/positions/{position_id}/exit")
-async def exit_position(position_id: int, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+async def exit_position(position_id: int, req: ExitPositionRequest = ExitPositionRequest(),
+                        user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     if _db is None:
         raise HTTPException(503, "Database not ready")
     st = get_state()
@@ -149,11 +220,27 @@ async def exit_position(position_id: int, user: Dict[str, Any] = Depends(get_cur
         if position is None or position["user_id"] != user["id"]:
             raise HTTPException(404, "Position not found")
         ltp = st.ltp.get(position["token"], 0.0)
-        event = await order_engine.square_off_position(_db, position_id, user["id"], ltp)
+        event = await order_engine.square_off_position(_db, position_id, user["id"], ltp, req.qty)
     except OrderRejected as e:
         raise HTTPException(400, str(e))
     event["order"] = _serialize_order(event["order"])
+    event["position"] = _serialize_position(event["position"], st.ltp.get(position["token"], 0.0))
     return event
+
+
+@router.post("/positions/{position_id}/triggers")
+async def set_position_triggers(position_id: int, req: SetTriggersRequest,
+                                user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    try:
+        position = await order_engine.set_position_triggers(
+            _db, position_id, user["id"], req.target_price, req.stop_loss_price,
+            req.target_qty, req.stop_loss_qty)
+    except OrderRejected as e:
+        raise HTTPException(400, str(e))
+    st = get_state()
+    return {"position": _serialize_position(position, st.ltp.get(position["token"], 0.0))}
 
 
 # ── Funds ─────────────────────────────────────────────────────────────────────

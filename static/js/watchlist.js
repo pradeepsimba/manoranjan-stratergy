@@ -32,6 +32,12 @@ function renderWatchlist() {
   list.innerHTML = rows.map(_watchlistRowHtml).join('');
 }
 
+function _depthLineHtml(r) {
+  if (r.bestBid == null || r.bestAsk == null) return '—';
+  return '<span class="depth-bid">B ' + fmt2(r.bestBid) + '×' + r.bestBidQty + '</span>' +
+    '&nbsp;&nbsp;<span class="depth-ask">A ' + fmt2(r.bestAsk) + '×' + r.bestAskQty + '</span>';
+}
+
 function _watchlistRowHtml(r) {
   var chgCls = r.change > 0 ? 'pnl-pos' : (r.change < 0 ? 'pnl-neg' : '');
   var activeCls = r.token === _selectedToken ? ' active' : '';
@@ -43,6 +49,7 @@ function _watchlistRowHtml(r) {
     '<div class="wl-right">' +
       '<div class="wl-ltp" data-field="ltp">' + fmt2(r.ltp) + '</div>' +
       '<div class="wl-chg" data-field="chg"><span class="chg-chip ' + chgCls + '">' + pnlSign(r.change) + ' (' + r.changePct.toFixed(2) + '%)</span></div>' +
+      '<div class="wl-depth" data-field="depth">' + _depthLineHtml(r) + '</div>' +
     '</div>' +
   '</div>';
 }
@@ -56,7 +63,42 @@ function selectInstrument(token) {
   if (!inst) return;
   updateSymbolHeader(inst);
   loadChart(token);
+  loadDepth(token);
   if (typeof onInstrumentSelected === 'function') onInstrumentSelected(inst);
+}
+
+// ── Market depth ("snap") panel for whichever instrument is selected ────────
+
+function _depthPanelHtml(d) {
+  var bids = (d && d.bids) || [];
+  var asks = (d && d.asks) || [];
+  if (!bids.length && !asks.length) {
+    return '<div class="depth-empty">No depth data yet</div>';
+  }
+  var rows = Math.max(bids.length, asks.length);
+  var bidHtml = '<div class="depth-col-hdr">Bids (price × qty)</div>';
+  var askHtml = '<div class="depth-col-hdr">Asks (price × qty)</div>';
+  for (var i = 0; i < rows; i++) {
+    var b = bids[i], a = asks[i];
+    bidHtml += '<div class="depth-row bid">' +
+      (b ? '<span class="depth-price">' + fmt2(b.price) + '</span><span class="depth-qty">' + b.qty + '</span>' : '') +
+    '</div>';
+    askHtml += '<div class="depth-row ask">' +
+      (a ? '<span class="depth-price">' + fmt2(a.price) + '</span><span class="depth-qty">' + a.qty + '</span>' : '') +
+    '</div>';
+  }
+  return bidHtml + askHtml;
+}
+
+async function loadDepth(token) {
+  var panel = document.getElementById('depth-panel');
+  if (!panel) return;
+  try {
+    var d = await apiGet('/api/instruments/' + token + '/depth');
+    if (token === _selectedToken) panel.innerHTML = _depthPanelHtml(d);
+  } catch (e) {
+    if (token === _selectedToken) panel.innerHTML = '<div class="depth-empty">Failed to load depth</div>';
+  }
 }
 
 function updateSymbolHeader(inst) {
@@ -132,6 +174,29 @@ window.addEventListener('market:tick', function (evt) {
     }
   });
   if (touchedSelected && typeof onPricesUpdated === 'function') onPricesUpdated();
+});
+
+// Depth delta carries the FULL book (not just top-of-book) for whichever
+// tokens just ticked — cheap enough here since it's only ever a handful of
+// symbols per 100ms cycle, not the whole watchlist (see scheduler.py).
+window.addEventListener('market:depth', function (evt) {
+  var depth = evt.detail || {};
+  Object.keys(depth).forEach(function (token) {
+    var d = depth[token];
+    var r = _watchlistData.find(function (x) { return x.token === token; });
+    if (r) {
+      var bid = d.bids && d.bids[0], ask = d.asks && d.asks[0];
+      r.bestBid = bid ? bid.price : null; r.bestBidQty = bid ? bid.qty : null;
+      r.bestAsk = ask ? ask.price : null; r.bestAskQty = ask ? ask.qty : null;
+      r.ltpQty = d.ltpQty;
+      var cell = document.querySelector('.watchlist-row[data-token="' + token + '"] [data-field="depth"]');
+      if (cell) cell.innerHTML = _depthLineHtml(r);
+    }
+    if (token === _selectedToken) {
+      var panel = document.getElementById('depth-panel');
+      if (panel) panel.innerHTML = _depthPanelHtml(d);
+    }
+  });
 });
 
 document.addEventListener('DOMContentLoaded', loadWatchlist);

@@ -208,11 +208,14 @@ class SchedulerService:
             st.api_status = f"Load error: {e}"
             print(f"Historical load error: {e}")
 
-    # ── Tick loop: limit-order matching + live-price ticker delta ────────────
+    # ── Tick loop: limit-order matching + TP/SL triggers + live-price ticker
+    # delta ────────────────────────────────────────────────────────────────
     # ONE consumer of dirty_ticks_push (draining it in two different loops
     # would race over who gets which tokens each cycle) — every dirty token
-    # is checked against resting LIMIT orders AND folded into the broadcast
-    # delta, in the same pass.
+    # is checked against resting LIMIT orders, target/stop-loss triggers, AND
+    # folded into the broadcast delta, in the same pass (the two match calls
+    # below are sequential readers of the already-drained local `dirty` set,
+    # not a second consumer of dirty_ticks_push itself).
 
     async def _tick_loop(self) -> None:
         st = get_state()
@@ -222,10 +225,16 @@ class SchedulerService:
                     dirty, st.dirty_ticks_push = st.dirty_ticks_push, set()
                     if dirty:
                         await self._match_limit_orders(dirty)
+                        await self._match_triggers(dirty)
                         if self._mkt_ws.count() > 0:
                             prices = {tok: st.ltp.get(tok, 0.0) for tok in dirty}
+                            # Full depth (not just top-of-book) for whichever tokens just
+                            # ticked — cheap here since `dirty` is only the handful that
+                            # ticked this cycle, not the whole instrument universe.
+                            depth = {tok: st.depth[tok] for tok in dirty if tok in st.depth}
                             await self._mkt_ws.broadcast(
-                                json.dumps({"type": "WATCHLIST_TICK", "prices": prices}, default=str)
+                                json.dumps({"type": "WATCHLIST_TICK", "prices": prices, "depth": depth},
+                                          default=str)
                             )
             except Exception as e:
                 print(f"Tick loop error: {e}")
@@ -241,6 +250,24 @@ class SchedulerService:
                 events = await order_engine.match_pending_limit_orders(self._db, token, ltp)
             except Exception as e:
                 print(f"Limit-match error for {token}: {e}")
+                continue
+            for ev in events:
+                order = ev.get("order")
+                if order:
+                    await self._acct_ws.send_to_user(order["user_id"], json.dumps(ev, default=str))
+
+    async def _match_triggers(self, tokens: set) -> None:
+        """Same shape as _match_limit_orders — auto-exits any MIS position/CNC holding
+        whose pre-set target/stop-loss the LTP just crossed (see order_engine.match_triggers)."""
+        st = get_state()
+        for token in tokens:
+            ltp = st.ltp.get(token, 0.0)
+            if ltp <= 0:
+                continue
+            try:
+                events = await order_engine.match_triggers(self._db, token, ltp)
+            except Exception as e:
+                print(f"Trigger-match error for {token}: {e}")
                 continue
             for ev in events:
                 order = ev.get("order")

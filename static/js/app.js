@@ -32,8 +32,8 @@ function _setBadge(id, text, cls) {
 
 function _wsStatusClass(s) {
   if (!s) return 'gray';
-  if (s.indexOf('Connected') === 0) return 'green';
-  if (s.indexOf('Degraded') === 0) return 'yellow';
+  if (s.indexOf('Connected') !== -1) return 'green';
+  if (s.indexOf('Degraded') !== -1) return 'yellow';
   return 'red';
 }
 
@@ -66,6 +66,7 @@ function _initMarketWS() {
     } else if (d.type === 'WATCHLIST_TICK') {
       Object.assign(window._prices, d.prices || {});
       window.dispatchEvent(new CustomEvent('market:tick', { detail: d.prices || {} }));
+      if (d.depth) window.dispatchEvent(new CustomEvent('market:depth', { detail: d.depth }));
     }
   });
 }

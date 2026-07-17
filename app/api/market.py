@@ -99,6 +99,22 @@ def _day_change(token: str, ltp: float, st) -> Dict[str, Any]:
     return {"ltp": price, "change": round(change, 2), "changePct": round(change_pct, 2)}
 
 
+def _depth_top(token: str, st) -> Dict[str, Any]:
+    """Best bid/ask (+qty) for a compact watchlist-row display — the full
+    5-level book (see /api/instruments/{token}/depth) is overkill for a list
+    of hundreds of rows."""
+    d = st.depth.get(token)
+    bid = d["bids"][0] if d and d.get("bids") else None
+    ask = d["asks"][0] if d and d.get("asks") else None
+    return {
+        "bestBid":    bid["price"] if bid else None,
+        "bestBidQty": bid["qty"]   if bid else None,
+        "bestAsk":    ask["price"] if ask else None,
+        "bestAskQty": ask["qty"]   if ask else None,
+        "ltpQty":     d.get("ltpQty") if d else None,
+    }
+
+
 @router.get("/api/instruments")
 async def list_instruments() -> List[Dict[str, Any]]:
     if _db is None:
@@ -113,8 +129,20 @@ async def list_instruments() -> List[Dict[str, Any]]:
             "token":       token,
             "name":        r["display_name"],
             **info,
+            **_depth_top(token, st),
         })
     return out
+
+
+@router.get("/api/instruments/{token}/depth")
+def get_depth(token: str) -> Dict[str, Any]:
+    """Full Level-1 depth snapshot (5 bid/ask levels + buy/sell qty + OI +
+    circuit limits) for the one instrument currently selected in the terminal
+    — see MarketDataService._parse_snap for how this is derived from the feed."""
+    st = get_state()
+    d = st.depth.get(token)
+    return d or {"ltpQty": None, "buyQty": None, "sellQty": None, "oi": None,
+                 "upperCircuit": None, "lowerCircuit": None, "bids": [], "asks": []}
 
 
 @router.get("/api/instruments/{token}/candles")

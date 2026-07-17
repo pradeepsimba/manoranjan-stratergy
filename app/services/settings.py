@@ -56,6 +56,10 @@ SPEC: List[Dict[str, Any]] = [
     # ── Engine ─────────────────────────────────────────────────────────────────
     _s("TICK_EVAL_INTERVAL_MS", "Tick evaluation interval ms", "int", "Engine",
        min_=10, max_=5000, help_="How often resting limit orders are checked against live prices."),
+    _s("MIS_LEVERAGE", "MIS leverage (x)", "float", "Engine",
+       min_=1, max_=20, step=0.5,
+       help_="Intraday (MIS) orders only block qty*price/leverage as margin instead of the "
+             "full order value. CNC (delivery) is never leveraged."),
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}

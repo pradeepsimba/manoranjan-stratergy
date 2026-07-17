@@ -158,6 +158,9 @@ _DEFAULTS: Dict[str, Any] = {
 
     # Engine cadence
     "TICK_EVAL_INTERVAL_MS": 100,   # limit-order matching / mark-to-market loop
+
+    # Leverage — MIS (intraday) orders only; CNC is always unleveraged/cash-only.
+    "MIS_LEVERAGE": 5.0,   # e.g. 5.0 => an MIS order only blocks qty*price/5 as margin
 }
 
 _runtime_overrides: Dict[str, Any] = {}

@@ -50,7 +50,17 @@
       "Bash(node --check static/js/util.js)",
       "Bash(node --check static/js/app.js)",
       "Bash(node --check static/js/orderTicket.js)",
-      "Bash(node --check static/js/console.js)"
+      "Bash(node --check static/js/console.js)",
+      "Bash(node --check static/js/positions.js)",
+      "Bash(node --check static/js/holdings.js)",
+      "Bash(python -c \"import app.services.settings as s; print\\('MIS_LEVERAGE' in s._BY_KEY\\); import app.config as cfg; print\\(cfg.MIS_LEVERAGE\\)\")",
+      "Bash(psql --version)",
+      "Bash(python -c \"import asyncpg; print\\('asyncpg available'\\)\")",
+      "Bash(python \"C:\\\\Users\\\\VIGNES~1.263\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Vigneshvaran-2632-Desktop-manoranjan-stratergy\\\\054acece-4d33-4cc0-b55f-a327100ec648\\\\scratchpad\\\\inspect_funds.py\")",
+      "Bash(python \"C:\\\\Users\\\\VIGNES~1.263\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Vigneshvaran-2632-Desktop-manoranjan-stratergy\\\\054acece-4d33-4cc0-b55f-a327100ec648\\\\scratchpad\\\\inspect_settings.py\")",
+      "Bash(python \"C:\\\\Users\\\\VIGNES~1.263\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Vigneshvaran-2632-Desktop-manoranjan-stratergy\\\\054acece-4d33-4cc0-b55f-a327100ec648\\\\scratchpad\\\\fix_funds.py\")",
+      "Bash(curl -s http://localhost:8001/api/instruments)",
+      "Bash(timeout 30 python \"C:\\\\Users\\\\VIGNES~1.263\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Vigneshvaran-2632-Desktop-manoranjan-stratergy\\\\f76ea1d9-c516-45e6-b761-1075f476183c\\\\scratchpad\\\\peek_ws.py\")"
     ],
     "deny": []
   },

@@ -32,6 +32,53 @@ from app.state import get_state
 
 _LTP_PAT = re.compile(r"LTP\s*([\d.]+)")
 
+# The feed's "snap" field is a free-text quote snapshot, e.g.:
+#   "360 One WAM (13061) | LTP 1109.90 Qty 286 | O:1108.30 H:1127.80 L:1085.70
+#    C:1081.30 | Vol 2682207 | BuyQty 112267 SellQty 149711 | OI 12037000
+#    (0.00%) | UC 1189.40 LC 973.20\nBids (price x qty):\n   1) 1109.40 x 1\n
+#    ...\nAsks (price x qty):\n   1) 1109.50 x 20\n..."
+# — real Level-1 depth the app previously discarded entirely (only OHLCV + LTP
+# were parsed out of each tick). \b keeps "Qty" from also matching inside
+# "BuyQty"/"SellQty".
+_SNAP_QTY_PAT  = re.compile(r"\bQty\s+(\d+)")
+_SNAP_BUY_PAT  = re.compile(r"BuyQty\s+(\d+)")
+_SNAP_SELL_PAT = re.compile(r"SellQty\s+(\d+)")
+_SNAP_OI_PAT   = re.compile(r"\bOI\s+(\d+)")
+_SNAP_UC_PAT   = re.compile(r"\bUC\s+([\d.]+)")
+_SNAP_LC_PAT   = re.compile(r"\bLC\s+([\d.]+)")
+_SNAP_ROW_PAT  = re.compile(r"\d+\)\s+([\d.]+)\s+x\s+(\d+)")
+
+
+def _parse_snap(snap: str) -> Optional[Dict[str, Any]]:
+    """Parses the feed's free-text depth snapshot into structured Level-1 data.
+    Returns None if `snap` is empty/unrecognized (caller then just skips the
+    depth update for this tick, leaving the previous snapshot in place)."""
+    if not snap:
+        return None
+    bids_idx = snap.find("Bids")
+    asks_idx = snap.find("Asks")
+    header = snap[:bids_idx] if bids_idx != -1 else snap
+    bids_section = snap[bids_idx:asks_idx] if bids_idx != -1 and asks_idx != -1 else ""
+    asks_section = snap[asks_idx:] if asks_idx != -1 else ""
+
+    def _search(pat: re.Pattern, cast):
+        m = pat.search(header)
+        return cast(m.group(1)) if m else None
+
+    try:
+        return {
+            "ltpQty":       _search(_SNAP_QTY_PAT, int),
+            "buyQty":       _search(_SNAP_BUY_PAT, int),
+            "sellQty":      _search(_SNAP_SELL_PAT, int),
+            "oi":           _search(_SNAP_OI_PAT, int),
+            "upperCircuit": _search(_SNAP_UC_PAT, float),
+            "lowerCircuit": _search(_SNAP_LC_PAT, float),
+            "bids": [{"price": float(p), "qty": int(q)} for p, q in _SNAP_ROW_PAT.findall(bids_section)],
+            "asks": [{"price": float(p), "qty": int(q)} for p, q in _SNAP_ROW_PAT.findall(asks_section)],
+        }
+    except (ValueError, AttributeError):
+        return None
+
 _MAX_CANDLES = cfg.MAX_CANDLE_BUFFER
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
 
@@ -168,6 +215,10 @@ class MarketDataService:
                 pass
         if ltp > 0:
             self.state.ltp[token] = ltp
+
+        depth = _parse_snap(n.get("snap", ""))
+        if depth is not None:
+            self.state.depth[token] = depth
 
         if self.state.phase in (MarketPhase.OPEN, MarketPhase.PRE_MARKET):
             self.state.dirty_ticks_push.add(token)
