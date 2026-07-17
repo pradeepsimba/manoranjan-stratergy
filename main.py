@@ -60,6 +60,7 @@ app.add_middleware(SessionMiddleware, secret_key=cfg.SESSION_SECRET)
 app.include_router(auth_api.router)
 app.include_router(market_api.router)
 app.include_router(trading_api.router)
+app.include_router(trading_api.ws_router)
 
 app.mount("/css", StaticFiles(directory="static/css"), name="css")
 app.mount("/js",  StaticFiles(directory="static/js"),  name="js")

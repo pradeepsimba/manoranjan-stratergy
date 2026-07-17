@@ -13,6 +13,10 @@ from app.state import get_state
 from app.ws.account_ws import account_ws_manager
 
 router = APIRouter(prefix="/api")
+# Unprefixed — /ws/account must sit at the bare path (matching /ws/market in
+# market.py and what app.js's connectWS('/ws/account', ...) actually requests),
+# NOT under /api like every REST endpoint on `router` above.
+ws_router = APIRouter()
 
 _db = None
 
@@ -376,7 +380,7 @@ async def console_pnl(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[
 
 # ── Authenticated account WebSocket (order fills, funds/holdings/positions) ──
 
-@router.websocket("/ws/account")
+@ws_router.websocket("/ws/account")
 async def account_ws(websocket: WebSocket) -> None:
     user_id = user_id_from_session(websocket)
     if user_id is None:
