@@ -63,6 +63,16 @@ def _today_range() -> Tuple[str, str]:
     return from_date, to_date
 
 
+def _day_str(d) -> str:
+    """
+    Full-datetime string for a bare `date` — the historical API's from_date/
+    to_date query params are bound server-side as LocalDateTime and reject a
+    plain "YYYY-MM-DD" string, so every call site must format through here
+    rather than `date.isoformat()`.
+    """
+    return d.strftime("%Y-%m-%dT00:00:00")
+
+
 # ── Core fetch (one batch) ─────────────────────────────────────────────────────
 
 async def _fetch(
@@ -213,8 +223,8 @@ async def fetch_indicator_history(
     errors:    Optional[list] = None,
 ) -> Dict[str, List[Candle]]:
     today     = datetime.now(IST).date()
-    from_date = (today - timedelta(days=days_back)).isoformat()
-    to_date   = (today + timedelta(days=1)).isoformat()
+    from_date = _day_str(today - timedelta(days=days_back))
+    to_date   = _day_str(today + timedelta(days=1))
     stocks    = [{"stockname": sym, "stock_symbol": tok}
                  for sym, tok in watchlist.items()]
     if not stocks:

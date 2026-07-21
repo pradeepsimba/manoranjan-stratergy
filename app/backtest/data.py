@@ -19,7 +19,7 @@ import numpy as np
 import app.config as cfg
 from app.engine.watchlist import fetch_active_watchlist
 from app.models import Candle
-from app.services.historical_data import _fetch_all
+from app.services.historical_data import _day_str, _fetch_all
 
 
 @dataclass
@@ -121,8 +121,8 @@ async def load_backtest_data(from_d: date, to_d: date,
     if warmup_days is None:
         warmup_days = cfg.BACKTEST_WARMUP_DAYS
     warmup_days = warmup_calendar_days(tf, warmup_days, lookback)
-    fetch_from = (from_d - timedelta(days=warmup_days)).isoformat()
-    fetch_to   = (to_d + timedelta(days=1)).isoformat()
+    fetch_from = _day_str(from_d - timedelta(days=warmup_days))
+    fetch_to   = _day_str(to_d + timedelta(days=1))
 
     stocks = [{"stockname": n, "stock_symbol": t} for n, t in universe.items()]
     # Universe and NIFTY fetches are independent — run them concurrently.
