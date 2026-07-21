@@ -388,6 +388,7 @@ def _delivery_overrides(user_overrides: Optional[Dict] = None) -> Dict[str, Any]
         # usually zero brokerage — the intraday cost defaults understate
         # delivery costs ~9x on STT alone.
         "COST_BROKERAGE_PCT":       cfg.DELIVERY_COST_BROKERAGE_PCT,
+        "COST_BROKERAGE_CAP":       cfg.DELIVERY_COST_BROKERAGE_CAP,
         "COST_STT_SELL":            cfg.DELIVERY_COST_STT,
         "COST_STT_BUY":             cfg.DELIVERY_COST_STT,
         "COST_STAMP_BUY":           cfg.DELIVERY_COST_STAMP,

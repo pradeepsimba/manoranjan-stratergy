@@ -21,7 +21,7 @@ from app.models import IndicatorResult, Position, TrendGate
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS positions (
     id              SERIAL PRIMARY KEY,
-    symbol          VARCHAR(20)    NOT NULL,
+    symbol          VARCHAR(40)    NOT NULL,
     token           VARCHAR(20)    NOT NULL,
     entry_price     NUMERIC(10,2),
     entry_time      TEXT,
@@ -98,6 +98,10 @@ CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, stat
 CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
 -- (the UNIQUE order_id index is created separately in init() — guarded, so
 --  legacy duplicate ids can't stop the app from booting)
+-- Company display names (e.g. "CENTRAL BANK OF INDIA" — 21 chars) can exceed
+-- 20 chars; widen to match backtest_trades.symbol so a long name can't hit
+-- "value too long for type character varying(20)" on an already-created table.
+ALTER TABLE positions ALTER COLUMN symbol TYPE VARCHAR(40);
 -- Add indicator columns to existing tables (idempotent)
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS rsi            NUMERIC(6,2);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS adx            NUMERIC(6,2);

@@ -19,11 +19,19 @@ async def fetch_active_watchlist() -> Dict[str, str]:
     GET https://35.234.219.141:8000/api/clientstatus/
 
     Response format:
-        [[rank, stockname, token], ...]
-    e.g. [[1, "WIPRO", "3787"], [2, "BAJAJ AUTO", "16669"], ...]
+        [[id, name, exchange_token, trading_symbol, instrumental_type], ...]
+    e.g. [[3456, "TATA MOTORS", "3456", "TATAMOTORS", "EQ"], ...]
 
-    Returns {stockname: token} for every entry, excluding known index names.
-    Index instruments (NIFTY 50 etc.) are handled separately by the trend gate.
+    Returns {name: trading_symbol}. The historical-data/WS API keys every
+    request and response row by `stock_symbol` — it must be the real NSE
+    trading_symbol (e.g. "TATAMOTORS"), NOT `exchange_token`: mangling `name`
+    into a guessed symbol breaks on real symbols like "M&M" or "BAJAJ-AUTO",
+    and this app used to send exchange_token there entirely, which the market
+    data server doesn't resolve to any instrument. Everything downstream
+    (candles_5m/dirty_ticks keying, candle_lock, token_to_name, WS filters)
+    treats this value as an opaque string key, so trading_symbol drops in
+    with no other code change needed. Excludes known index names — index
+    instruments (NIFTY 50 etc.) are handled separately by the trend gate.
     """
     st = get_state()
     try:
@@ -53,24 +61,30 @@ async def fetch_active_watchlist() -> Dict[str, str]:
         except (TypeError, ValueError, IndexError):
             return float("inf")
 
-    rows = sorted((e for e in data if isinstance(e, (list, tuple)) and len(e) >= 3),
+    rows = sorted((e for e in data if isinstance(e, (list, tuple)) and len(e) >= 4),
                   key=_rank)
 
     watchlist: Dict[str, str] = {}
     for entry in rows:
         # Normalise non-breaking spaces: Gemini echoes names back with regular
-        # spaces, so a raw \xa0 in the name would never map to a token again.
+        # spaces, so a raw \xa0 in the name would never map to a symbol again.
         stockname = str(entry[1]).replace("\xa0", " ").strip()
-        token     = str(entry[2]).strip()
-        if not stockname or not token:
+        symbol    = str(entry[3]).strip()
+        # Defensive extra filter alongside _INDEX_NAMES: skip anything the
+        # server itself flags as non-equity when instrumental_type is present
+        # (5th element) — don't rely solely on matching the display name.
+        instrumental_type = str(entry[4]).strip().upper() if len(entry) >= 5 else ""
+        if instrumental_type and instrumental_type != "EQ":
+            continue
+        if not stockname or not symbol:
             continue
         if stockname.upper() in _INDEX_NAMES:
             continue
-        if stockname in watchlist and watchlist[stockname] != token:
+        if stockname in watchlist and watchlist[stockname] != symbol:
             print(f"Client status: duplicate name '{stockname}' "
-                  f"({watchlist[stockname]} vs {token}) — keeping the first")
+                  f"({watchlist[stockname]} vs {symbol}) — keeping the first")
             continue
-        watchlist[stockname] = token
+        watchlist[stockname] = symbol
 
     print(f"Active watchlist from client status: {len(watchlist)} stocks")
     return watchlist

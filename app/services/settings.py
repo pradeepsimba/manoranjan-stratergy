@@ -201,6 +201,9 @@ SPEC: List[Dict[str, Any]] = [
 
     _s("DELIVERY_COST_BROKERAGE_PCT", "Brokerage % (delivery)", "float", "Delivery Mode",
        min_=0, max_=0.01, step=0.0001, help_="CNC brokerage — 0 at discount brokers."),
+    _s("DELIVERY_COST_BROKERAGE_CAP", "Brokerage cap ₹/order (delivery)", "float", "Delivery Mode",
+       min_=0, max_=1000, step=1, help_="Per-order brokerage cap for delivery — the intraday "
+       "cap otherwise silently under-caps a large delivery position's brokerage."),
     _s("DELIVERY_COST_STT", "STT (delivery, both legs)", "float", "Delivery Mode",
        min_=0, max_=0.01, step=0.0001,
        help_="Delivery STT is 0.1% on BOTH buy and sell (intraday: 0.025% sell only)."),

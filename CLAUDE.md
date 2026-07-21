@@ -31,7 +31,7 @@ python main.py                # serves http://0.0.0.0:8080
 
 - **Market data server** `35.234.219.141` (self-signed cert, `verify=False`):
   - REST `:8000/api/historical-data/` — historical candles (POST, batched 100/req).
-  - REST `:8000/api/clientstatus/` — the day's high-volume stock list `[[rank, name, token], ...]`.
+  - REST `:8000/api/clientstatus/` — the day's high-volume stock list `[[id, name, exchange_token, trading_symbol, instrumental_type], ...]`. `trading_symbol` (NOT `exchange_token`) is what the historical-data/WS API expects as `stock_symbol` — see the Keying gotcha below.
   - WebSocket `:8083/historical-data` — live 5m + 1h ticks.
 - **Gemini** (`google-genai` SDK) — pre-market news screen with Google-Search grounding.
 - **PostgreSQL** via `asyncpg`.
@@ -75,7 +75,7 @@ Strategy core (shared by live **and** backtest, keep it that way): `check_trend`
 
 ## Hard conventions — get these wrong and it breaks
 
-- **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** (numeric string). `ltp`, `positions`, `closed_positions`, `traded_today`, `depth` (order-book snap) are keyed by **SYMBOL NAME**. `full_watchlist` (all high-volume) and `active_watchlist` (Gemini-tradeable subset) are both `{name: token}`; `token_to_name` (all tokens → name) is the reverse bridge the tick loop iterates. Always map correctly.
+- **Keying:** `candles_5m/1h` and `dirty_ticks` are keyed by **TOKEN** — this is `trading_symbol` (e.g. `"TATAMOTORS"`), NOT `exchange_token`: the historical-data/WS API correlates every request/response row by `stock_symbol`, and that field must be the real NSE trading symbol (`fetch_active_watchlist` in `app/engine/watchlist.py` builds it that way; nothing downstream assumes it's numeric — it's an opaque string key everywhere). `ltp`, `positions`, `closed_positions`, `traded_today`, `depth` (order-book snap) are keyed by **SYMBOL NAME**. `full_watchlist` (all high-volume) and `active_watchlist` (Gemini-tradeable subset) are both `{name: token}`; `token_to_name` (all tokens → name) is the reverse bridge the tick loop iterates. Always map correctly. **Caveat:** `NIFTY50_TOKEN = "99926000"` (in `app/config.py`) is a hardcoded static value predating this trading_symbol convention — unverified whether the market data server still resolves it under the new contract; if the NIFTY feed ever goes silent, check whether it now needs NIFTY's own `trading_symbol` instead.
 - **`positions` holds OPEN trades only.** Closing moves a position to `closed_positions` (in `paper_trade._finalize`). `len(positions)` is therefore a true *concurrent* count — do not reintroduce closed positions into it.
 - **Locking:** candle lists are mutated by the WS thread and read by pool workers — every shared-candle access goes through `st.candle_lock(token)`; NIFTY lists through `st._nifty_lock`. Positions/`daily_pnl`/`dirty_ticks` are mutated only on the event-loop thread (no lock needed); pool workers only *read* them.
 - **Candle lists are strictly chronological.** `market_data._upsert/_upsert_list` update the in-progress bar on an equal `start_time`, append on a newer one, and **drop** stale out-of-order bars (reconnect replays) — the day-suffix walk in `scan_stock` and the pattern checks depend on this ordering; don't remove the guard.

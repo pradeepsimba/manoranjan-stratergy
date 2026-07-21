@@ -37,6 +37,7 @@ function connect() {
 let _pendingData = null;
 let _rafPending  = false;
 let _posRowEls   = {};   // symbol → <tr> for DOM diffing
+let _scanRowEls  = {};   // symbol → <tr> for DOM diffing (last_scan_results is deduped by symbol)
 
 function scheduleRender(d) {
   _pendingData = d;
@@ -270,12 +271,34 @@ function renderScans(scans) {
   const tbody = document.getElementById('scans-tbody');
 
   if (!scans.length) {
+    _scanRowEls = {};
     const empty = '<tr><td colspan="3" class="empty-cell">Waiting for scans…</td></tr>';
     if (tbody._h !== empty) { tbody._h = empty; tbody.innerHTML = empty; }
     return;
   }
+  if (tbody.querySelector('.empty-cell')) tbody.innerHTML = '';
 
-  const html = scans.slice(-25).reverse().map(r => {
+  // last_scan_results is deduped by symbol server-side (record_scan pops then
+  // reinserts), so each symbol appears at most once here — safe to key the
+  // row cache by symbol and patch cells in-place instead of rebuilding the
+  // whole tbody's innerHTML every push (which flashed every ~1s while active).
+  const rows = scans.slice(-25).reverse();
+  const seen = {};
+
+  rows.forEach(r => {
+    seen[r.symbol] = true;
+    let tr = _scanRowEls[r.symbol];
+    if (!tr) {
+      tr = document.createElement('tr');
+      for (let i = 0; i < 3; i++) {
+        const td = document.createElement('td');
+        td._h = null; td._c = null;
+        tr.appendChild(td);
+      }
+      tr.children[2].style.cssText =
+        'color:var(--txt-2);font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis';
+      _scanRowEls[r.symbol] = tr;
+    }
     const passed = !!r.pass;
     // Escape server-supplied strings (symbols like "M&M", failure reasons) —
     // the pass-branch is numbers + intentional &middot; entities, left as-is.
@@ -284,13 +307,30 @@ function renderScans(scans) {
           ? `@${fmt2(r.signal.ltp)} &middot; RSI ${fmt2(r.signal.rsi)} &middot; ADX ${fmt2(r.signal.adx)}`
           : 'signal')
       : escHtml(r.reason || '');
-    return `<tr>
-      <td>${escHtml(r.symbol)}</td>
-      <td><span class="badge ${passed ? 'green' : 'gray'}">${passed ? 'SIGNAL' : 'skip'}</span></td>
-      <td style="color:var(--txt-2);font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis">${detail}</td>
-    </tr>`;
-  }).join('');
-  if (tbody._h !== html) { tbody._h = html; tbody.innerHTML = html; }
+    const cells = tr.children;
+    _setCell(cells[0], escHtml(r.symbol), '');
+    _setCell(cells[1], `<span class="badge ${passed ? 'green' : 'gray'}">${passed ? 'SIGNAL' : 'skip'}</span>`, '');
+    _setCell(cells[2], detail, '');
+  });
+
+  Object.keys(_scanRowEls).forEach(sym => {
+    if (!seen[sym]) {
+      if (_scanRowEls[sym].parentNode) _scanRowEls[sym].remove();
+      delete _scanRowEls[sym];
+    }
+  });
+
+  let needReorder = tbody.children.length !== rows.length;
+  if (!needReorder) {
+    for (let i = 0; i < rows.length; i++) {
+      if (tbody.children[i] !== _scanRowEls[rows[i].symbol]) { needReorder = true; break; }
+    }
+  }
+  if (needReorder) {
+    const frag = document.createDocumentFragment();
+    rows.forEach(r => frag.appendChild(_scanRowEls[r.symbol]));
+    tbody.appendChild(frag);
+  }
 }
 
 function setStatus(which, text, cls) {

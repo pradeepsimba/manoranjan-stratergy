@@ -438,17 +438,16 @@ class SchedulerService:
                 return
             self._pending_exit_writes.pop(0)
             if n == 0:
-                # Entry queue is empty at this point (flushed above), so the
-                # row either landed already-CLOSED via a retried entry save
+                # The entry queue is ALWAYS empty here: the loop above either
+                # drained it fully or returned early on a failure (never
+                # reaching this loop at all this call). So the row either
+                # landed already-CLOSED via a retried entry save
                 # (save_position persists exit fields — nothing left to do)
-                # or never existed at all. Keeping the kw would retry a
-                # guaranteed 0-row UPDATE every 5s forever — drop it loudly.
-                if self._pending_entry_saves:
-                    remaining.append(kw)   # its entry save may still land
-                else:
-                    print(f"Exit write unresolvable ({kw['symbol']} "
-                          f"{kw['day']}): no OPEN row — dropped "
-                          f"(entry likely persisted already-closed)")
+                # or never existed at all — keeping the kw would retry a
+                # guaranteed 0-row UPDATE every 5s forever. Drop it loudly.
+                print(f"Exit write unresolvable ({kw['symbol']} "
+                      f"{kw['day']}): no OPEN row — dropped "
+                      f"(entry likely persisted already-closed)")
         self._pending_exit_writes.extend(remaining)
 
     async def _tick_exits(self) -> None:
@@ -753,7 +752,14 @@ class SchedulerService:
                    for s in st.positions if not st.ltp.get(s)}
         if missing:
             try:
-                data = await fetch_today_candles(missing, [cfg.INTERVAL_5M])
+                # Own errors list: this small EOD fetch must never write
+                # st.api_status itself — a healthy result here would overwrite
+                # an earlier "API partial" that accurately reflects a bad day
+                # (see the identical pattern/reasoning in _backfill_5m).
+                eod_errors: list = []
+                data = await fetch_today_candles(missing, [cfg.INTERVAL_5M], errors=eod_errors)
+                if eod_errors:
+                    print(f"EOD: last-price fetch errors: {eod_errors[0]}")
                 for sym, tok in missing.items():
                     bars = data.get(tok, {}).get(cfg.INTERVAL_5M) or []
                     if bars:
@@ -847,6 +853,7 @@ class SchedulerService:
         st.nifty_candles_5m.clear()
         st.dirty_ticks.clear()
         st.dirty_ticks_push.clear()
+        st.tick_version.clear()
         st.token_to_name.clear()
         st.full_watchlist.clear()
         st.active_watchlist.clear()

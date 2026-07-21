@@ -226,6 +226,7 @@ _DEFAULTS: Dict[str, Any] = {
     # incurs a flat DP charge. Shadowed onto the plain COST_* keys during
     # positional replays; without this delivery P&L is overstated ~0.2%/trade.
     "DELIVERY_COST_BROKERAGE_PCT": 0.0,      # CNC brokerage (0 at discount brokers)
+    "DELIVERY_COST_BROKERAGE_CAP": 20.0,     # ₹ cap per order (delivery brokerage, if any)
     "DELIVERY_COST_STT":           0.001,    # 0.1% STT — applied to BOTH legs
     "DELIVERY_COST_STAMP":         0.00015,  # 0.015% stamp duty, buy side
     "DELIVERY_COST_DP":            15.93,    # flat ₹ DP charge per sell

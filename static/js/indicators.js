@@ -386,9 +386,9 @@ function _updateTR(tr, r) {
       '<span class="meter-num ' + ratioCls + '">' + bp.toFixed(0) + '%</span></span>';
   }
 
-  _setCell(c[0],  r.symbol,                                                        'col-sym card-title');
+  _setCell(c[0],  escHtml(r.symbol),                                               'col-sym card-title');
   _setCell(c[1],  fmtINR(r.ltp),                                                   'ta-r');
-  _setCell(c[2],  r.bar_time || '<span class="muted">—</span>',                    '');
+  _setCell(c[2],  r.bar_time ? escHtml(r.bar_time) : '<span class="muted">—</span>', '');
   _setCell(c[3],  rsiHtml,                                                          'ta-r');
   _setCell(c[4],  r.adx      != null ? r.adx.toFixed(1)      : '—',               adxCls  + ' ta-r');
   _setCell(c[5],  r.plus_di  != null ? r.plus_di.toFixed(1)  : '<span class="muted">—</span>', 'pos-num ta-r');
@@ -397,7 +397,7 @@ function _updateTR(tr, r) {
   _setCell(c[8],  fmtINR(r.support),                                               'ta-r');
   _setCell(c[9],  fmtINR(r.vwap),                                                  'ta-r');
   _setCell(c[10], vposTxt,                                                          vposCls);
-  _setCell(c[11], r.pattern || '—',                                                 r.pattern ? 'pat-td' : 'muted');
+  _setCell(c[11], r.pattern ? escHtml(r.pattern) : '—',                             r.pattern ? 'pat-td' : 'muted');
   _setCell(c[12], fmtINR(r.bid),                                                   'ta-r');
   _setCell(c[13], fmtINR(r.ask),                                                   'ta-r');
   _setCell(c[14], r.spread != null ? r.spread.toFixed(2) : '—',                   'ta-r muted');
