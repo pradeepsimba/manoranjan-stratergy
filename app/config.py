@@ -40,7 +40,7 @@ CLIENT_STATUS_URL = f"https://{API_HOST}:8000/api/clientstatus/"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 POSTGRES_DSN   = os.getenv(
     "POSTGRES_DSN",
-    "postgresql://postgres:password@localhost/trading_db",
+    "postgresql://postgres:ab45cd12@localhost/trading_db",
 )
 
 # ── Static: data intervals + NIFTY identity ───────────────────────────────────
@@ -91,7 +91,11 @@ BACKTEST_MODES = ["intraday", "delivery"]
 RISK_MODES = ["fixed_amount", "capital_pct"]
 
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
-HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
+# Must stay <= backend_server_algo's MAX_STOCKS_PER_REQUEST (currently 50, see app/views.py) -
+# historical_data.py's _fetch() POSTs one batch as a single request, and the server rejects the
+# whole batch with a 400 if it's over that cap. This was 100 (over the cap), so every full-size
+# batch 400'd outright - only a smaller leftover batch, if any, ever succeeded.
+HIST_BATCH_SIZE   = 50    # max stocks per single historical API request
 SCAN_WORKERS      = 16    # ThreadPoolExecutor size for the parallel scan
 MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
 
