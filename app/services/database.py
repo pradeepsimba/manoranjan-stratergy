@@ -120,7 +120,16 @@ class DatabaseService:
         self._order_id_unique = False
 
     async def init(self) -> None:
-        self._pool = await asyncpg.create_pool(cfg.POSTGRES_DSN, min_size=2, max_size=15)
+        # command_timeout bounds any single query - without it, one stalled query
+        # (row-lock contention, a slow disk, a network blip to Postgres) holds its
+        # connection forever with nothing to cancel it. With max_size=15, a
+        # handful of such stalls exhausts the pool and every other caller
+        # (dashboard reads, save_position, update_position_exit, settings
+        # load/save) then blocks indefinitely on pool.acquire() with no
+        # self-recovery short of a process restart.
+        self._pool = await asyncpg.create_pool(
+            cfg.POSTGRES_DSN, min_size=2, max_size=15, command_timeout=30,
+        )
         async with self._pool.acquire() as conn:
             await conn.execute(_SCHEMA)
             # Separate + guarded: makes save_position's INSERT idempotent for

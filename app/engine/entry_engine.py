@@ -44,6 +44,7 @@ def scan_stock(
     token:       str,
     nifty_gates: Tuple[bool, bool],   # (nifty_daily_green, nifty_above_vwap) — precomputed once per bar
     tradeable:   bool = True,         # False for non-Gemini stocks: update indicators but skip entry
+    available:   Optional[float] = None,   # free capital, precomputed once per scan cycle — see caller
 ) -> Optional[EntrySignal]:
     """
     Full 5-minute entry scan for one stock on the most recent completed bar.
@@ -76,13 +77,19 @@ def scan_stock(
         candles_5m = list(st.candles_5m.get(token, []))
         lst_1h     = st.candles_1h.get(token)
         candles_1h = [lst_1h[-1]] if lst_1h else []
+        # Read under the SAME lock as the candle snapshot above: market_data.py
+        # writes st.ltp inside this same per-token lock, right after the candle
+        # mutation, specifically so this snapshot always pairs a candle with the
+        # ltp captured at the exact same tick - never a newer candle matched
+        # against a stale, pre-update ltp (or vice versa).
+        ltp = st.ltp.get(symbol, candles_5m[-1].close if candles_5m else 0.0)
 
     if len(candles_5m) < 30:
         st.record_scan(symbol, {"pass": False, "reason": "Insufficient 5m bars"})
         return None
 
-    # LTP and depth dict writes are GIL-protected in CPython — safe without a lock
-    ltp   = st.ltp.get(symbol, candles_5m[-1].close)
+    # depth dict writes are GIL-protected in CPython and use their own
+    # atomic-swap merge (see market_data.py) — safe to read without a lock.
     depth = st.depth.get(symbol, {})
 
     # Today's bars are a contiguous suffix (candles are chronological). Find the
@@ -164,13 +171,20 @@ def scan_stock(
     # ── Position sizing ───────────────────────────────────────────────────────
     # Concurrent positions SHARE the account: size from what open positions
     # haven't already committed (value ÷ leverage), matching the backtest's
-    # Portfolio.margin_used semantics. list() snapshots the dict atomically
-    # (CPython/GIL) — positions are mutated only on the event loop while this
-    # runs in a scan-pool worker.
-    lev       = cfg.INTRADAY_LEVERAGE
-    committed = sum(p.entry_price * p.quantity
-                    for p in list(st.positions.values())) / lev
-    available = cfg.ACCOUNT_BALANCE - committed
+    # Portfolio.margin_used semantics. Depends only on global position state,
+    # not on the symbol being scanned, so the caller computes this ONCE per
+    # cycle and passes it in — recomputing it per stock scanned was O(dirty ×
+    # positions) work per cycle where O(positions) suffices (same class of
+    # "hoist the per-bar-invariant value" optimization the NIFTY gates already
+    # get). Falls back to computing it here for any caller that doesn't
+    # precompute it. list() snapshots the dict atomically (CPython/GIL) —
+    # positions are mutated only on the event loop while this runs in a
+    # scan-pool worker.
+    if available is None:
+        lev       = cfg.INTRADAY_LEVERAGE
+        committed = sum(p.entry_price * p.quantity
+                        for p in list(st.positions.values())) / lev
+        available = cfg.ACCOUNT_BALANCE - committed
     if available <= 0:
         st.record_scan(symbol, {"pass": False, "reason": "No free capital"})
         return None

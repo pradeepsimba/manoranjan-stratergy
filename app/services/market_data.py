@@ -158,6 +158,17 @@ class MarketDataService:
         if not self._running:
             return
         await self.stop()
+        # Every connection is being torn down and rebuilt (see docstring), so
+        # every symbol's ltp is about to go stale for the reconnect+resubscribe
+        # gap. Without clearing it, _tick_exits() (scheduler.py) keeps reading
+        # the LAST price from before the restart and evaluating SL/target
+        # against it as if it were live - st.ltp.get(symbol) never returns
+        # None just because the feed is briefly down. Clearing it makes
+        # _tick_exits' existing `if not ltp: continue` guard skip these
+        # symbols until a fresh tick repopulates them post-reconnect, instead
+        # of silently acting on minutes-old prices.
+        self.state.ltp.clear()
+        self.state.nifty_ltp = 0.0
         # stop() advertises "WS Stopped" — overwrite so the dashboard doesn't
         # flash a scary status during an intentional resubscribe.
         self.state.ws_status = "WS Resubscribing…"
@@ -385,10 +396,20 @@ class MarketDataService:
 
         # Per-token lock for regular stocks; separate nifty lock for the shared
         # NIFTY candle lists so scan workers never contend across unrelated tokens.
+        # ltp is written INSIDE the same lock as the candle mutation, right below -
+        # previously it was written afterward, unlocked. A scan-pool worker thread
+        # takes its candle+ltp snapshot under this same lock (see entry_engine.py),
+        # so writing them separately left a window where a reader could observe
+        # THIS tick's already-updated candle paired with the PREVIOUS tick's ltp
+        # (or vice versa) - a torn read across two values meant to describe the
+        # same instant, feeding inconsistent near_support/VWAP-vs-sizing prices
+        # into the same entry decision.
         if symbol == cfg.NIFTY50_TOKEN:
             with self.state._nifty_lock:
                 if interval == "5m":
                     self._upsert_list(self.state.nifty_candles_5m, candle)
+                if ltp > 0:
+                    self.state.nifty_ltp = ltp
         else:
             with self.state.candle_lock(symbol):
                 if interval == "5m":
@@ -399,6 +420,8 @@ class MarketDataService:
                     self.state.tick_version[symbol] = self.state.tick_version.get(symbol, 0) + 1
                 elif interval == "1h":
                     self._upsert(self.state.candles_1h, symbol, candle)
+                if ltp > 0 and stockname:
+                    self.state.ltp[stockname] = ltp
 
         # Dashboard "last bar" clock — only for accepted STOCK 5m bars, and never
         # move it backwards (a reconnect-replayed stale bar is dropped by _upsert
@@ -407,12 +430,6 @@ class MarketDataService:
             bt = candle.start_time[11:16]
             if self.state.last_5m_bar_time is None or bt >= self.state.last_5m_bar_time:
                 self.state.last_5m_bar_time = bt
-
-        if ltp > 0:
-            if symbol == cfg.NIFTY50_TOKEN:
-                self.state.nifty_ltp = ltp
-            elif stockname:
-                self.state.ltp[stockname] = ltp
 
         # Parse order-book depth from the snap field (stocks only; NIFTY has no
         # real order book — its snap shows -0.01 sentinels which _parse_depth
@@ -458,7 +475,9 @@ class MarketDataService:
         # would break the chronological order every scan relies on; drop it.
 
     @staticmethod
-    def _upsert_list(lst: list, candle: Candle) -> None:
+    def _upsert_list(lst: "_deque", candle: Candle) -> None:
+        # lst is a deque(maxlen=...) (see AppState.nifty_candles_5m) - append()
+        # auto-evicts the oldest entry in O(1) once full, same as _upsert() above.
         if not lst:
             lst.append(candle)
             return
@@ -467,5 +486,3 @@ class MarketDataService:
             lst[-1] = candle
         elif candle.start_time > last:
             lst.append(candle)
-            if len(lst) > _MAX_CANDLES:
-                lst.pop(0)

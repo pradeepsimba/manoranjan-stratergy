@@ -24,6 +24,15 @@ import app.config as cfg
 # (e.g. from citations) don't merge into a single wrong match.
 _JSON_ARRAY = re.compile(r"\[.*?\]", re.DOTALL)
 
+# Without an explicit timeout, a network stall on Google's side never raises -
+# it just blocks forever. The module's whole safety design ("on any failure,
+# return [] and fall back to the full watchlist") only fires on an exception,
+# so a hang here means the pre-market screen never completes AND permanently
+# ties up one thread of the shared default ThreadPoolExecutor that
+# asyncio.to_thread() draws from (the same pool historical_data.py's JSON
+# decode/candle-parsing offloads use to keep the event loop from stalling).
+_TIMEOUT_MS = 60_000
+
 
 def _find_json_array(text: str, known: Optional[set] = None) -> list:
     """Return the answer JSON string-array from a grounded model response.
@@ -103,6 +112,7 @@ def _grounded_screen(stocknames: List[str]) -> List[str]:
         config = types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
             temperature=1.0,
+            http_options=types.HttpOptions(timeout=_TIMEOUT_MS),
         )
 
         response = client.models.generate_content(

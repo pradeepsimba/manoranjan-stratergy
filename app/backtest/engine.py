@@ -74,10 +74,19 @@ def _scan_symbol(
     if trend_blockers(gate):
         return None
 
+    # Checked against the ACTUAL accumulated history (gidx + 1), not the
+    # TALIB_LOOKBACK-capped window below - end - lo can never exceed
+    # TALIB_LOOKBACK, so checking `end - lo < 30` meant any override
+    # combination with TALIB_LOOKBACK itself under 30 (settings.py's own
+    # validation only ties TALIB_LOOKBACK to the MACD/RSI/ADX period math, not
+    # to this floor) made this warmup check fail on EVERY bar of the run,
+    # silently producing a zero-trade backtest indistinguishable from "no
+    # setups found". Live's equivalent guard (entry_engine.py) already checks
+    # the real history length, not a lookback-capped window - this now matches.
+    if gidx + 1 < 30:
+        return None
     lo  = max(0, gidx - cfg.TALIB_LOOKBACK + 1)
     end = gidx + 1
-    if end - lo < 30:
-        return None
 
     # Zero-copy views of the precomputed SymbolSeries arrays + O(1) prefix-sum
     # session VWAP; entry_short_circuit skips TA-Lib on cheap-gate rejections.
@@ -256,7 +265,36 @@ def _replay_day(
         day_syms.append(entry)
         by_token[token] = entry
 
-    for tm, ngidx in grid:
+    # Iterate the UNION of every symbol's own bar times plus NIFTY's - NOT just
+    # NIFTY's grid. Driving this loop off `grid` alone meant any timestamp
+    # where NIFTY was simply missing a bar (feed hiccup, momentarily stale
+    # index tick) silently skipped EVERY stock's exit/entry check at that
+    # timestamp too, even when that stock's own data was complete - a
+    # materially different (and wrong) result than live trading, which checks
+    # every one of the stock's own bars regardless of NIFTY's feed health.
+    all_times = set(t for t, _ in grid)
+    for _, day_map, _, _ in day_syms:
+        all_times.update(day_map.keys())
+    all_times = sorted(all_times)
+
+    # NIFTY gate values are only defined at NIFTY's own bar times, so
+    # forward-fill: at each candidate time, use the latest NIFTY bar at or
+    # before it (never a later one - that would be look-ahead). Both `grid`
+    # and `all_times` are already sorted, so this is a single O(n) merge, not
+    # a re-scan per timestamp.
+    grid_idx   = 0
+    cur_ngidx  = None
+    for tm in all_times:
+        while grid_idx < len(grid) and grid[grid_idx][0] <= tm:
+            cur_ngidx = grid[grid_idx][1]
+            grid_idx += 1
+        if cur_ngidx is None:
+            # No NIFTY bar yet today at or before this time - matches the
+            # original code's behavior of not starting evaluation before
+            # NIFTY's first bar of the day (nothing to gate on yet).
+            continue
+        ngidx = cur_ngidx
+
         nifty_ltp  = nifty.series[ngidx].close
         # O(1) session VWAP from the precomputed prefix sums — same formula the
         # per-stock scan uses, forward-in-time only (no look-ahead). cum_tp

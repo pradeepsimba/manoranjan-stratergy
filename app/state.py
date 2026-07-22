@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Dict, List, Optional, Set
+from collections import deque
+from typing import Deque, Dict, List, Optional, Set
 
+import app.config as cfg
 from app.models import Candle, Position, TradingPhase
 
 # Strong references to fire-and-forget tasks. The event loop keeps only WEAK
@@ -65,8 +67,13 @@ class AppState:
         # since I last looked" without re-walking/re-resampling candles_5m.
         self.tick_version: Dict[str, int] = {}
 
-        # NIFTY 50 session 5m bars — index trend gate + session VWAP
-        self.nifty_candles_5m: List[Candle] = []
+        # NIFTY 50 session 5m bars — index trend gate + session VWAP.
+        # deque(maxlen=...), not a plain list: market_data._upsert_list used to
+        # evict the oldest bar with lst.pop(0) once this passed MAX_CANDLE_BUFFER,
+        # an O(n) shift-the-whole-list operation on the hot tick path - every
+        # other candle store already used deque(maxlen=...) for O(1) eviction,
+        # this one was just inconsistent with the rest.
+        self.nifty_candles_5m: Deque[Candle] = deque(maxlen=cfg.MAX_CANDLE_BUFFER)
 
         # ── Live prices ───────────────────────────────────────────────────────
         self.ltp:       Dict[str, float] = {}   # symbol → latest LTP

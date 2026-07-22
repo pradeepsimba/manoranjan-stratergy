@@ -48,6 +48,17 @@ _SCAN_POOL = ThreadPoolExecutor(
     thread_name_prefix="scan",
 )
 
+# Separate pool for the 5-minute full-watchlist scan (_full_scan_all). Sharing
+# _SCAN_POOL with the 100ms tick-entries scan meant a queued full scan
+# (hundreds of stocks) could delay the NEXT tick cycle's entry evaluation by
+# the full scan's entire wall-clock duration - breaking the 100ms latency
+# bound entries are supposed to run at. Same worker count: the full scan still
+# needs real parallelism across hundreds of stocks every 5 minutes.
+_FULL_SCAN_POOL = ThreadPoolExecutor(
+    max_workers=cfg.SCAN_WORKERS,
+    thread_name_prefix="fullscan",
+)
+
 
 def _now() -> datetime:
     return datetime.now(IST)
@@ -77,17 +88,19 @@ async def _sleep_toward(hour: int, minute: int) -> None:
     await asyncio.sleep(min(_seconds_until(hour, minute), 30.0))
 
 
-def _scan_chunk(items, nifty_gates):
+def _scan_chunk(items, nifty_gates, available):
     """
     Scan a chunk of (symbol, token, tradeable) triples in one worker thread and
     return the list of entry signals. Batching into ~SCAN_WORKERS chunks collapses
     hundreds of run_in_executor dispatches per cycle down to a handful.
     tradeable=False stocks update indicator_snapshot but never generate a signal.
+    `available` (free capital) is computed once per cycle by the caller and
+    passed straight through — see _scan_in_pool.
     """
     out = []
     for sym, tok, tradeable in items:
         try:
-            sig = scan_stock(sym, tok, nifty_gates, tradeable=tradeable)
+            sig = scan_stock(sym, tok, nifty_gates, tradeable=tradeable, available=available)
         except Exception as e:
             # Isolate per stock — one bad symbol must not kill the whole chunk.
             print(f"Scan error ({sym}): {e}")
@@ -125,6 +138,10 @@ class SchedulerService:
         self._next_db_retry: float = 0.0   # monotonic; throttles retries to 1/5s
         # token → loop.time() of its last display-only scan (see _tick_entries)
         self._display_scan_ts: dict = {}
+        # Most recently spawn()'d _full_scan_all task - _run_eod awaits it
+        # before clearing indicator_snapshot/etc, so a scan worker thread still
+        # mid-flight can't write a stale symbol back in right after the reset.
+        self._full_scan_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         self._tasks = [
@@ -137,6 +154,21 @@ class SchedulerService:
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+
+        # Drain any queued DB retries before the process tears down - without this, a
+        # transient DB outage followed by a deploy/restart/SIGTERM before the next 5s
+        # retry tick would silently lose queued position entry/exit rows with no log at
+        # all (unlike _run_eod, which already drains and explicitly logs what it drops).
+        if self._pending_exit_writes or self._pending_entry_saves:
+            await self._flush_db_retries()
+        if self._pending_entry_saves or self._pending_exit_writes:
+            lost_entries = [p.symbol for p in self._pending_entry_saves]
+            lost_exit_count = len(self._pending_exit_writes)
+            self._pending_entry_saves.clear()
+            self._pending_exit_writes.clear()
+            print(f"=== SHUTDOWN: DB still down - DROPPED {len(lost_entries)} unsaved "
+                  f"position row(s) {lost_entries} and {lost_exit_count} unsaved exit "
+                  f"update(s) ===")
 
     # ── Phase driver ──────────────────────────────────────────────────────────
 
@@ -172,7 +204,13 @@ class SchedulerService:
                     else:
                         st.phase = TradingPhase.WAIT_ZONE
 
-                    if not st.active_watchlist:
+                    # premarket-already-ran-today guard: without it, an operator
+                    # intentionally emptying the watchlist mid-session (e.g. to
+                    # pause trading) looked identical to "process just
+                    # restarted, recover the watchlist" - silently re-running
+                    # the Gemini screen and overwriting their choice on the
+                    # very next ≤30s wake-up.
+                    if not st.active_watchlist and self._premarket_date != today:
                         phase_name = st.phase.value
                         print(f"=== RECOVERY: restarted during {phase_name} — running premarket + load ===")
                         st.api_status = "Recovery: fetching watchlist…"
@@ -295,7 +333,7 @@ class SchedulerService:
 
         # Seed indicator_snapshot for ALL stocks immediately after loading history
         loop = asyncio.get_running_loop()
-        spawn(self._full_scan_all(loop))
+        self._full_scan_task = spawn(self._full_scan_all(loop))
 
     async def _run_active_phase(self) -> None:
         """
@@ -314,7 +352,7 @@ class SchedulerService:
         loop = asyncio.get_running_loop()
 
         # Seed indicator_snapshot for ALL stocks immediately on entry.
-        spawn(self._full_scan_all(loop))
+        self._full_scan_task = spawn(self._full_scan_all(loop))
         last_full_scan = loop.time()
 
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
@@ -332,7 +370,7 @@ class SchedulerService:
                 # Refresh all stocks periodically (non-Gemini stocks only update here)
                 now_ts = loop.time()
                 if now_ts - last_full_scan >= cfg.FULL_SCAN_INTERVAL_S:
-                    spawn(self._full_scan_all(loop))
+                    self._full_scan_task = spawn(self._full_scan_all(loop))
                     last_full_scan = now_ts
             except Exception as e:
                 # Never let one bad cycle kill the engine for the rest of the day.
@@ -359,7 +397,10 @@ class SchedulerService:
             items = [(name, tok, name in tradeable_set)
                      for name, tok in st.full_watchlist.items()]
 
-            await self._scan_in_pool(loop, items, nifty_gates)
+            # Own pool (_FULL_SCAN_POOL), not _SCAN_POOL - see its definition:
+            # this must never queue behind (or ahead of) the 100ms tick-entries
+            # scan.
+            await self._scan_in_pool(loop, items, nifty_gates, pool=_FULL_SCAN_POOL)
             # Returned signals are intentionally discarded — entries are handled
             # only by _tick_entries (which has the dirty-tick freshness guarantee).
         except Exception as e:
@@ -374,16 +415,30 @@ class SchedulerService:
         return compute_nifty_gates(nifty_ltp, nifty_5m)
 
     @staticmethod
-    async def _scan_in_pool(loop, items, nifty_gates) -> list:
+    async def _scan_in_pool(loop, items, nifty_gates, pool=_SCAN_POOL) -> list:
         """
         Partition (symbol, token, tradeable) triples into ≤ SCAN_WORKERS chunks —
         one pool task per worker instead of one per stock. Keeps full parallelism
         while cutting event-loop dispatch overhead ~30×. Returns merged signals.
+        `pool` lets callers with different latency requirements (100ms tick
+        entries vs. the 5-min full scan) use separate executors so one can never
+        queue behind the other - see _SCAN_POOL/_FULL_SCAN_POOL definitions.
         """
+        st = get_state()
+        # Free capital depends only on open positions, not on which stock is
+        # being scanned — computed ONCE here (on the event loop, where
+        # st.positions is only ever mutated, so this read is race-free) and
+        # handed to every worker instead of every scan_stock() call
+        # recomputing the same sum over every open position.
+        lev       = cfg.INTRADAY_LEVERAGE
+        committed = sum(p.entry_price * p.quantity
+                        for p in st.positions.values()) / lev
+        available = cfg.ACCOUNT_BALANCE - committed
+
         size   = max(1, (len(items) + cfg.SCAN_WORKERS - 1) // cfg.SCAN_WORKERS)
         chunks = [items[i : i + size] for i in range(0, len(items), size)]
         results = await asyncio.gather(*[
-            loop.run_in_executor(_SCAN_POOL, _scan_chunk, c, nifty_gates)
+            loop.run_in_executor(pool, _scan_chunk, c, nifty_gates, available)
             for c in chunks
         ])
         return [sig for chunk_res in results for sig in chunk_res]
@@ -427,14 +482,12 @@ class SchedulerService:
                 print(f"Entry-save retry failed ({pos.symbol}): {e}")
                 return
             self._pending_entry_saves.pop(0)
-        remaining: List[dict] = []
         while self._pending_exit_writes:
             kw = self._pending_exit_writes[0]
             try:
                 n = await self._db.update_position_exit(**kw)
             except Exception as e:
                 print(f"Exit-write retry failed ({kw['symbol']}): {e}")
-                self._pending_exit_writes.extend(remaining)
                 return
             self._pending_exit_writes.pop(0)
             if n == 0:
@@ -448,7 +501,6 @@ class SchedulerService:
                 print(f"Exit write unresolvable ({kw['symbol']} "
                       f"{kw['day']}): no OPEN row — dropped "
                       f"(entry likely persisted already-closed)")
-        self._pending_exit_writes.extend(remaining)
 
     async def _tick_exits(self) -> None:
         """Tick-wise SL/target check against the live price for open positions."""
@@ -794,6 +846,21 @@ class SchedulerService:
 
         await self._mkt.stop()
 
+        # Wait for any still-in-flight full scan before clearing state below -
+        # without this, a scan worker thread from a spawn()'d _full_scan_all
+        # that's still running could write a stale symbol's indicator_snapshot
+        # (or candles_5m/candles_1h) right after this function resets it,
+        # leaking today's data into what's supposed to be a clean slate for
+        # tomorrow. _full_scan_all already catches its own errors, so this
+        # should only ever raise on a genuine hang (bounded below) or
+        # cancellation.
+        if self._full_scan_task is not None and not self._full_scan_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(self._full_scan_task), timeout=10.0)
+            except Exception as e:
+                print(f"EOD: in-flight full scan did not finish in time ({e}) — "
+                      f"clearing state anyway")
+
         # All trades are now closed (square-off moved them to closed_positions).
         trades  = st.closed_positions
         total   = len(trades)
@@ -885,22 +952,31 @@ class SchedulerService:
                 fetch_today_candles(wl, [cfg.INTERVAL_1H], errors=fetch_errors),
                 fetch_nifty_candles(errors=fetch_errors),
             )
+            # Same per-token lock market_data._process_tick mutates under - this
+            # loader currently only ever runs while market data is stopped, so
+            # there's no ACTIVE race today, but taking the lock here too means
+            # that stays true even if that calling order ever changes, instead
+            # of being a silent, easy-to-reintroduce assumption.
             for token_key, candles in hist.items():
-                st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
-                # Bump so any reader caching on tick_version (e.g. the
-                # indicators TF viewer) doesn't keep serving pre-load data —
-                # this replaces candles_5m outside the WS tick path, which is
-                # the only other place that mutates it.
-                st.tick_version[token_key] = st.tick_version.get(token_key, 0) + 1
+                with st.candle_lock(token_key):
+                    st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
+                    # Bump so any reader caching on tick_version (e.g. the
+                    # indicators TF viewer) doesn't keep serving pre-load data —
+                    # this replaces candles_5m outside the WS tick path, which is
+                    # the only other place that mutates it.
+                    st.tick_version[token_key] = st.tick_version.get(token_key, 0) + 1
 
             for token_key, frames in today.items():
-                st.candles_1h[token_key] = _deque(
-                    frames.get(cfg.INTERVAL_1H, []), maxlen=cfg.MAX_CANDLE_BUFFER
-                )
+                with st.candle_lock(token_key):
+                    st.candles_1h[token_key] = _deque(
+                        frames.get(cfg.INTERVAL_1H, []), maxlen=cfg.MAX_CANDLE_BUFFER
+                    )
 
             # Replace (not extend) so a re-run of the loader can't accumulate
             # duplicate NIFTY bars, which would skew the index VWAP / daily-open.
-            st.nifty_candles_5m.clear(); st.nifty_candles_5m.extend(nifty_5m)
+            with st._nifty_lock:
+                st.nifty_candles_5m.clear()
+                st.nifty_candles_5m.extend(nifty_5m)
 
             # Single aggregate status for the whole load round — a day trading
             # on a partial universe must not read as healthy.
