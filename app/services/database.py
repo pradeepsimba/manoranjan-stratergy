@@ -38,6 +38,19 @@ CREATE TABLE IF NOT EXISTS instruments (
     tradable      BOOLEAN NOT NULL DEFAULT TRUE,
     verified_at   TIMESTAMPTZ DEFAULT NOW()
 );
+-- 'EQUITY' | 'INDEX' — sourced from clientstatus's own `type` field (see
+-- instrument_discovery.py). An INDEX has no delivery mechanism, so CNC is
+-- rejected for it at order-placement time (app/engine/orders.py).
+ALTER TABLE instruments ADD COLUMN IF NOT EXISTS asset_type VARCHAR(10) NOT NULL DEFAULT 'EQUITY';
+-- The market-data server's alphanumeric symbol code (clientstatus field 4,
+-- e.g. 'KOTAKBANK' for token '1922'). The historical + WS endpoints match a
+-- request by (stockname, symbol_code) — NOT by the numeric token — so this is
+-- the identifier sent on every external call, while `token` stays the internal
+-- primary key everything else (candles/ltp/positions) is keyed by. Nullable so
+-- legacy/seed rows without a known code fall back to `token` (see market_data
+-- / historical_data). NOTE the length: index codes are the full name string
+-- ('NIFTY 50'), so this is wider than a bare ticker.
+ALTER TABLE instruments ADD COLUMN IF NOT EXISTS symbol_code VARCHAR(40);
 
 CREATE TABLE IF NOT EXISTS orders (
     id            SERIAL PRIMARY KEY,
@@ -57,6 +70,13 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_orders_pending_token ON orders(token) WHERE status = 'PENDING';
+-- Exact amount this fill moved through the user's funds (signed: credit positive,
+-- debit negative) — captured at fill time by the order engine, since for a
+-- leveraged MIS fill it's the margin/refund+P&L amount, NOT qty*filled_price
+-- (only true for CNC). NULL for pending/rejected/cancelled orders and for rows
+-- filled before this column existed (Console/Journal cash-flow reporting falls
+-- back to the qty*filled_price estimate for those legacy NULL rows).
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS funds_delta NUMERIC(12,2);
 
 CREATE TABLE IF NOT EXISTS holdings (
     id         SERIAL PRIMARY KEY,
@@ -191,15 +211,15 @@ class DatabaseService:
     async def upsert_instruments(self, rows: List[Dict[str, Any]]) -> None:
         if not rows:
             return
-        values = [(r["token"], r["name"], r["display_name"], r.get("tradable", True))
-                  for r in rows]
+        values = [(r["token"], r["name"], r["display_name"], r.get("tradable", True),
+                  r.get("asset_type", "EQUITY"), r.get("symbol_code")) for r in rows]
         async with self.pool.acquire() as conn:
             await conn.executemany(
                 """
-                INSERT INTO instruments (token, name, display_name, tradable, verified_at)
-                VALUES ($1, $2, $3, $4, NOW())
+                INSERT INTO instruments (token, name, display_name, tradable, asset_type, symbol_code, verified_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
                 ON CONFLICT (token) DO UPDATE
-                    SET name=$2, display_name=$3, tradable=$4, verified_at=NOW()
+                    SET name=$2, display_name=$3, tradable=$4, asset_type=$5, symbol_code=$6, verified_at=NOW()
                 """,
                 values,
             )
@@ -237,14 +257,19 @@ class DatabaseService:
             )
         return dict(row)
 
-    async def fill_order(self, order_id: int, filled_price: float) -> Dict[str, Any]:
+    async def fill_order(self, order_id: int, filled_price: float, funds_delta: float) -> Dict[str, Any]:
+        """`funds_delta` is the exact signed amount this fill just moved through the
+        user's funds (see execute_fill/_apply_mis_fill/square_off_position/
+        exit_holding/eod_square_off_all_mis, each of which already computed it via
+        update_funds) — persisted so Console/Journal reporting can read the true
+        figure back instead of re-deriving qty*price, which is wrong for MIS."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                UPDATE orders SET status='COMPLETE', filled_price=$2, filled_at=NOW()
+                UPDATE orders SET status='COMPLETE', filled_price=$2, filled_at=NOW(), funds_delta=$3
                 WHERE id=$1 RETURNING *
                 """,
-                order_id, filled_price,
+                order_id, filled_price, funds_delta,
             )
         return dict(row)
 
@@ -562,14 +587,22 @@ class DatabaseService:
     async def add_to_position(self, position_id: int, qty: int, price: float,
                               margin_delta: float = 0) -> Dict[str, Any]:
         """Add `qty` more to an existing OPEN position, recomputing the weighted average
-        price and adding the fresh margin blocked for the added qty."""
+        price and adding the fresh margin blocked for the added qty.
+
+        The explicit ::int/::numeric casts on $2 are load-bearing, not decoration:
+        $2 is reused both in a pure-integer context (qty + $2, twice) and inside a
+        numeric multiplication ($3 * $2) — without a cast pinning its type up front,
+        asyncpg/Postgres's parameter-type inference across those mixed occurrences
+        silently produces a WRONG avg_price (empirically verified: 127.67 instead of
+        the correct 128.04 for a real add-to-an-existing-position case), even though
+        qty and margin_used come out correct. Do not remove these casts."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE positions
-                SET qty = qty + $2,
-                    avg_price = ((avg_price * qty) + ($3 * $2)) / (qty + $2),
-                    margin_used = margin_used + $4
+                SET qty = qty + $2::int,
+                    avg_price = ((avg_price * qty) + ($3::numeric * $2::int)) / (qty + $2::int),
+                    margin_used = margin_used + $4::numeric
                 WHERE id=$1 RETURNING *
                 """,
                 position_id, qty, price, margin_delta,

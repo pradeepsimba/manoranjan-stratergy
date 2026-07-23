@@ -116,7 +116,13 @@ class SchedulerService:
                 print(f"Instrument discovery failed: {e}")
         try:
             rows = await self._db.get_tradable_instruments()
-            self._instruments = [{"token": r["token"], "name": r["name"]} for r in rows]
+            # Carry symbol_code (external identity) alongside token (internal key);
+            # fall back to token for any legacy row that predates the column.
+            self._instruments = [
+                {"token": r["token"], "name": r["name"],
+                 "symbol_code": r.get("symbol_code") or r["token"]}
+                for r in rows
+            ]
         except Exception as e:
             print(f"Loading tradable instruments failed: {e}")
             self._instruments = []
@@ -196,9 +202,8 @@ class SchedulerService:
         st = get_state()
         if not self._instruments:
             return
-        watchlist = {i["name"]: i["token"] for i in self._instruments}
         try:
-            hist = await fetch_indicator_history(watchlist, cfg.INTERVAL_5M, days_back=5)
+            hist = await fetch_indicator_history(self._instruments, cfg.INTERVAL_5M, days_back=5)
             for token, candles in hist.items():
                 st.candles_5m[token] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
                 st.tick_version[token] = st.tick_version.get(token, 0) + 1

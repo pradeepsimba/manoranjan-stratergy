@@ -6,6 +6,10 @@
   <title>Alto — Paper Trading</title>
   <meta name="description" content="Sign in to your Alto paper-trading account">
   <link rel="stylesheet" href="/css/dashboard.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%232fd39b'/><path d='M6.5 17.5v-5.5M10.5 17.5v-11M14.5 17.5v-4M18.5 17.5V8' stroke='%23052e21' stroke-width='2.2' stroke-linecap='round'/></svg>">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -16,33 +20,78 @@
 <body>
   <div class="auth-wrap">
     <div class="auth-card">
-      <div class="auth-brand">
-        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M4 19V10M9 19V5M14 19V13M19 19V8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-        </svg>
-        <span class="auth-brand-name">Alto</span>
-      </div>
-      <div class="auth-sub">Paper trading, done properly.</div>
-
-      <div class="auth-tabs">
-        <div class="auth-tab active" id="tab-login" onclick="setAuthTab('login')">Log in</div>
-        <div class="auth-tab" id="tab-register" onclick="setAuthTab('register')">Create account</div>
-      </div>
-
-      <form class="auth-form" id="auth-form" onsubmit="return submitAuth(event)">
-        <div class="field">
-          <label class="field-label" for="auth-username">Username</label>
-          <input class="field-input" id="auth-username" name="username" autocomplete="username" required minlength="3">
+      <div class="auth-side">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 19V10M9 19V5M14 19V13M19 19V8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div>
+            <span class="brand-name">Alto</span>
+            <span class="brand-sub">Paper Trading</span>
+          </div>
         </div>
-        <div class="field">
-          <label class="field-label" for="auth-password">Password</label>
-          <input class="field-input" id="auth-password" name="password" type="password"
-                 autocomplete="current-password" required minlength="6">
+
+        <div class="auth-tagline">Practice trading.<br><span class="accent">Master the market.</span></div>
+
+        <div class="auth-features">
+          <div class="auth-feature">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12h4l2.5-6.5L13 18l2.5-6H21"/>
+            </svg>
+            <div><b>Live market data</b>Real NSE equities streaming on 5-minute candles</div>
+          </div>
+          <div class="auth-feature">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 7H5a2 2 0 0 1-2-2 2 2 0 0 1 2-2h12v4"/>
+              <path d="M3 5v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2"/>
+              <path d="M16 13.5h.01"/>
+            </svg>
+            <div><b>₹5,00,000 virtual funds</b>Delivery (CNC) and leveraged intraday (MIS) products</div>
+          </div>
+          <div class="auth-feature">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+            <div><b>Realistic order engine</b>Limit matching, target/stop-loss triggers, EOD square-off</div>
+          </div>
         </div>
-        <div class="auth-error" id="auth-error"></div>
-        <button class="btn-run" type="submit" id="auth-submit">Log in</button>
-        <div class="auth-hint" id="auth-hint">New here? Switch to "Create account" above — you'll start with a virtual funds balance to trade with.</div>
-      </form>
+
+        <div class="auth-side-foot">Paper trading only — no real money, no risk.</div>
+      </div>
+
+      <div class="auth-main">
+        <div class="auth-brand auth-brand-mobile">
+          <svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 19V10M9 19V5M14 19V13M19 19V8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+          </svg>
+          <span class="auth-brand-name">Alto</span>
+        </div>
+        <div class="auth-title">Welcome to Alto</div>
+        <div class="auth-sub">Log in or create your free paper-trading account.</div>
+
+        <div class="auth-tabs">
+          <div class="auth-tab active" id="tab-login" onclick="setAuthTab('login')">Log in</div>
+          <div class="auth-tab" id="tab-register" onclick="setAuthTab('register')">Create account</div>
+        </div>
+
+        <form class="auth-form" id="auth-form" onsubmit="return submitAuth(event)">
+          <div class="field">
+            <label class="field-label" for="auth-username">Username</label>
+            <input class="field-input" id="auth-username" name="username" autocomplete="username" required minlength="3">
+          </div>
+          <div class="field">
+            <label class="field-label" for="auth-password">Password</label>
+            <input class="field-input" id="auth-password" name="password" type="password"
+                   autocomplete="current-password" required minlength="6">
+          </div>
+          <div class="auth-error" id="auth-error"></div>
+          <button class="btn-run" type="submit" id="auth-submit">Log in</button>
+          <div class="auth-hint" id="auth-hint">New here? Switch to "Create account" above — you'll start with a virtual funds balance to trade with.</div>
+        </form>
+      </div>
     </div>
   </div>
 

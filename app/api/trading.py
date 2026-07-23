@@ -258,14 +258,18 @@ async def get_funds(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[st
 
 
 # ── Console / Journal (read-only reporting over orders + positions) ─────────────
-# All derived — no ledger table. The single cash-flow rule mirrors the engine
-# (see app/engine/orders.py): a COMPLETE BUY debits qty*price, a COMPLETE SELL
-# credits qty*price, uniformly for CNC/MIS. Every exit and EOD square-off is
-# itself a COMPLETE order, so the order book is a complete cash record.
+# All derived — no ledger table. Every fill's exact funds movement is captured
+# by the order engine at fill time (see app/engine/orders.py's fill_order calls)
+# and persisted on orders.funds_delta, since qty*filled_price is only the true
+# cash movement for CNC — a leveraged MIS fill moves margin/refund+P&L instead.
 
 def _order_cash_flow(o: Dict[str, Any]) -> float:
     if o["status"] != "COMPLETE" or o.get("filled_price") is None:
         return 0.0
+    if o.get("funds_delta") is not None:
+        return float(o["funds_delta"])
+    # Legacy row filled before funds_delta existed — best-effort fallback (exact
+    # for CNC, an overstatement for MIS since it ignores leverage).
     value = float(o["filled_price"]) * int(o["qty"])
     return value if o["side"] == "SELL" else -value
 

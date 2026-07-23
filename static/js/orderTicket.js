@@ -45,6 +45,15 @@ function onInstrumentSelected(inst) {
   document.getElementById('ticket-submit').disabled = false;
   var priceEl = document.getElementById('ticket-price');
   if (!priceEl.value) priceEl.value = inst.ltp ? inst.ltp.toFixed(2) : '';
+
+  // Indices have no delivery mechanism — CNC is rejected server-side (see
+  // place_order), but disabling it here avoids a confusing round-trip reject.
+  var cncBtn = document.getElementById('prod-cnc');
+  var isIndex = inst.assetType === 'INDEX';
+  cncBtn.classList.toggle('disabled', isIndex);
+  cncBtn.title = isIndex ? 'CNC is not available for index instruments' : '';
+  if (isIndex && _product === 'CNC') setProduct('MIS');
+
   updateTicketSummary();
 }
 
@@ -132,8 +141,8 @@ function _orderRowHtml(o) {
   var typeLabel = o.orderType + (o.orderType === 'LIMIT' && o.limitPrice ? ' @ ' + fmt2(o.limitPrice) : '');
   return '<tr>' +
     '<td data-label="Time">' + fmtDT(o.createdAt) + '</td>' +
-    '<td data-label="Symbol" class="card-title sym-col">' + escHtml(o.symbol) + '</td>' +
-    '<td data-label="Side">' + o.side + '</td>' +
+    '<td data-label="Symbol" class="card-title sym-col"><span class="sym-cell">' + symAvatarHtml(o.symbol) + '<span class="sym-name">' + escHtml(o.symbol) + '</span></span></td>' +
+    '<td data-label="Side">' + sidePillHtml(o.side) + '</td>' +
     '<td data-label="Qty" class="num-col">' + o.qty + '</td>' +
     '<td data-label="Type">' + escHtml(typeLabel) + '</td>' +
     '<td data-label="Status"><span class="badge status-' + o.status + '">' + o.status + '</span></td>' +
@@ -146,14 +155,14 @@ async function loadRecentOrders() {
     var orders = await apiGet('/api/orders');
     tbody.innerHTML = orders.length
       ? orders.slice(0, 8).map(_orderRowHtml).join('')
-      : '<tr><td colspan="6" class="empty-cell">No orders yet</td></tr>';
+      : '<tr><td colspan="6" class="empty-cell">' + emptyStateHtml('No orders yet', 'Fill the ticket to place your first order', 'orders') + '</td></tr>';
   } catch (e) { /* leave previous content on transient failure */ }
 }
 
 function _positionRowHtml(p) {
   return '<tr>' +
-    '<td data-label="Symbol" class="card-title sym-col">' + escHtml(p.symbol) + '</td>' +
-    '<td data-label="Side">' + p.side + '</td>' +
+    '<td data-label="Symbol" class="card-title sym-col"><span class="sym-cell">' + symAvatarHtml(p.symbol) + '<span class="sym-name">' + escHtml(p.symbol) + '</span></span></td>' +
+    '<td data-label="Side">' + sidePillHtml(p.side) + '</td>' +
     '<td data-label="Qty" class="num-col">' + p.qty + '</td>' +
     '<td data-label="P&amp;L" class="num-col ' + pnlClass(p.pnl) + '">' + pnlSign(p.pnl) + '</td>' +
   '</tr>';
@@ -165,7 +174,7 @@ async function loadQuickPositions() {
     var positions = await apiGet('/api/positions?status=OPEN');
     tbody.innerHTML = positions.length
       ? positions.map(_positionRowHtml).join('')
-      : '<tr><td colspan="4" class="empty-cell">No open positions</td></tr>';
+      : '<tr><td colspan="4" class="empty-cell">' + emptyStateHtml('No open positions', 'MIS orders you fill will appear here', 'chart') + '</td></tr>';
   } catch (e) { /* leave previous content on transient failure */ }
 }
 

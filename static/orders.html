@@ -6,6 +6,10 @@
   <title>Alto — Orders</title>
   <meta name="description" content="Order book — pending, executed, cancelled, rejected">
   <link rel="stylesheet" href="/css/dashboard.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%232fd39b'/><path d='M6.5 17.5v-5.5M10.5 17.5v-11M14.5 17.5v-4M18.5 17.5V8' stroke='%23052e21' stroke-width='2.2' stroke-linecap='round'/></svg>">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -52,14 +56,21 @@
     </div>
   </header>
 
+  <div class="page-head"><div><h1 class="page-title">Orders</h1><p class="page-sub">Complete order book — placements, fills, rejections and cancellations</p></div></div>
+
   <div class="page-grid">
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Order Book</span>
-        <div class="nav-seg" style="padding:2px">
-          <a href="#" class="active" id="filter-all" onclick="setOrderFilter('ALL');return false;">All</a>
-          <a href="#" id="filter-pending" onclick="setOrderFilter('PENDING');return false;">Pending</a>
-          <a href="#" id="filter-complete" onclick="setOrderFilter('COMPLETE');return false;">Executed</a>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="nav-seg" style="padding:2px">
+            <a href="#" class="active" id="filter-all" onclick="setOrderFilter('ALL');return false;">All</a>
+            <a href="#" id="filter-pending" onclick="setOrderFilter('PENDING');return false;">Pending</a>
+            <a href="#" id="filter-complete" onclick="setOrderFilter('COMPLETE');return false;">Executed</a>
+          </div>
+          <div class="nav-seg" style="padding:2px">
+            <a href="#" id="filter-today" onclick="toggleTodayFilter();return false;">Today Only</a>
+          </div>
         </div>
       </div>
       <div class="tbl-wrap">

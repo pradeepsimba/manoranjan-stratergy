@@ -31,8 +31,8 @@ function _positionRowHtml(p) {
       '<button class="btn-mini danger" onclick="openExitModal(' + p.id + ',' + p.qty + ')">Exit</button>'
     : '';
   return '<tr data-token="' + p.token + '" data-id="' + p.id + '" data-status="' + p.status + '">' +
-    '<td data-label="Symbol" class="card-title sym-col">' + escHtml(p.symbol) + '</td>' +
-    '<td data-label="Side">' + p.side + '</td>' +
+    '<td data-label="Symbol" class="card-title sym-col"><span class="sym-cell">' + symAvatarHtml(p.symbol) + '<span class="sym-name">' + escHtml(p.symbol) + '</span></span></td>' +
+    '<td data-label="Side">' + sidePillHtml(p.side) + '</td>' +
     '<td data-label="Qty" class="num-col">' + p.qty + '</td>' +
     '<td data-label="Avg. Price" class="num-col">' + fmt2(p.avgPrice) + '</td>' +
     '<td data-label="LTP / Exit" class="num-col" data-field="price">' + priceLabel + '</td>' +
@@ -88,7 +88,9 @@ async function loadPositions() {
     : _allPositionsData.filter(function (p) { return p.status === 'CLOSED' && _isToday(p.closedAt); });
   tbody.innerHTML = _positionsData.length
     ? _positionsData.map(_positionRowHtml).join('')
-    : '<tr><td colspan="9" class="empty-cell">No ' + (_positionsFilter === 'OPEN' ? 'open' : 'closed today') + ' positions</td></tr>';
+    : '<tr><td colspan="9" class="empty-cell">' + (_positionsFilter === 'OPEN'
+        ? emptyStateHtml('No open positions', 'Place an MIS order from the Terminal', 'chart')
+        : emptyStateHtml('No positions closed today', 'Positions you exit today will appear here', 'chart')) + '</td></tr>';
   _renderSummary();
 }
 

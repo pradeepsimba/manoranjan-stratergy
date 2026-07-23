@@ -11,7 +11,7 @@ function _triggerLabel(h) {
 
 function _holdingRowHtml(h) {
   return '<tr data-token="' + h.token + '">' +
-    '<td data-label="Symbol" class="card-title sym-col">' + escHtml(h.symbol) + '</td>' +
+    '<td data-label="Symbol" class="card-title sym-col"><span class="sym-cell">' + symAvatarHtml(h.symbol) + '<span class="sym-name">' + escHtml(h.symbol) + '</span></span></td>' +
     '<td data-label="Qty" class="num-col">' + h.qty + '</td>' +
     '<td data-label="Avg. Cost" class="num-col">' + fmt2(h.avgPrice) + '</td>' +
     '<td data-label="LTP" class="num-col" data-field="ltp">' + fmt2(h.ltp) + '</td>' +
@@ -48,7 +48,7 @@ async function loadHoldings() {
   }
   tbody.innerHTML = _holdingsData.length
     ? _holdingsData.map(_holdingRowHtml).join('')
-    : '<tr><td colspan="8" class="empty-cell">No holdings yet — buy something from the Terminal.</td></tr>';
+    : '<tr><td colspan="8" class="empty-cell">' + emptyStateHtml('No holdings yet', 'Buy something from the Terminal to get started', 'holdings') + '</td></tr>';
   _renderSummary();
 }
 

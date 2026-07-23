@@ -89,12 +89,20 @@ class MarketDataService:
     def __init__(self) -> None:
         self._running = False
         self._tasks: List[asyncio.Task] = []
-        self._instruments: List[Dict[str, str]] = []   # [{"token": ..., "name": ...}, ...]
+        self._instruments: List[Dict[str, str]] = []   # [{"token","name","symbol_code"}, ...]
+        self._code_to_token: Dict[str, str] = {}       # symbol_code -> internal token
         self._conn_status: Dict[int, str] = {}
         self.state = get_state()
 
     def start(self, instruments: List[Dict[str, str]]) -> None:
         self._instruments = instruments
+        # Ticks come back keyed by symbol_code (the server echoes it in
+        # `stock_symbol`); map it back to the internal token so all shared
+        # state stays token-keyed. Fall back to token as its own code for any
+        # row missing a symbol_code (degraded seed mode).
+        self._code_to_token = {
+            (i.get("symbol_code") or i["token"]): i["token"] for i in instruments
+        }
         self._running = True
         self._conn_status = {}
         batches = [
@@ -127,7 +135,8 @@ class MarketDataService:
 
     async def _connect_loop(self, idx: int, batch: List[Dict[str, str]]) -> None:
         filters = [
-            {"stock_symbol": b["token"], "stockname": b["name"], "interval": cfg.INTERVAL_5M}
+            {"stock_symbol": b.get("symbol_code") or b["token"], "stockname": b["name"],
+             "interval": cfg.INTERVAL_5M}
             for b in batch
         ]
         while self._running:
@@ -187,7 +196,11 @@ class MarketDataService:
     # ── Tick processing ───────────────────────────────────────────────────────
 
     def _process_tick(self, n: Dict[str, Any]) -> None:
-        token    = n.get("stock_symbol", "")
+        # The server keys ticks by symbol_code in `stock_symbol`; translate back
+        # to the internal token so candles/ltp/depth stay token-keyed. An
+        # unknown code (not in our subscribed universe) is ignored.
+        code     = n.get("stock_symbol", "")
+        token    = self._code_to_token.get(code, "")
         interval = n.get("interval", "")
         if not token or interval != cfg.INTERVAL_5M:
             return

@@ -77,6 +77,50 @@ function escHtml(s) {
                   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// ── Shared visual components (v2 design system) ────────────────────────────────
+// Used by every page's row templates so symbols, sides and empty tables look
+// identical everywhere. CSS lives in dashboard.css (.sym-avatar/.side-pill/
+// .empty-state).
+
+// Deterministic hue from the symbol name — same symbol always gets the same
+// avatar color, across pages and reloads, with no stored mapping.
+function symHue(name) {
+  var h = 0, s = String(name);
+  for (var i = 0; i < s.length; i++) h = ((h * 31) + s.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+
+function symInitials(name) {
+  var words = String(name).trim().split(/\s+/);
+  var init = (words[0] ? words[0][0] : '') + (words[1] ? words[1][0] : '');
+  return init.toUpperCase();
+}
+
+function symAvatarHtml(name) {
+  return '<span class="sym-avatar" style="--av-h:' + symHue(name) + '">' + escHtml(symInitials(name)) + '</span>';
+}
+
+function sidePillHtml(side) {
+  return '<span class="side-pill ' + (side === 'BUY' ? 'buy' : 'sell') + '">' + escHtml(side) + '</span>';
+}
+
+var _EMPTY_ICONS = {
+  chart:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V10M9 19V5M14 19V13M19 19V8"/></svg>',
+  orders:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3.5h6v3H9z"/><path d="M9 11.5h6M9 15.5h4"/></svg>',
+  holdings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="12" rx="2"/><path d="M9 8V6.5A2.5 2.5 0 0 1 11.5 4h1A2.5 2.5 0 0 1 15 6.5V8"/></svg>',
+  search:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg>',
+  inbox:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
+};
+
+// emptyStateHtml('No orders', 'Place one from the Terminal', 'orders')
+// → icon + title + hint block, meant to sit inside an .empty-cell td/div.
+function emptyStateHtml(title, hint, icon) {
+  return '<div class="empty-state">' + (_EMPTY_ICONS[icon] || _EMPTY_ICONS.inbox) +
+    '<div class="empty-state-title">' + escHtml(title) + '</div>' +
+    (hint ? '<div class="empty-state-hint">' + escHtml(hint) + '</div>' : '') +
+  '</div>';
+}
+
 // Light/dark theme flip — the boot snippet in each page's <head> applies the
 // persisted choice before first paint; this toggles and persists it.
 function toggleTheme() {

@@ -42,7 +42,7 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-insecure-secret-change-me
 INTERVAL_5M = "5m"
 
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
-HIST_BATCH_SIZE     = 100   # max stocks per single historical API request
+HIST_BATCH_SIZE     = 50    # max stocks per historical API request (server rejects >50 with 400)
 MAX_CANDLE_BUFFER   = 300   # per-symbol in-memory candle buffer (deque maxlen)
 WS_FILTER_BATCH_SIZE = 40   # max (symbol, interval) pairs per single WS connection
 
@@ -55,8 +55,8 @@ WS_FILTER_BATCH_SIZE = 40   # max (symbol, interval) pairs per single WS connect
 # names come straight from the source of truth). Discovery still verifies
 # each one actually has historical candle data before marking it tradable —
 # being listed here doesn't guarantee OHLC history exists (e.g. a very
-# recent IPO). NIFTY 50 / BANKNIFTY are indices, excluded — this platform
-# trades individual equities only.
+# recent IPO). Equities only — see SEED_INDEX_CANDIDATES below for the
+# separate index fallback.
 SEED_STOCK_CANDIDATES: Dict[str, str] = {
     "360 One WAM": "13061", "ABB": "13", "Adani Energy Solutions": "10217",
     "Adani Enterprises": "25", "Adani Green Energy": "3563",
@@ -144,6 +144,16 @@ SEED_STOCK_CANDIDATES: Dict[str, str] = {
     "Varun Beverages": "18921", "VEDANTA": "3063", "Vodafone Idea": "14366",
     "Voltas": "3718", "Wipro": "3787", "Yes Bank": "11915",
     "Zydus Life Science": "7929",
+}
+
+# Index fallback candidates (name -> token) — same snapshot-of-clientstatus
+# principle as SEED_STOCK_CANDIDATES, just kept separate since these carry
+# asset_type='INDEX' rather than 'EQUITY' (see instrument_discovery.py). An
+# index has no delivery mechanism, so it's MIS-only — order placement blocks
+# CNC for these (see app/engine/orders.py's place_order).
+SEED_INDEX_CANDIDATES: Dict[str, str] = {
+    "NIFTY 50": "99926000",
+    "BANKNIFTY": "26009",
 }
 
 # ── Dynamic tunables — hard defaults ──────────────────────────────────────────

@@ -143,31 +143,44 @@ async def _fetch_all(
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+# Both public fetchers take a list of instrument dicts, each with:
+#   {"token": <numeric PK>, "name": <stockname>, "symbol_code": <server code>}
+# The server matches a request by (stockname, symbol_code) — NOT the numeric
+# token — and echoes symbol_code back in each response row's `stock_symbol`
+# field, so results are re-keyed from symbol_code to the internal token here.
+# Callers get back {token: ...} and never have to know about symbol_code.
+
 async def fetch_today_candles(
-    watchlist: Dict[str, str],
-    intervals: Optional[List[str]] = None,
+    instruments: List[Dict[str, str]],
+    intervals:   Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, List[Candle]]]:
     if intervals is None:
         intervals = [cfg.INTERVAL_5M]
-    stocks = [{"stockname": sym, "stock_symbol": tok}
-              for sym, tok in watchlist.items()]
+    stocks = [{"stockname": i["name"], "stock_symbol": i["symbol_code"]} for i in instruments]
     if not stocks:
         return {}
+    code_to_token = {i["symbol_code"]: i["token"] for i in instruments}
     from_date, to_date = _today_range()
-    return await _fetch_all(stocks, intervals, from_date, to_date)
+    data = await _fetch_all(stocks, intervals, from_date, to_date)
+    return {code_to_token[c]: node for c, node in data.items() if c in code_to_token}
 
 
 async def fetch_indicator_history(
-    watchlist: Dict[str, str],
-    interval:  str = cfg.INTERVAL_5M,
-    days_back: int = 5,
+    instruments: List[Dict[str, str]],
+    interval:    str = cfg.INTERVAL_5M,
+    days_back:   int = 5,
 ) -> Dict[str, List[Candle]]:
     today     = datetime.now(IST).date()
     from_date = (today - timedelta(days=days_back)).isoformat()
     to_date   = (today + timedelta(days=1)).isoformat()
-    stocks    = [{"stockname": sym, "stock_symbol": tok}
-                 for sym, tok in watchlist.items()]
+    stocks    = [{"stockname": i["name"], "stock_symbol": i["symbol_code"]} for i in instruments]
     if not stocks:
         return {}
+    code_to_token = {i["symbol_code"]: i["token"] for i in instruments}
     data = await _fetch_all(stocks, [interval], from_date, to_date)
-    return {tok: node.get(interval, []) for tok, node in data.items()}
+    out: Dict[str, List[Candle]] = {}
+    for code, node in data.items():
+        token = code_to_token.get(code)
+        if token is not None:
+            out[token] = node.get(interval, [])
+    return out

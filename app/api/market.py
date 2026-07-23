@@ -128,6 +128,7 @@ async def list_instruments() -> List[Dict[str, Any]]:
         out.append({
             "token":       token,
             "name":        r["display_name"],
+            "assetType":   r.get("asset_type", "EQUITY"),
             **info,
             **_depth_top(token, st),
         })

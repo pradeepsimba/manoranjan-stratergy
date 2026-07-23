@@ -6,6 +6,10 @@
   <title>Alto — Settings</title>
   <meta name="description" content="Platform tunables — session timings, starting funds, engine cadence">
   <link rel="stylesheet" href="/css/dashboard.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%232fd39b'/><path d='M6.5 17.5v-5.5M10.5 17.5v-11M14.5 17.5v-4M18.5 17.5V8' stroke='%23052e21' stroke-width='2.2' stroke-linecap='round'/></svg>">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -15,12 +19,12 @@
   <style>
     .settings-toolbar {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      flex-wrap: wrap; padding: 12px 18px 0;
+      flex-wrap: wrap; padding: 14px 22px 0;
     }
     .settings-wrap {
       max-width: 1180px;
       margin: 0 auto 90px;
-      padding: 18px;
+      padding: 18px 22px;
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
       gap: 16px;
@@ -145,6 +149,8 @@
     <button class="btn-mini" onclick="logout()">Log out</button>
   </div>
 </header>
+
+<div class="page-head"><div><h1 class="page-title">Settings</h1><p class="page-sub">Live platform tunables — saved values apply instantly and persist across restarts</p></div></div>
 
 <div class="settings-toolbar">
   <input class="field-input set-search" id="set-search" type="text"

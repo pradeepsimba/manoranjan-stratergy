@@ -67,6 +67,9 @@ async def place_order(
         price_est = limit_price if order_type == "LIMIT" else ltp
 
         if product == "CNC":
+            instrument = await db.get_instrument(token)
+            if instrument and instrument.get("asset_type") == "INDEX":
+                raise OrderRejected("CNC is not available for index instruments — use MIS")
             if side == "SELL":
                 holding = await db.get_holding(user["id"], token)
                 if not holding or holding["qty"] < qty:
@@ -130,36 +133,45 @@ async def execute_fill(db: DatabaseService, order: Dict[str, Any], price: float)
                 return {"type": "ORDER_UPDATE", "order": order}
             await db.update_funds(user_id, -qty * price)
             result["holding"] = await db.upsert_holding_buy(user_id, token, symbol, qty, price)
+            funds_delta = -qty * price
         else:
             await db.update_funds(user_id, qty * price)
             result["holding"] = await db.reduce_holding_sell(user_id, token, qty)
+            funds_delta = qty * price
     else:
         # MIS: leveraged, and open/close/flip each move funds differently
         # (margin blocked vs. margin+P&L released) — _apply_mis_fill owns the
         # authoritative check and every funds movement itself, since only it
         # knows (from the existing position, if any) which case applies.
         try:
-            result["position"] = await _apply_mis_fill(db, user_id, token, symbol, side, qty, price)
+            result["position"], funds_delta = await _apply_mis_fill(db, user_id, token, symbol, side, qty, price)
         except OrderRejected as e:
             await db.reject_order(order["id"], str(e))
             order["status"] = "REJECTED"
             order["reject_reason"] = str(e)
             return {"type": "ORDER_UPDATE", "order": order}
 
-    filled = await db.fill_order(order["id"], price)
+    filled = await db.fill_order(order["id"], price, funds_delta)
     result["type"]  = "ORDER_UPDATE"
     result["order"] = filled
     return result
 
 
 async def _apply_mis_fill(db: DatabaseService, user_id: int, token: str, symbol: str,
-                          side: str, qty: int, price: float) -> Dict[str, Any]:
+                          side: str, qty: int, price: float) -> tuple:
     """Leveraged MIS fill — opening/adding blocks fresh margin (qty*price/leverage);
     closing/reducing releases the proportional share of margin plus realized P&L.
     Leverage is captured from cfg.MIS_LEVERAGE at the moment margin is blocked, so a
-    later change to the setting never retroactively alters an already-open position."""
+    later change to the setting never retroactively alters an already-open position.
+
+    Returns (position, funds_delta) — funds_delta is the exact signed total this
+    fill moved through the user's funds (may combine a close/reduce credit AND a
+    flip-open debit in the spillover case), for the order engine to persist
+    alongside the fill so Console/Journal cash-flow reporting reads the true
+    figure instead of re-deriving qty*price (wrong for a leveraged fill)."""
     leverage = float(cfg.MIS_LEVERAGE)
     existing = await db.get_open_position(user_id, token)
+    funds_delta = 0.0
 
     if existing is None or existing["side"] == side:
         margin_needed = (qty * price) / leverage
@@ -167,9 +179,12 @@ async def _apply_mis_fill(db: DatabaseService, user_id: int, token: str, symbol:
         if float(user["funds"]) < margin_needed:
             raise OrderRejected("Insufficient margin at fill time")
         await db.update_funds(user_id, -margin_needed)
+        funds_delta = -margin_needed
         if existing is None:
-            return await db.open_position(user_id, token, symbol, side, qty, price, margin_needed)
-        return await db.add_to_position(existing["id"], qty, price, margin_needed)
+            position = await db.open_position(user_id, token, symbol, side, qty, price, margin_needed)
+        else:
+            position = await db.add_to_position(existing["id"], qty, price, margin_needed)
+        return position, funds_delta
 
     # Opposite direction — this fill closes/reduces the existing position
     # (and, for a spillover, flips into a fresh position the other way).
@@ -183,6 +198,7 @@ async def _apply_mis_fill(db: DatabaseService, user_id: int, token: str, symbol:
     existing_margin = float(existing["margin_used"])
     margin_refund   = existing_margin * (close_qty / existing_qty)
     await db.update_funds(user_id, margin_refund + pnl)
+    funds_delta = margin_refund + pnl
 
     if close_qty >= existing_qty:
         position = await db.close_position(existing["id"], price, pnl)
@@ -195,11 +211,12 @@ async def _apply_mis_fill(db: DatabaseService, user_id: int, token: str, symbol:
         user = await db.get_user(user_id)
         if float(user["funds"]) >= margin_needed:
             await db.update_funds(user_id, -margin_needed)
+            funds_delta -= margin_needed
             position = await db.open_position(user_id, token, symbol, side, remaining, price, margin_needed)
         # else: the close/reduce above already happened (its margin+P&L already
         # landed in funds) — just not enough left to also open the flip side,
         # so the excess qty beyond the close simply isn't opened.
-    return position
+    return position, funds_delta
 
 
 async def match_pending_limit_orders(db: DatabaseService, token: str, ltp: float) -> list:
@@ -259,7 +276,7 @@ async def square_off_position(db: DatabaseService, position_id: int, user_id: in
 
     order = await db.create_order(user_id, position["token"], position["symbol"],
                                   closing_side, "MARKET", "MIS", exit_qty, None)
-    order = await db.fill_order(order["id"], ltp)
+    order = await db.fill_order(order["id"], ltp, margin_refund + pnl)
     return {"type": "POSITIONS_UPDATE", "position": position_after, "order": order}
 
 
@@ -285,7 +302,7 @@ async def exit_holding(db: DatabaseService, user_id: int, token: str,
 
     order = await db.create_order(user_id, token, holding["symbol"], "SELL", "MARKET",
                                   "CNC", sell_qty, None)
-    order = await db.fill_order(order["id"], ltp)
+    order = await db.fill_order(order["id"], ltp, sell_qty * ltp)
     return {"type": "ORDER_UPDATE", "order": order, "holding": holding_after}
 
 
@@ -442,7 +459,7 @@ async def eod_square_off_all_mis(db: DatabaseService, price_lookup: Dict[str, fl
         closed = await db.close_position(position["id"], price, pnl)
         order = await db.create_order(user_id, position["token"], position["symbol"],
                                       closing_side, "MARKET", "MIS", qty, None)
-        order = await db.fill_order(order["id"], price)
+        order = await db.fill_order(order["id"], price, margin_used + pnl)
         events.append({"type": "POSITIONS_UPDATE", "position": closed, "order": order,
                        "user_id": user_id})
     return events

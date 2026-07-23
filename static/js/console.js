@@ -57,24 +57,24 @@ function _renderPnlTable(rows) {
   document.getElementById('pnl-count').textContent = rows.length ? rows.length + ' instruments' : '';
   tbody.innerHTML = rows.length ? rows.map(function (r) {
     return '<tr>' +
-      '<td data-label="Symbol" class="card-title sym-col">' + escHtml(r.symbol) + '</td>' +
+      '<td data-label="Symbol" class="card-title sym-col"><span class="sym-cell">' + symAvatarHtml(r.symbol) + '<span class="sym-name">' + escHtml(r.symbol) + '</span></span></td>' +
       '<td data-label="Trades" class="num-col">' + r.trades + '</td>' +
       '<td data-label="Realized P&L" class="num-col ' + pnlClass(r.realizedPnl) + '">₹' + pnlSign(r.realizedPnl) + '</td>' +
     '</tr>';
-  }).join('') : '<tr><td colspan="3" class="empty-cell">No closed positions yet</td></tr>';
+  }).join('') : '<tr><td colspan="3" class="empty-cell">' + emptyStateHtml('No closed positions yet', 'Realized P&L per instrument shows up here', 'chart') + '</td></tr>';
 }
 
 function _renderOverviewHoldings(rows) {
   var tbody = document.getElementById('ov-holdings-tbody');
   tbody.innerHTML = rows.length ? rows.map(function (h) {
     return '<tr>' +
-      '<td data-label="Symbol" class="card-title sym-col">' + escHtml(h.symbol) + '</td>' +
+      '<td data-label="Symbol" class="card-title sym-col"><span class="sym-cell">' + symAvatarHtml(h.symbol) + '<span class="sym-name">' + escHtml(h.symbol) + '</span></span></td>' +
       '<td data-label="Qty" class="num-col">' + h.qty + '</td>' +
       '<td data-label="Avg" class="num-col">' + fmt2(h.avgPrice) + '</td>' +
       '<td data-label="LTP" class="num-col">' + fmt2(h.ltp) + '</td>' +
       '<td data-label="P&L" class="num-col ' + pnlClass(h.pnl) + '">₹' + pnlSign(h.pnl) + '</td>' +
     '</tr>';
-  }).join('') : '<tr><td colspan="5" class="empty-cell">No holdings</td></tr>';
+  }).join('') : '<tr><td colspan="5" class="empty-cell">' + emptyStateHtml('No holdings', 'Your CNC holdings will appear here', 'holdings') + '</td></tr>';
 }
 
 // ── Tradebook ─────────────────────────────────────────────────────────────────
@@ -110,18 +110,17 @@ function renderTradebook() {
   var tbody = document.getElementById('tradebook-tbody');
   var rows = _filteredTrades();
   tbody.innerHTML = rows.length ? rows.map(function (t) {
-    var sideCls = t.side === 'BUY' ? 'side-buy-txt' : 'side-sell-txt';
     return '<tr>' +
       '<td data-label="Time">' + fmtDT(t.filledAt) + '</td>' +
-      '<td data-label="Symbol" class="card-title sym-col">' + escHtml(t.symbol) + '</td>' +
-      '<td data-label="Side"><span class="' + sideCls + '">' + t.side + '</span></td>' +
+      '<td data-label="Symbol" class="card-title sym-col"><span class="sym-cell">' + symAvatarHtml(t.symbol) + '<span class="sym-name">' + escHtml(t.symbol) + '</span></span></td>' +
+      '<td data-label="Side">' + sidePillHtml(t.side) + '</td>' +
       '<td data-label="Product">' + t.product + '</td>' +
       '<td data-label="Type">' + t.orderType + '</td>' +
       '<td data-label="Qty" class="num-col">' + t.qty + '</td>' +
       '<td data-label="Price" class="num-col">' + fmt2(t.price) + '</td>' +
       '<td data-label="Value" class="num-col">₹' + fmt2(t.value) + '</td>' +
     '</tr>';
-  }).join('') : '<tr><td colspan="8" class="empty-cell">No executed trades</td></tr>';
+  }).join('') : '<tr><td colspan="8" class="empty-cell">' + emptyStateHtml('No executed trades', 'Filled orders land in the tradebook', 'orders') + '</td></tr>';
 }
 
 function exportTradebook() {
@@ -151,7 +150,7 @@ async function loadJournal() {
   }
   wrap.innerHTML = _journal.length
     ? _journalHtml(_journal)
-    : '<div class="empty-cell">No account activity yet</div>';
+    : '<div class="empty-cell">' + emptyStateHtml('No account activity yet', 'Every order event appears here with a running balance', 'inbox') + '</div>';
   if (_journalView === 'calendar') renderCalendar();
 }
 

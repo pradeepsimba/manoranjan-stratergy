@@ -26,7 +26,7 @@ function renderWatchlist() {
   var list = document.getElementById('watchlist-list');
   var rows = _watchlistData.filter(function (r) { return r.name.toLowerCase().indexOf(q) !== -1; });
   if (!rows.length) {
-    list.innerHTML = '<div class="muted-text" style="padding:20px;text-align:center">No matches</div>';
+    list.innerHTML = '<div class="muted-text" style="padding:26px;text-align:center">' + emptyStateHtml('No matches', 'Try a different search term', 'search') + '</div>';
     return;
   }
   list.innerHTML = rows.map(_watchlistRowHtml).join('');
@@ -43,8 +43,10 @@ function _watchlistRowHtml(r) {
   var activeCls = r.token === _selectedToken ? ' active' : '';
   return '<div class="watchlist-row' + activeCls + '" data-token="' + r.token + '" onclick="selectInstrument(\'' + r.token + '\')">' +
     '<div class="wl-left">' +
-      '<span class="wl-dot ' + chgCls + '" data-field="dot"></span>' +
-      '<div><div class="wl-name">' + escHtml(r.name) + '</div><div class="wl-token">#' + escHtml(r.token) + '</div></div>' +
+      symAvatarHtml(r.name) +
+      '<div><div class="wl-name">' + escHtml(r.name) +
+        (r.assetType === 'INDEX' ? '<span class="wl-index-tag">INDEX</span>' : '') +
+        '</div><div class="wl-token">#' + escHtml(r.token) + '</div></div>' +
     '</div>' +
     '<div class="wl-right">' +
       '<div class="wl-ltp" data-field="ltp">' + fmt2(r.ltp) + '</div>' +
@@ -180,13 +182,11 @@ window.addEventListener('market:tick', function (evt) {
     if (row) {
       var ltpEl = row.querySelector('[data-field="ltp"]');
       var chgEl = row.querySelector('[data-field="chg"]');
-      var dotEl = row.querySelector('[data-field="dot"]');
       var chgCls = r.change > 0 ? 'pnl-pos' : (r.change < 0 ? 'pnl-neg' : '');
       if (ltpEl) ltpEl.textContent = fmt2(r.ltp);
       if (chgEl) {
         chgEl.innerHTML = '<span class="chg-chip ' + chgCls + '">' + pnlSign(r.change) + ' (' + r.changePct.toFixed(2) + '%)</span>';
       }
-      if (dotEl) dotEl.className = 'wl-dot ' + chgCls;
     }
     if (r.token === _selectedToken) {
       updateSymbolHeader(r);
