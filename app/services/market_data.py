@@ -44,7 +44,13 @@ _ASK1_PAT    = re.compile(r"Asks[^:]*:.*?(?<!\d)1\)\s+([\d.]+)\s+x\s+(\d+)", re.
 
 _MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
-_MAX_SYMBOLS_PER_WS = 40   # server's per-connection output buffer supports ~40 subscriptions
+# MUST stay paired with HistoricalDataWebSocketHandler.MAX_FILTER_OBJECTS on the server - that's
+# the actual per-session subscription cap this number exists to respect. Raised from 40 to 300 for
+# a ~10,000-stock universe: at 40, covering 10,000 stocks needs ~750 concurrent WebSocket
+# connections from this one process (a real problem: fd limits, per-connection overhead); at 300
+# that drops to ~125. Still well under the whole universe in one connection, so a single
+# connection's reconnect gap only ever affects this many symbols' live feed, not all 10,000.
+_MAX_SYMBOLS_PER_WS = 300
 
 
 def _parse_depth(snap: str) -> dict:

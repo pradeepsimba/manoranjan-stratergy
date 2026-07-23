@@ -33,6 +33,14 @@ _JSON_ARRAY = re.compile(r"\[.*?\]", re.DOTALL)
 # decode/candle-parsing offloads use to keep the event loop from stalling).
 _TIMEOUT_MS = 60_000
 
+# At full-universe scale (thousands of stock names in one prompt) this is less about hitting
+# Gemini's context window (it wouldn't, even at 10,000+ names) and more that asking a model to
+# reason over that many tickers in a single pass degrades per-symbol attention/answer quality.
+# Batched sequentially (not concurrently) below - this is the once-a-day, non-latency-critical
+# pre-market screen, and this codebase is deliberately conservative about concurrent load against
+# external APIs elsewhere too.
+GEMINI_BATCH_SIZE = 1000
+
 
 def _find_json_array(text: str, known: Optional[set] = None) -> list:
     """Return the answer JSON string-array from a grounded model response.
@@ -78,7 +86,30 @@ async def analyse_stocks(stocknames: List[str]) -> List[str]:
         return []
     if not stocknames:
         return []
-    return await asyncio.to_thread(_grounded_screen, stocknames)
+
+    if len(stocknames) <= GEMINI_BATCH_SIZE:
+        return await asyncio.to_thread(_grounded_screen, stocknames)
+
+    # Sequential batches, not asyncio.gather - see GEMINI_BATCH_SIZE's comment. One batch's
+    # failure returns [] for just that batch (partial screen), not the whole run.
+    bullish: List[str] = []
+    total_batches = (len(stocknames) + GEMINI_BATCH_SIZE - 1) // GEMINI_BATCH_SIZE
+    for i in range(0, len(stocknames), GEMINI_BATCH_SIZE):
+        batch_num = i // GEMINI_BATCH_SIZE + 1
+        chunk = stocknames[i:i + GEMINI_BATCH_SIZE]
+        result = await asyncio.to_thread(_grounded_screen, chunk)
+        print(f"Gemini batch {batch_num}/{total_batches}: {len(result)} bullish of {len(chunk)}")
+        bullish.extend(result)
+
+    # Dedup while preserving order, THEN cap on the merged list - capping per-batch first would
+    # bias the final result toward whichever batch happened to run first.
+    seen = set()
+    deduped = []
+    for symbol in bullish:
+        if symbol not in seen:
+            seen.add(symbol)
+            deduped.append(symbol)
+    return deduped[:cfg.GEMINI_MAX_STOCKS]
 
 
 def _grounded_screen(stocknames: List[str]) -> List[str]:

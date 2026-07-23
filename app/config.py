@@ -91,12 +91,21 @@ BACKTEST_MODES = ["intraday", "delivery"]
 RISK_MODES = ["fixed_amount", "capital_pct"]
 
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
-# Must stay <= backend_server_algo's MAX_STOCKS_PER_REQUEST (currently 50, see app/views.py) -
+# Must stay <= backend_server_algo's MAX_STOCKS_PER_REQUEST (currently 100, see app/views.py) -
 # historical_data.py's _fetch() POSTs one batch as a single request, and the server rejects the
-# whole batch with a 400 if it's over that cap. This was 100 (over the cap), so every full-size
-# batch 400'd outright - only a smaller leftover batch, if any, ever succeeded.
-HIST_BATCH_SIZE   = 50    # max stocks per single historical API request
-SCAN_WORKERS      = 16    # ThreadPoolExecutor size for the parallel scan
+# whole batch with a 400 if it's over that cap. This was 50 to match the server's OLD cap (also
+# 50); raised alongside it so a 10,000-stock universe needs 100 batches instead of 200.
+HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
+# ThreadPoolExecutor size for the parallel scan (tick-eval loop + backtest day-level parallelism).
+# Was a flat 16 regardless of the actual machine - at a 10,000-stock universe, a busy tick cycle
+# can have 1,000-2,000 "dirty" (ticked) stocks to scan within the 100ms TICK_EVAL_INTERVAL_MS
+# budget, and TA-Lib releases the GIL during its calls, so real throughput scales with CPU cores up
+# to that count. Scales with the actual core count instead of guessing a fixed number, with an env
+# override for explicit tuning. NOTE: this alone does not guarantee the 100ms budget is met at
+# 10,000-stock scale - that needs measuring scan_stock's real per-call cost against production tick
+# rates; this only makes the default track the deployment's actual hardware instead of a fixed
+# guess tuned for a smaller server.
+SCAN_WORKERS = int(os.environ.get("SCAN_WORKERS", "0")) or max(16, (os.cpu_count() or 4) * 2)
 MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
 
 # ── Dynamic tunables — hard defaults ──────────────────────────────────────────

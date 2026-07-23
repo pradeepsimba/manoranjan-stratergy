@@ -24,7 +24,14 @@ async def _http() -> httpx.AsyncClient:
         _HTTP = httpx.AsyncClient(
             verify=False,
             timeout=60.0,
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            # At a 10,000-stock universe, _fetch_all's HIST_BATCH_SIZE-sized batches (config.py)
+            # fan out to ~200 requests via asyncio.gather - only 10 of those could ever run
+            # concurrently before this bump, serializing the rest behind this client-side cap
+            # regardless of gather's concurrency. Raised in line with the Django server's own
+            # concurrent-request ceiling (gunicorn workers x threads - see its Dockerfile/config)
+            # rather than further, since exceeding what the server can actually process
+            # concurrently would just move the queueing there instead of helping.
+            limits=httpx.Limits(max_connections=15, max_keepalive_connections=8),
         )
     return _HTTP
 
