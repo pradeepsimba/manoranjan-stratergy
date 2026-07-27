@@ -35,7 +35,7 @@ import websockets.exceptions
 import app.config as cfg
 from app.models import Candle, TradingPhase
 from app.services.historical_data import fetch_today_candles
-from app.state import get_state
+from app.state import get_state, nifty_token
 
 _LTP_PAT     = re.compile(r"LTP\s*([\d.]+)")
 _BUYQTY_PAT  = re.compile(r"BuyQty\s+(\d+)\s+SellQty\s+(\d+)")
@@ -297,7 +297,7 @@ class MarketDataService:
                 if not candles:
                     continue
                 filled += 1
-                if token == cfg.NIFTY50_TOKEN:
+                if token == nifty_token():
                     with st._nifty_lock:
                         for c in candles:
                             self._upsert_list(st.nifty_candles_5m, c)
@@ -327,7 +327,7 @@ class MarketDataService:
             for sym, token in st.active_watchlist.items()
         ]
         filters.append({
-            "stock_symbol": cfg.NIFTY50_TOKEN,
+            "stock_symbol": nifty_token(),
             "stockname":    cfg.NIFTY50_NAME,
             "interval":     "5m",
         })
@@ -380,6 +380,10 @@ class MarketDataService:
         interval  = n.get("interval",     "")
         if not symbol or not interval:
             return
+        # Resolved once per tick — same value used for every NIFTY comparison
+        # below (see state.nifty_token()'s docstring for why this isn't the
+        # static cfg.NIFTY50_TOKEN).
+        is_nifty = symbol == nifty_token()
 
         candle = Candle(
             start_time=n.get("start_time", ""),
@@ -410,7 +414,7 @@ class MarketDataService:
         # (or vice versa) - a torn read across two values meant to describe the
         # same instant, feeding inconsistent near_support/VWAP-vs-sizing prices
         # into the same entry decision.
-        if symbol == cfg.NIFTY50_TOKEN:
+        if is_nifty:
             with self.state._nifty_lock:
                 if interval == "5m":
                     self._upsert_list(self.state.nifty_candles_5m, candle)
@@ -432,7 +436,7 @@ class MarketDataService:
         # Dashboard "last bar" clock — only for accepted STOCK 5m bars, and never
         # move it backwards (a reconnect-replayed stale bar is dropped by _upsert
         # but must not rewind this display; NIFTY's own cadence isn't "the" bar).
-        if interval == "5m" and symbol != cfg.NIFTY50_TOKEN:
+        if interval == "5m" and not is_nifty:
             bt = candle.start_time[11:16]
             if self.state.last_5m_bar_time is None or bt >= self.state.last_5m_bar_time:
                 self.state.last_5m_bar_time = bt
@@ -441,7 +445,7 @@ class MarketDataService:
         # real order book — its snap shows -0.01 sentinels which _parse_depth
         # discards via the bid_p > 0 guard).
         snap = n.get("snap", "")
-        if (snap and stockname and symbol != cfg.NIFTY50_TOKEN and interval == "5m"
+        if (snap and stockname and not is_nifty and interval == "5m"
                 and self._last_snap.get(stockname) != snap):
             self._last_snap[stockname] = snap
             depth = _parse_depth(snap)
@@ -457,7 +461,7 @@ class MarketDataService:
         # Tick-wise engine: flag this stock for re-evaluation on the next loop
         # cycle. Only 5m ticks update the forming bar; 1h ticks must not enqueue
         # dirty_ticks or they trigger scans on stale 5m bars. Only while ACTIVE.
-        if interval == "5m" and symbol != cfg.NIFTY50_TOKEN and self.state.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
+        if interval == "5m" and not is_nifty and self.state.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
             self.state.dirty_ticks.add(symbol)
             self.state.dirty_ticks_push.add(symbol)
 

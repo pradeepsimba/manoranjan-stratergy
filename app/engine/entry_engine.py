@@ -180,8 +180,15 @@ def scan_stock(
     # precompute it. list() snapshots the dict atomically (CPython/GIL) —
     # positions are mutated only on the event loop while this runs in a
     # scan-pool worker.
+    # Was only assigned inside the `if available is None:` branch below - the real caller
+    # (scheduler.py's _scan_chunk) always precomputes and passes `available`, so that branch never
+    # runs in production, and `lev` was never bound by the time capital_needed needed it below.
+    # Every single scan that reached this far (cleared all 8 entry conditions + calc_quantity
+    # returned a non-zero qty - i.e. the exact moment a real trade should fire) raised
+    # UnboundLocalError, silently caught by the caller's per-stock try/except and logged as a
+    # generic "Scan error", meaning the live/paper engine could never actually place an entry order.
+    lev = cfg.INTRADAY_LEVERAGE
     if available is None:
-        lev       = cfg.INTRADAY_LEVERAGE
         committed = sum(p.entry_price * p.quantity
                         for p in list(st.positions.values())) / lev
         available = cfg.ACCOUNT_BALANCE - committed

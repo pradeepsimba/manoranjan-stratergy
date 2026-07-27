@@ -20,6 +20,7 @@ import app.config as cfg
 from app.engine.watchlist import fetch_active_watchlist
 from app.models import Candle
 from app.services.historical_data import _day_str, _fetch_all
+from app.state import nifty_token
 
 
 @dataclass
@@ -124,12 +125,13 @@ async def load_backtest_data(from_d: date, to_d: date,
     fetch_from = _day_str(from_d - timedelta(days=warmup_days))
     fetch_to   = _day_str(to_d + timedelta(days=1))
 
-    stocks = [{"stockname": n, "stock_symbol": t} for n, t in universe.items()]
+    stocks   = [{"stockname": n, "stock_symbol": t} for n, t in universe.items()]
+    nifty_sy = nifty_token()   # resolved by the fetch_active_watchlist() call above
     # Universe and NIFTY fetches are independent — run them concurrently.
     raw, nifty_raw = await asyncio.gather(
         _fetch_all(stocks, [tf], fetch_from, fetch_to),
         _fetch_all(
-            [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}],
+            [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": nifty_sy}],
             [tf], fetch_from, fetch_to,
         ),
     )
@@ -150,10 +152,10 @@ async def load_backtest_data(from_d: date, to_d: date,
             symbols[token] = ss
 
         nifty = None
-        nframes = nifty_raw.get(cfg.NIFTY50_TOKEN, {})
+        nframes = nifty_raw.get(nifty_sy, {})
         nbars   = _sort_candles(nframes.get(tf, []))
         if nbars:
-            nifty = SymbolSeries(token=cfg.NIFTY50_TOKEN, name=cfg.NIFTY50_NAME, series=nbars)
+            nifty = SymbolSeries(token=nifty_sy, name=cfg.NIFTY50_NAME, series=nbars)
             nifty.index_days()
         return symbols, nifty
 

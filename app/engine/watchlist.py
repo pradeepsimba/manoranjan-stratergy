@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Dict
 
 import httpx
@@ -37,7 +38,11 @@ async def fetch_active_watchlist() -> Dict[str, str]:
     try:
         async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
             resp = await client.get(cfg.CLIENT_STATUS_URL)
-        data = resp.json()
+        # Full-universe responses can be a multi-thousand-row array; decoding it inline would
+        # block the event loop (WS tick receive, the 100ms tick loop, the dashboard push loop) for
+        # the parse duration. Matches historical_data.py's fetch_candles, which offloads for the
+        # same reason.
+        data = await asyncio.to_thread(resp.json)
         st.api_status = "API OK"
     except Exception as e:
         st.api_status = f"Client status error: {e}"
@@ -70,15 +75,27 @@ async def fetch_active_watchlist() -> Dict[str, str]:
         # spaces, so a raw \xa0 in the name would never map to a symbol again.
         stockname = str(entry[1]).replace("\xa0", " ").strip()
         symbol    = str(entry[3]).strip()
+        instrumental_type = str(entry[4]).strip().upper() if len(entry) >= 5 else ""
+
+        if stockname.upper() in _INDEX_NAMES:
+            # Capture NIFTY 50's real trading_symbol here rather than trusting
+            # the static cfg.NIFTY50_TOKEN default (that constant is actually
+            # AngelOne's exchange token, "99926000" — a different field from
+            # trading_symbol; see state.nifty_token()'s docstring). MUST run
+            # before the instrumental_type=="EQ" filter below — an index's own
+            # instrumental_type is never "EQ", so that filter would otherwise
+            # skip this row before this capture ever ran. Every index name in
+            # _INDEX_NAMES is still dropped from the trading watchlist either
+            # way; this is purely additive bookkeeping.
+            if stockname.upper() == cfg.NIFTY50_NAME.upper() and symbol:
+                st.nifty_symbol = symbol
+            continue
         # Defensive extra filter alongside _INDEX_NAMES: skip anything the
         # server itself flags as non-equity when instrumental_type is present
         # (5th element) — don't rely solely on matching the display name.
-        instrumental_type = str(entry[4]).strip().upper() if len(entry) >= 5 else ""
         if instrumental_type and instrumental_type != "EQ":
             continue
         if not stockname or not symbol:
-            continue
-        if stockname.upper() in _INDEX_NAMES:
             continue
         if stockname in watchlist and watchlist[stockname] != symbol:
             print(f"Client status: duplicate name '{stockname}' "

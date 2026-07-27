@@ -9,7 +9,7 @@ import httpx
 
 import app.config as cfg
 from app.models import Candle
-from app.state import get_state
+from app.state import get_state, nifty_token
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -217,10 +217,11 @@ async def fetch_today_candles(
 
 async def fetch_nifty_candles(errors: Optional[list] = None) -> List[Candle]:
     """Today's NIFTY 5m session bars (daily gate + session VWAP)."""
-    stocks           = [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": cfg.NIFTY50_TOKEN}]
+    nifty_sy         = nifty_token()
+    stocks           = [{"stockname": cfg.NIFTY50_NAME, "stock_symbol": nifty_sy}]
     today_d, today_t = _today_range()
     today_data       = await _fetch(stocks, [cfg.INTERVAL_5M], today_d, today_t, errors)
-    return today_data.get(cfg.NIFTY50_TOKEN, {}).get(cfg.INTERVAL_5M, [])
+    return today_data.get(nifty_sy, {}).get(cfg.INTERVAL_5M, [])
 
 
 async def fetch_indicator_history(

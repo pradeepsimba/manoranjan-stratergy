@@ -57,6 +57,12 @@ class AppState:
         # iterate the dirty-token set directly without scanning the whole dict.
         self.token_to_name:    Dict[str, str] = {}
 
+        # NIFTY 50's real trading_symbol, resolved from the client-status row by
+        # fetch_active_watchlist() (see its docstring). None until the first
+        # successful fetch — nifty_token() below falls back to the static
+        # cfg.NIFTY50_TOKEN default until then.
+        self.nifty_symbol: Optional[str] = None
+
         # ── Candle stores (symbol → list[Candle], capped at 300 bars) ─────────
         self.candles_5m: Dict[str, List[Candle]] = {}
         self.candles_1h: Dict[str, List[Candle]] = {}
@@ -153,3 +159,17 @@ class AppState:
 
 def get_state() -> AppState:
     return AppState()
+
+
+def nifty_token() -> str:
+    """
+    NIFTY 50's real trading_symbol as stored by the live-ingestion process
+    (app_historical_data.stock_symbol), resolved from the client-status
+    response by fetch_active_watchlist(). cfg.NIFTY50_TOKEN is that index's
+    AngelOne *exchange token* ("99926000"), not its trading_symbol — the two
+    are different fields and only the latter is what the historical-data
+    REST/WS API and the DB actually key rows by (see CLAUDE.md's NIFTY50_TOKEN
+    caveat). Falls back to the static default before the first successful
+    watchlist fetch, or if the server never reports a NIFTY 50 row.
+    """
+    return get_state().nifty_symbol or cfg.NIFTY50_TOKEN
