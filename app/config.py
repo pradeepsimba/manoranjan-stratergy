@@ -45,42 +45,57 @@ POSTGRES_DSN = os.getenv(
 INTERVAL_5M = "5m"
 
 # ── Static: Bank Nifty options strategy universe ──────────────────────────────
-# Verified against the live market-data server (2026-07-09): these are the
-# SAME instrument tokens the c.html prototype uses (Kite-style tokens), and
-# they return real 5m OHLCV from this repo's existing historical/WS server —
-# no separate options-chain data source needed anywhere (see bn_pricing.py).
+# The vendor migrated its WS/REST protocol from numeric Kite-style instrument
+# tokens to real NSE trading-symbol strings (verified directly against the
+# live server, 2026-07-23) — the OLD numeric tokens now silently return
+# nothing for most instruments. BN_INDEX_TOKEN/BN_ALL_STOCKS values below are
+# the new trading symbols; dict KEYS (our own internal display names) did
+# NOT need to change — confirmed the vendor's stockname-matching accepts our
+# existing ALL-CAPS names fine when paired with the new stock_symbol.
+#
+# BankNifty index itself now returns ZERO data (live or historical) under
+# either the old or new identifier — the vendor appears to have stopped
+# providing it entirely. BN_INDEX_TOKEN is kept pointed at the new symbol
+# anyway so the app auto-recovers if the vendor ever resumes streaming it;
+# in the meantime app/services/market_data.py synthesizes the index candle
+# from these 11 stocks' BN_INDEX_WEIGHTS-weighted % change (see
+# MarketDataService._update_synthetic_index).
 BN_INDEX_NAME = "BANKNIFTY"
-BN_INDEX_TOKEN = "26009"
+BN_INDEX_TOKEN = "NIFTY BANK"   # was "26009" — dead under the new protocol too
 
 # The 6 stocks that actually drive the trade decision (leader-vote + BN
 # composite indicator gate).
 BN_LEADER_STOCKS: Dict[str, str] = {
-    "HDFC BANK":            "1333",
-    "ICICI BANK":           "4963",
-    "AXIS BANK":            "5900",
-    "STATE BANK OF INDIA":  "3045",
-    "KOTAK BANK":           "1922",   # server's canonical name for this token (NOT "Kotak Mahindra Bank")
-    "INDUSIND BANK":        "5258",
+    "HDFC BANK":            "HDFCBANK",     # was "1333"
+    "ICICI BANK":           "ICICIBANK",    # was "4963"
+    "AXIS BANK":            "AXISBANK",     # was "5900"
+    "STATE BANK OF INDIA":  "SBIN",         # was "3045"
+    "KOTAK BANK":           "KOTAKBANK",    # was "1922" — server's canonical name for this stock (NOT "Kotak Mahindra Bank")
+    "INDUSIND BANK":        "INDUSINDBK",   # was "5258"
 }
 
 # Exact c.html STOCK_QTY_THRESHOLD table (per-stock, at 1m granularity),
 # mapped onto this repo's leader-stock names (Kotak's key here is "KOTAK
-# BANK", not c.html's "KOTAK MAHINDRA BANK" — same stock/token, see the
-# Kotak naming gotcha above). c.html compares these against a raw per-trade
-# qty field (tens/hundreds); this repo's WS feed only ever carries
-# cumulative 5m bar volume (hundreds of thousands/bar) — no such field
-# exists here. Ported literally anyway per explicit user direction; expect
-# this gate to be permanently satisfied against real bar volumes.
-BN_STOCK_QTY_THRESHOLD: Dict[str, float] = {
-    "HDFC BANK":            2000,
-    "ICICI BANK":           2000,
-    "STATE BANK OF INDIA":  1200,
-    "AXIS BANK":            900,
-    "KOTAK BANK":           1500,
-    "INDUSIND BANK":        600,
+# BANK", not c.html's "KOTAK MAHINDRA BANK" — same stock, see the Kotak
+# naming gotcha above). c.html compares these against a raw per-trade qty
+# field; the new vendor protocol finally exposes one too (embedded in each
+# tick's `quote` text, parsed into Candle.last_qty — see market_data.py),
+# so this threshold table is now used against real per-trade quantities
+# again, not the bar-volume proxy this repo used while that field was
+# unavailable.
+#
+# The actual threshold VALUES are dynamic tunables (see _DEFAULTS below,
+# BN_QTY_THRESHOLD_* keys) — editable live from the Settings page. This map
+# is just the static "which stock uses which settings key" wiring, not a
+# tunable itself.
+BN_QTY_THRESHOLD_ATTR: Dict[str, str] = {
+    "HDFC BANK":            "BN_QTY_THRESHOLD_HDFC",
+    "ICICI BANK":           "BN_QTY_THRESHOLD_ICICI",
+    "STATE BANK OF INDIA":  "BN_QTY_THRESHOLD_SBI",
+    "AXIS BANK":            "BN_QTY_THRESHOLD_AXIS",
+    "KOTAK BANK":           "BN_QTY_THRESHOLD_KOTAK",
+    "INDUSIND BANK":        "BN_QTY_THRESHOLD_INDUSIND",
 }
-# c.html's getQtyMultiplier() for the "5m" branch — this repo is fixed at 5m.
-BN_QTY_INTERVAL_MULTIPLIER = 2
 
 # All 11 stocks fetched/displayed (matches c.html's own universe, 12 tokens
 # total together with the index) — the 6
@@ -88,31 +103,33 @@ BN_QTY_INTERVAL_MULTIPLIER = 2
 # future use per an explicit user decision, not because they're needed.
 BN_ALL_STOCKS: Dict[str, str] = {
     **BN_LEADER_STOCKS,
-    "AU SMALL FINANCE BANK": "21238",
-    "FEDERAL BANK":          "1023",
-    "IDFC FIRST BANK":       "11184",
-    "PUNJAB NATIONAL BANK":  "10666",
-    "CANARA BANK":           "10794",
+    "AU SMALL FINANCE BANK": "AUBANK",      # was "21238"
+    "FEDERAL BANK":          "FEDERALBNK",  # was "1023"
+    "IDFC FIRST BANK":       "IDFCFIRSTB",  # was "11184"
+    "PUNJAB NATIONAL BANK":  "PNB",         # was "10666"
+    "CANARA BANK":           "CANBK",       # was "10794"
 }
 
 # Exact c.html INDEX_WEIGHTS table (Nifty Bank per-stock weight, % as of
-# the source's "Oct 30, 2025" snapshot) — keyed by TOKEN (c.html keys this
-# by `stock_symbol`, and this repo's own candles_5m is likewise token-keyed;
-# see CLAUDE.md's "candles_5m is keyed by TOKEN" convention). Same 11 stocks
-# as BN_ALL_STOCKS, no new universe needed. Used for the weighted
-# global-signal/contribution-analysis port (app/engine/bn_breakout.py).
+# the source's "Oct 30, 2025" snapshot) — keyed by the same trading-symbol
+# strings as BN_ALL_STOCKS' values (c.html keys this by `stock_symbol` too;
+# this repo's candles_5m is likewise stock_symbol-keyed — see CLAUDE.md's
+# "candles_5m is keyed by TOKEN" convention, now token = trading symbol).
+# Same 11 stocks as BN_ALL_STOCKS, no new universe needed. Used for the
+# weighted global-signal/contribution-analysis port (app/engine/bn_breakout.py)
+# and the synthetic BankNifty index candle (app/services/market_data.py).
 BN_INDEX_WEIGHTS: Dict[str, float] = {
-    "1333":  31.86,   # HDFC BANK
-    "4963":  20.14,   # ICICI BANK
-    "3045":  17.83,   # STATE BANK OF INDIA
-    "1922":  8.79,    # KOTAK BANK
-    "5900":  7.96,    # AXIS BANK
-    "5258":  2.92,    # INDUSIND BANK
-    "10666": 2.86,    # PUNJAB NATIONAL BANK
-    "10794": 2.40,    # CANARA BANK
-    "11184": 1.40,    # IDFC FIRST BANK
-    "21238": 1.35,    # AU SMALL FINANCE BANK
-    "1023":  1.19,    # FEDERAL BANK
+    "HDFCBANK":   31.86,   # HDFC BANK
+    "ICICIBANK":  20.14,   # ICICI BANK
+    "SBIN":       17.83,   # STATE BANK OF INDIA
+    "KOTAKBANK":  8.79,    # KOTAK BANK
+    "AXISBANK":   7.96,    # AXIS BANK
+    "INDUSINDBK": 2.92,    # INDUSIND BANK
+    "PNB":        2.86,    # PUNJAB NATIONAL BANK
+    "CANBK":      2.40,    # CANARA BANK
+    "IDFCFIRSTB": 1.40,    # IDFC FIRST BANK
+    "AUBANK":     1.35,    # AU SMALL FINANCE BANK
+    "FEDERALBNK": 1.19,    # FEDERAL BANK
 }
 
 # BankNifty exchange lot size — a contract-spec fact, not a user tunable.
@@ -144,6 +161,21 @@ _DEFAULTS: Dict[str, Any] = {
     "BN_ATR_PERIOD":           10,
     "BN_SAME_DIRECTION_REQUIRED": 3,   # of 6 leaders must agree
     "BN_ENTRY_COOLDOWN_S":     60,     # no new entry within this long of the last exit
+
+    # BN Strategy — per-stock volume-surge thresholds, compared against each
+    # leader's latest 5m bar volume (see BN_QTY_THRESHOLD_ATTR above and
+    # bn_entry_exit._leader_qty_surge). Calibrated 2026-07-27 from ~15 live
+    # bars/stock (~1.5x each stock's observed average bar volume, so a
+    # genuine spike is needed to fire, not every bar):
+    #   HDFC ~37.5k avg -> 55k | ICICI ~32.3k avg -> 48k | AXIS ~18.7k avg -> 28k
+    #   SBI ~11.8k avg -> 18k  | KOTAK ~28.7k avg -> 43k | INDUSIND ~11k avg -> 16.5k
+    "BN_QTY_THRESHOLD_HDFC":     55_000.0,
+    "BN_QTY_THRESHOLD_ICICI":    48_000.0,
+    "BN_QTY_THRESHOLD_SBI":      18_000.0,
+    "BN_QTY_THRESHOLD_AXIS":     28_000.0,
+    "BN_QTY_THRESHOLD_KOTAK":    43_000.0,
+    "BN_QTY_THRESHOLD_INDUSIND": 16_500.0,
+    "BN_QTY_INTERVAL_MULTIPLIER": 1.0,
 
     # BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring)
     "BN_INDICATOR_LOOKBACK_BARS": 200,

@@ -1,16 +1,15 @@
 'use strict';
 
-// ── Big Trades / qty audit — literal port of c.html's initStockDB/
-// addStockRecord/auditStockQtyStorage/loadLast10ByIntervalQty/
-// renderLast10Table/getIntervalMinutes/getQtyMultiplier. Entirely
-// browser-local (IndexedDB), fed by this app's existing TICK_UPDATE stream
-// (not a second connection to the market-data server, per plan) instead of
-// c.html's own WS. Note: this app's ticks carry only {stockname, ltp} — no
-// per-tick qty field exists in this WS protocol (see the qty-gate fidelity
-// note in bn_entry_exit.py), so every row's qty is always 0 — expected, not
-// a bug. This means the BUY/SELL threshold-crossing highlight in
-// renderLast10Table will never fire against real data here (qty never
-// increases), which is the correct, honest behavior given the feed.
+// ── Big Trades / qty audit ──────────────────────────────────────────────
+// The visible table renders directly from `stockCandles` (server-side bar
+// volume + a per-bar "surged" flag — the SAME data + threshold the Entry
+// Loop Monitor's VOLUME/SURGE columns use, computed once in scheduler.py)
+// via renderBigTradesFromCandles, so the two panels can never disagree.
+//
+// IndexedDB tick logging below (initStockDB/addStockRecord/
+// auditStockQtyStorage/pruneOldStockRecords, a c.html/c1.html port) is kept
+// only for the "DB Check" diagnostic button — an independent, browser-local
+// record of raw ticks for debugging — it no longer feeds the visible table.
 
 const QTY_AUDIT_LEADER_STOCKS = [
   'HDFC BANK', 'ICICI BANK', 'AXIS BANK',
@@ -46,10 +45,11 @@ function initStockDB() {
   };
   req.onsuccess = (e) => {
     _qtyDb = e.target.result;
-    loadLast10ByIntervalQty();
     auditStockQtyStorage();
-    setInterval(loadLast10ByIntervalQty, 3000);
     setInterval(auditStockQtyStorage, 15000);
+    // The table itself no longer reads from here, but the store still
+    // grows unboundedly from recordTickForAudit — keep reclaiming space.
+    setInterval(pruneOldStockRecords, 60000);
   };
   req.onerror = () => setBigTradeStatus('DB error', true);
 }
@@ -57,7 +57,63 @@ function initStockDB() {
 function addStockRecord(data) {
   if (!_qtyDb) return;
   const tx = _qtyDb.transaction('stocks', 'readwrite');
-  tx.objectStore('stocks').add(data);
+  const req = tx.objectStore('stocks').add(data);
+  req.onerror = (e) => {
+    console.error('addStockRecord FAILED:', e.target.error?.name, e.target.error?.message, data);
+    setBigTradeStatus(`DB write failed: ${e.target.error?.name || 'error'}`, true);
+  };
+  tx.onerror = (e) => {
+    console.error('addStockRecord TRANSACTION FAILED:', e.target.error?.name, e.target.error?.message);
+  };
+}
+
+// Port of c1.html's pruneOldStockRecords — keeps the store from growing
+// unbounded (c1.html's own author hit 900MB+ from months of unpruned tick
+// logging, which silently broke new writes). A cursor-by-cursor prune on a
+// multi-hundred-MB backlog can itself take minutes and block other
+// transactions on this store (exactly why Big Trades got stuck on "Loading
+// today qty..." in c1.html's own debugging) — so an oversized store is
+// wiped outright instead of pruned row by row.
+function pruneOldStockRecords(daysToKeep = 2) {
+  if (!_qtyDb) return;
+
+  const tx = _qtyDb.transaction('stocks', 'readwrite');
+  const store = tx.objectStore('stocks');
+  const countReq = store.count();
+
+  countReq.onsuccess = () => {
+    const total = countReq.result;
+    if (total > 20000) {
+      const clearTx = _qtyDb.transaction('stocks', 'readwrite');
+      clearTx.objectStore('stocks').clear();
+      clearTx.oncomplete = () => console.log(`Cleared oversized stocks store (${total} rows) instead of a slow row-by-row prune.`);
+      clearTx.onerror = (e) => console.error('Clear failed:', e.target.error?.name, e.target.error?.message);
+      return;
+    }
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - daysToKeep);
+    cutoff.setHours(0, 0, 0, 0);
+    const cutoffStr = cutoff.toISOString();
+
+    const pruneTx = _qtyDb.transaction('stocks', 'readwrite');
+    const index = pruneTx.objectStore('stocks').index('time');
+    const range = IDBKeyRange.upperBound(cutoffStr);
+
+    let deleted = 0;
+    index.openCursor(range).onsuccess = (ev) => {
+      const cursor = ev.target.result;
+      if (cursor) {
+        cursor.delete();
+        deleted++;
+        cursor.continue();
+      } else if (deleted > 0) {
+        console.log(`Pruned ${deleted} stock record(s) older than ${daysToKeep} day(s).`);
+      }
+    };
+    pruneTx.onerror = (e) => console.error('Prune failed:', e.target.error?.name, e.target.error?.message);
+  };
+  countReq.onerror = (e) => console.error('Count failed:', e.target.error?.name, e.target.error?.message);
 }
 
 // Called from dashboard.js on every TICK_UPDATE — logs only the 6 leader
@@ -65,14 +121,11 @@ function addStockRecord(data) {
 function recordTickForAudit(prices) {
   if (!prices) return;
   const now = new Date().toISOString();
-  const volumes = window._lastVolumeByStock || {};
+  const qtys = window._lastQtyByStock || {};
   QTY_AUDIT_LEADER_STOCKS.forEach(name => {
     if (prices[name] === undefined) return;
-    // Real per-tick trade quantity doesn't exist in this feed (TICK_UPDATE
-    // only ever carries LTP) — the latest 5m bar's volume is the closest
-    // available non-zero proxy, same substitution as the qty-surge gate.
-    const qty = volumes[name] !== undefined ? volumes[name] : 0;
-    console.log(`[qty-audit] ${name} LTP=${prices[name]} qty(bar volume)=${qty}`);
+    const qty = qtys[name] !== undefined ? qtys[name] : 0;
+    console.log(`[qty-audit] ${name} LTP=${prices[name]} qty=${qty}`);
     addStockRecord({ stockname: name, time: now, ltp: prices[name], qty });
   });
 }
@@ -135,114 +188,51 @@ function auditStockQtyStorage(limit = 200) {
   };
 }
 
-// Port of c.html's loadLast10ByIntervalQty — today-only, bucketed by
-// QTY_AUDIT_INTERVAL_MIN, summed qty + latest ltp per bucket per stock.
-function loadLast10ByIntervalQty() {
-  if (!_qtyDb) { setBigTradeStatus('Waiting for DB...'); return; }
-
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-  const tx = _qtyDb.transaction('stocks', 'readonly');
-  const store = tx.objectStore('stocks');
-  const data = {};
-  let sawTodayRows = false;
-
-  setBigTradeStatus('Loading today qty...');
-
-  store.openCursor(null, 'prev').onsuccess = (ev) => {
-    const cursor = ev.target.result;
-    if (cursor) {
-      const r = cursor.value;
-      const parsedTime = r.time ? new Date(r.time) : null;
-      const isToday = parsedTime ? parsedTime >= todayStart : false;
-
-      if (r.stockname && parsedTime && isToday && r.qty !== null && r.qty !== '' && !isNaN(r.qty)) {
-        sawTodayRows = true;
-        const d = new Date(parsedTime);
-        const min = d.getMinutes();
-        const bucketMin = Math.floor(min / QTY_AUDIT_INTERVAL_MIN) * QTY_AUDIT_INTERVAL_MIN;
-        d.setMinutes(bucketMin, 0, 0);
-        const bucketTime = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-
-        if (!data[r.stockname]) data[r.stockname] = {};
-        if (!data[r.stockname][bucketTime]) data[r.stockname][bucketTime] = { qty: 0, ltp: Number(r.ltp) };
-        data[r.stockname][bucketTime].qty += Number(r.qty);
-        data[r.stockname][bucketTime].ltp = Number(r.ltp);
-      }
-
-      if (sawTodayRows && parsedTime && !isToday) { renderLast10Table(data); return; }
-      cursor.continue();
-    } else {
-      renderLast10Table(data);
-    }
-  };
-}
-
-let latestMinuteQty = {};
-
-// Port of c.html's renderLast10Table — one column per stock, 10 rows by
-// recency (per-stock, independently), BUY/SELL threshold-crossing highlight.
-function renderLast10Table(data) {
+// Renders the Big Trades table straight from stockCandles (server bar
+// volume + per-bar "surged" flag, computed in scheduler.py using the exact
+// same BN_QTY_THRESHOLD_* setting the Entry Loop Monitor's SURGE column
+// checks) — one column per leader stock, up to 10 most-recent bars per
+// stock, newest first. Called from dashboard.js's render() on every
+// STATE_UPDATE (1/sec), same cadence the rest of the dashboard uses.
+function renderBigTradesFromCandles(stockCandles) {
   const thead = document.getElementById('bigtrade-thead');
   const tbody = document.getElementById('bigtrade-tbody');
-  if (!thead || !tbody) return;
+  if (!thead || !tbody || !stockCandles) return;
 
-  // Always all 6 leader stocks as columns (not filtered to "has data yet")
-  // — stays visible/stable immediately rather than growing column-by-column
-  // as ticks trickle in; stocks with no data yet just render "–" cells.
   const stocks = QTY_AUDIT_LEADER_STOCKS;
-  const haveAnyData = stocks.some(s => data[s]);
-
-  if (!haveAnyData) {
-    setBigTradeStatus('No qty data yet', true);
-  }
-
-  const maxRows = 10;
-  const STOCK_THRESHOLDS = {
-    'STATE BANK OF INDIA': 1000, 'KOTAK BANK': 1000, 'INDUSIND BANK': 1000,
-    'AXIS BANK': 1000, 'ICICI BANK': 1000, 'HDFC BANK': 1000,
-  };
+  const haveAnyData = stocks.some(s => (stockCandles[s] || []).length);
+  if (!haveAnyData) setBigTradeStatus('No qty data yet', true);
 
   thead.innerHTML = '<tr>' + stocks.map(s => `<th>${s}</th>`).join('') + '</tr>';
 
+  const maxRows = 10;
   const stockRows = {};
   stocks.forEach(stock => {
-    stockRows[stock] = Object.entries(data[stock] || {})
-      .map(([time, obj]) => ({ time, qty: obj.qty, ltp: obj.ltp }))
-      .sort((a, b) => b.time.localeCompare(a.time))
-      .slice(0, 10);
+    stockRows[stock] = (stockCandles[stock] || []).slice().reverse().slice(0, maxRows);
   });
 
   let html = '';
   for (let i = 0; i < maxRows; i++) {
     html += '<tr>';
     stocks.forEach(stock => {
-      const row = stockRows[stock][i];
-      if (!row) { html += '<td>–</td>'; return; }
+      const bar = stockRows[stock][i];
+      if (!bar) { html += '<td>–</td>'; return; }
 
-      const threshold = Number(STOCK_THRESHOLDS[stock] || 999999);
-      const currRow = stockRows[stock][i];
-      const prevRow = stockRows[stock][i + 1];
-      if (i === 0) latestMinuteQty[stock] = row.qty;
-
+      const time = bar.startTime ? bar.startTime.substring(11, 16) : '';
       let signalColor = '';
-      if (currRow && prevRow) {
-        const currQty = Number(currRow.qty), prevQty = Number(prevRow.qty);
-        const currPrice = Number(currRow.ltp), prevPrice = Number(prevRow.ltp);
-        if (currQty > prevQty && currQty >= threshold && currPrice > prevPrice) signalColor = 'var(--pos)';
-        else if (currQty > prevQty && currQty >= threshold && currPrice < prevPrice) signalColor = 'var(--neg)';
+      if (bar.surged && bar.close != null && bar.open != null) {
+        signalColor = bar.close > bar.open ? 'var(--pos)' : bar.close < bar.open ? 'var(--neg)' : '';
       }
 
       html += `<td style="text-align:center;background-color:${signalColor || 'transparent'};font-weight:bold;">
-        ${row.time}<br><span style="color:var(--txt)">(${row.qty})</span>
+        ${time}<br><span style="color:var(--txt)">(${Number(bar.volume || 0).toLocaleString('en-IN')})</span>
       </td>`;
     });
     html += '</tr>';
   }
   tbody.innerHTML = html;
   if (haveAnyData) {
-    setBigTradeStatus(`Live (${stocks.filter(s => data[s]).length}/${stocks.length} stocks)`);
+    setBigTradeStatus(`Live (${stocks.filter(s => (stockCandles[s] || []).length).length}/${stocks.length} stocks)`);
   }
 }
 

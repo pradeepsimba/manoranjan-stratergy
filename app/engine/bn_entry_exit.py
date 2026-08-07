@@ -12,14 +12,16 @@ deviation (see CLAUDE.md-style callout inline):
     bar-close detection lives in the caller), which achieves the same
     "fire right at candle close" outcome without extra state to keep in sync.
 
-The "strong quantity" gate is a LITERAL port of c.html's fixed absolute
-per-stock STOCK_QTY_THRESHOLD table (see cfg.BN_STOCK_QTY_THRESHOLD), by
-explicit user direction, despite a known unit mismatch: c.html compares a
-raw per-trade qty field (tens/hundreds, from a tick-level feed) against
-these thresholds, but this repo's WS feed only ever carries cumulative 5m
-bar volume (hundreds of thousands/bar) — there is no per-tick qty field at
-all (confirmed against market_data.py's tick payload). Expect this gate to
-be permanently satisfied against real bar volumes. Not a bug.
+The "strong quantity" gate is a literal port of c.html's fixed absolute
+per-stock STOCK_QTY_THRESHOLD table (now dynamic Settings-page tunables,
+see cfg.BN_QTY_THRESHOLD_ATTR / config._DEFAULTS' BN_QTY_THRESHOLD_* keys),
+compared against Candle.last_qty — the real per-trade quantity the vendor's
+current protocol embeds in each tick's `quote` text (parsed in
+market_data.py's _process_tick). An earlier vendor protocol had no such
+field at all (only cumulative 5m bar volume, hundreds of thousands — wildly
+mismatched against these tens/hundreds-scale thresholds), which made this
+gate a permanently-satisfied no-op; that limitation no longer applies now
+that a real per-trade qty field exists (confirmed 2026-07-23).
 """
 
 from dataclasses import dataclass
@@ -39,21 +41,37 @@ from app.engine.bn_signals import (
 from app.models import BNDiagnostic, BNSignal, BNTrade, Candle, PositionStatus
 
 
+def _stock_qty_threshold(name: str) -> float:
+    """
+    A leader stock's live volume-surge threshold: its dynamic
+    BN_QTY_THRESHOLD_* setting * cfg.BN_QTY_INTERVAL_MULTIPLIER (both
+    live-editable from the Settings page — see cfg.BN_QTY_THRESHOLD_ATTR).
+    Shared by _leader_qty_surge (latest bar only) and scheduler.py's
+    per-historical-bar "surged" flag on the stockCandles payload (Big
+    Trades table), so both read the identical threshold.
+    """
+    attr = cfg.BN_QTY_THRESHOLD_ATTR.get(name)
+    base = getattr(cfg, attr) if attr else 10_000
+    return base * cfg.BN_QTY_INTERVAL_MULTIPLIER
+
+
 def _leader_qty_surge(leader_recent: Dict[str, List[Candle]]) -> Dict[str, bool]:
     """
-    Literal port of c.html's per-stock STOCK_QTY_THRESHOLD check: latest bar
-    volume vs. cfg.BN_STOCK_QTY_THRESHOLD[name] * cfg.BN_QTY_INTERVAL_MULTIPLIER
-    — no averaging, no history window (see module docstring for the known
-    unit mismatch against this repo's bar-volume feed).
+    Per-stock volume-surge check: the latest bar's cumulative traded volume
+    (Candle.volume — the same figure shown in the Entry Loop Monitor's
+    VOLUME column and the Big Trades panel, both sourced from this same
+    field) vs. _stock_qty_threshold(name). No averaging, no history window.
+
+    Deliberate deviation from c.html's original single-latest-trade-qty
+    check: this vendor's per-trade qty field (Candle.last_qty) runs 1-380
+    on this feed, while c.html's STOCK_QTY_THRESHOLD table (900-2000) was
+    calibrated for a very different qty scale — comparing it against
+    last_qty made this gate an almost permanent no-op. Bar volume is the
+    metric the user confirmed should drive this gate instead (2026-07-27).
     """
     out: Dict[str, bool] = {}
-    mult = cfg.BN_QTY_INTERVAL_MULTIPLIER
     for name, candles in leader_recent.items():
-        if not candles:
-            out[name] = False
-            continue
-        threshold = cfg.BN_STOCK_QTY_THRESHOLD.get(name, 50) * mult
-        out[name] = candles[-1].volume >= threshold
+        out[name] = bool(candles) and candles[-1].volume >= _stock_qty_threshold(name)
     return out
 
 
@@ -188,6 +206,13 @@ def evaluate_entry(
         atm_strike=atm_strike,
         atm_premium=atm_premium,
         atm_iv=atm_iv,
+        cooldown_ok=cooldown_ok,
+        sideways_ok=not sideways_blocked,
+        dir_count_ok=max(leaders["buy_count"], leaders["sell_count"]) >= required,
+        qty_surge_ok=strong_qty_count >= required,
+        same_direction_required=required,
+        gates_clear=gates_clear,
+        entry_ready=buy_ready or sell_ready,
     )
     return signal, diagnostic
 

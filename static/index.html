@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
-  <link rel="stylesheet" href="/css/dashboard.css?v=4">
+  <link rel="stylesheet" href="/css/dashboard.css?v=12">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -62,13 +62,24 @@
     @media (max-width: 640px) { .trade-card { grid-template-columns: repeat(2, 1fr); } }
 
     /* Entry loop diagnostics */
+    .entry-summary {
+      padding: 8px; border-radius: var(--r-sm); text-align: center;
+      font-size: 13px; font-weight: 700; margin-bottom: 8px;
+      background: var(--surf); color: var(--txt-2);
+    }
+    .entry-summary.ready   { background: var(--pos-bg); color: var(--pos); }
+    .entry-summary.blocked { background: var(--neg-bg); color: var(--neg); }
     .gate-row {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 5px 0; border-bottom: 1px solid var(--edge-soft); font-size: 12px;
+      gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--edge-soft); font-size: 12px;
     }
     .gate-row:last-child { border-bottom: none; }
-    .gate-row .g-lbl { color: var(--txt-2); }
-    .gate-row .g-val { font-weight: 600; }
+    .gate-row .g-lbl { color: var(--txt-2); flex-shrink: 0; }
+    .gate-row .g-val { font-weight: 600; flex: 1; text-align: right; }
+    .gate-row .g-ok { flex-shrink: 0; width: 16px; text-align: center; font-weight: 700; }
+    .gate-row .g-ok.pass { color: var(--pos); }
+    .gate-row .g-ok.fail { color: var(--neg); }
+    .gate-row .g-ok.na   { color: var(--txt-3); font-weight: 400; }
     .no-trade-reason {
       margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm);
       background: var(--surf); border: 1px solid var(--edge-soft);
@@ -127,7 +138,7 @@
 <!-- ── Stat strip ──────────────────────────────────────────────────────────── -->
 <div class="stat-strip">
   <div class="stat-card">
-    <span class="stat-label">BANKNIFTY</span>
+    <span class="stat-label">BANKNIFTY <span id="bn-synthetic-badge" class="badge yellow" style="display:none" title="Vendor isn't streaming the real BankNifty index right now — this level is approximated from the 11 constituent stocks' weighted move.">~ synthetic</span></span>
     <span class="stat-value" id="stat-bnltp">—</span>
   </div>
   <div class="stat-card" id="card-pnl">
@@ -153,7 +164,10 @@
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Trade Dashboard</span>
-        <span id="trade-badge" class="badge gray">none</span>
+        <div>
+          <span id="trade-badge" class="badge gray">none</span>
+          <button class="dash-toggle" data-target="trade-dashboard-body" onclick="toggleSection(this)">▼</button>
+        </div>
       </div>
       <div class="panel-body dash-body" id="trade-dashboard-body">
         <div class="funds-bar">
@@ -197,48 +211,46 @@
 
         <div id="trade-empty" class="empty-cell">No active trade</div>
         <div id="trade-card" class="trade-card" style="display:none"></div>
-      </div>
-    </div>
 
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Today's Trades</span>
-        <span id="closed-count" class="badge gray">0</span>
-      </div>
-      <div class="tbl-wrap">
-        <table class="cardify">
-          <thead><tr>
-            <th>Dir</th><th>Option</th><th>Entry Idx</th><th>Exit Idx</th>
-            <th>Entry Prem</th><th>Exit Prem</th><th>Outcome</th><th>P&amp;L ₹</th>
-          </tr></thead>
-          <tbody id="closed-tbody">
-            <tr><td colspan="8" class="empty-cell">No trades yet today</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+        <div class="panel-subsection">
+          <div class="panel-subheader">
+            <span class="panel-subtitle">Today's Trades</span>
+            <span id="closed-count" class="badge gray">0</span>
+          </div>
+          <div class="tbl-wrap">
+            <table class="cardify">
+              <thead><tr>
+                <th>Dir</th><th>Option</th><th>Entry Idx</th><th>Exit Idx</th>
+                <th>Entry Prem</th><th>Exit Prem</th><th>Outcome</th><th>P&amp;L ₹</th>
+              </tr></thead>
+              <tbody id="closed-tbody">
+                <tr><td colspan="8" class="empty-cell">No trades yet today</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
 
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Local Trade Log (browser-only)</span>
-        <div>
-          <button class="btn-mini" onclick="setTradeLogFilter('today')" id="tl-filter-today">Today</button>
-          <button class="btn-mini" onclick="setTradeLogFilter('all')" id="tl-filter-all">All</button>
-          <button class="btn-mini" onclick="clearTradeLog()">Clear</button>
-        </div>
-      </div>
-      <div class="panel-body">
-        <div class="muted-text" style="margin-bottom:6px">
-          Stored in this browser's IndexedDB only — a separate log from
-          "Today's Trades" above (which is the real, server-side history).
-        </div>
-        <div class="tbl-wrap">
-          <table class="cardify">
-            <thead><tr><th>Type</th><th>Price</th><th>Time</th><th>Confidence</th><th>P&amp;L</th></tr></thead>
-            <tbody id="tradelog-tbody">
-              <tr><td colspan="5" class="empty-cell">No local trades logged yet</td></tr>
-            </tbody>
-          </table>
+        <div class="panel-subsection">
+          <div class="panel-subheader">
+            <span class="panel-subtitle">Local Trade Log (browser-only)</span>
+            <div>
+              <button class="btn-mini" onclick="setTradeLogFilter('today')" id="tl-filter-today">Today</button>
+              <button class="btn-mini" onclick="setTradeLogFilter('all')" id="tl-filter-all">All</button>
+              <button class="btn-mini" onclick="clearTradeLog()">Clear</button>
+            </div>
+          </div>
+          <div class="muted-text" style="margin-bottom:6px">
+            Stored in this browser's IndexedDB only — a separate log from
+            "Today's Trades" above (which is the real, server-side history).
+          </div>
+          <div class="tbl-wrap">
+            <table class="cardify">
+              <thead><tr><th>Type</th><th>Price</th><th>Date &amp; Time</th><th>Confidence</th><th>P&amp;L</th></tr></thead>
+              <tbody id="tradelog-tbody">
+                <tr><td colspan="5" class="empty-cell">No local trades logged yet</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -276,9 +288,13 @@
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Entry Loop Monitor</span>
-        <span id="entry-time" class="badge gray">—</span>
+        <div>
+          <span id="entry-time" class="badge gray">—</span>
+          <button class="dash-toggle" data-target="entry-loop-body" onclick="toggleSection(this)">▼</button>
+        </div>
       </div>
-      <div class="panel-body">
+      <div class="panel-body dash-body" id="entry-loop-body">
+        <div id="entry-summary" class="entry-summary">—</div>
         <div class="tbl-wrap">
           <table class="cardify">
             <thead><tr><th>Leader</th><th>Open</th><th>Close</th><th>Volume</th><th>Surge</th></tr></thead>
@@ -409,10 +425,10 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="/js/util.js?v=4"></script>
-<script src="/js/breakout.js?v=4"></script>
-<script src="/js/qtyAudit.js?v=4"></script>
-<script src="/js/kiteForm.js?v=4"></script>
-<script src="/js/dashboard.js?v=4"></script>
+<script src="/js/util.js?v=12"></script>
+<script src="/js/breakout.js?v=12"></script>
+<script src="/js/qtyAudit.js?v=12"></script>
+<script src="/js/kiteForm.js?v=12"></script>
+<script src="/js/dashboard.js?v=12"></script>
 </body>
 </html>

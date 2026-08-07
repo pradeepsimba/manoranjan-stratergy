@@ -22,7 +22,7 @@ import numpy as np
 
 import app.config as cfg
 from app.engine import bn_breakout
-from app.engine.bn_entry_exit import evaluate_entry
+from app.engine.bn_entry_exit import _leader_qty_surge, _stock_qty_threshold, evaluate_entry
 from app.models import BNTrade, PositionStatus, TradingPhase
 from app.services import bn_trade
 from app.services.historical_data import fetch_indicator_history
@@ -90,6 +90,7 @@ class SchedulerService:
 
     async def start(self) -> None:
         await self._load_funds()
+        await self._seed_synthetic_anchor()
         self._tasks = [
             asyncio.create_task(self._phase_driver()),
             asyncio.create_task(self._push_dashboard_loop()),
@@ -111,6 +112,44 @@ class SchedulerService:
             stored = {}
         funds = stored.get(BN_FUNDS_KEY)
         st.funds = float(funds) if isinstance(funds, (int, float)) else cfg.BN_STARTING_FUNDS
+
+    async def _seed_synthetic_anchor(self) -> None:
+        """
+        Restore up to 14 days of this app's own self-recorded bn_index_bars
+        archive into st.bn_index_candles_5m at startup, and seed the
+        synthetic BankNifty index's anchor (see market_data.py's
+        _update_synthetic_index) from the last close — a grounded anchor
+        from actual past index levels, rather than a hardcoded guess.
+
+        Without this, every restart began the composite RSI/MACD/EMA
+        indicator gate (bn_signals.bn_composite_indicator, which hard-requires
+        >=50 bars, ideally BN_INDICATOR_LOOKBACK_BARS=200) from a near-empty
+        buffer — it only ever grows from live ticks otherwise, so the gate
+        stayed stuck at "insufficient data" (RSI/MACD/EMA showing "—"/Neutral)
+        for hours after every restart. Falls back to a placeholder anchor
+        only if the archive is completely empty (e.g. first-ever run).
+        """
+        st = get_state()
+        try:
+            from_iso = (_now() - timedelta(days=14)).isoformat()
+            to_iso   = _now().isoformat()
+            bars = await self._db.get_bn_index_bars(from_iso, to_iso)
+        except Exception as e:
+            print(f"Synthetic index anchor seed failed: {e}")
+            bars = []
+        if bars:
+            with st._bn_index_lock:
+                for c in bars:
+                    MarketDataService._upsert_list(st.bn_index_candles_5m, c)
+                if len(st.bn_index_candles_5m) > cfg.MAX_CANDLE_BUFFER:
+                    del st.bn_index_candles_5m[:len(st.bn_index_candles_5m) - cfg.MAX_CANDLE_BUFFER]
+            st.bn_synthetic_anchor = bars[-1].close
+            print(f"Synthetic BankNifty index: restored {len(st.bn_index_candles_5m)} self-recorded "
+                  f"bars from archive, anchor seeded at {st.bn_synthetic_anchor:.2f}")
+        else:
+            st.bn_synthetic_anchor = 55000.0
+            print("Synthetic BankNifty index anchor: no self-recorded history yet, "
+                  f"using placeholder {st.bn_synthetic_anchor:.2f}")
 
     async def _persist_funds(self) -> None:
         try:
@@ -252,19 +291,32 @@ class SchedulerService:
         if not bn_candles:
             return
 
-        bar_time = bn_candles[-1].start_time
-        if bar_time == st.last_evaluated_bar:
+        new_bar_time = bn_candles[-1].start_time
+        if new_bar_time == st.last_evaluated_bar:
             return   # already evaluated this bar — wait for the NEXT close
-        st.last_evaluated_bar = bar_time
+        st.last_evaluated_bar = new_bar_time
 
-        bn_recent = bn_candles[-max(20, cfg.BN_ATR_PERIOD + 5):]
-        closes = np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
+        # bn_candles[-1] just APPEARED this instant (market_data._upsert only
+        # appends on a newer start_time, mutating in place otherwise) — that
+        # means it's the brand-new, just-STARTED bar, often barely one tick
+        # old. The bar that actually just closed is whatever came before it.
+        # Evaluate only against bars strictly older than this new one (a
+        # start_time filter, not a blind [:-1], so a leader stock whose own
+        # feed hasn't rolled over yet doesn't lose its still-valid closed bar).
+        closed_bn_candles = [c for c in bn_candles if c.start_time < new_bar_time]
+        if not closed_bn_candles:
+            return
+
+        bn_recent = closed_bn_candles[-max(20, cfg.BN_ATR_PERIOD + 5):]
+        closes = np.fromiter((c.close for c in closed_bn_candles), np.float64, len(closed_bn_candles))
         bn_closes_lookback = closes[-cfg.BN_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.BN_INDICATOR_LOOKBACK_BARS else closes
 
         leader_recent = {}
         for name, token in cfg.BN_LEADER_STOCKS.items():
             with st.candle_lock(token):
-                leader_recent[name] = list(st.candles_5m.get(token, []))[-_LEADER_HISTORY_BARS:]
+                candles = list(st.candles_5m.get(token, []))
+            closed = [c for c in candles if c.start_time < new_bar_time]
+            leader_recent[name] = closed[-_LEADER_HISTORY_BARS:]
 
         last_exit_time = (datetime.fromisoformat(st.last_exit_time)
                           if st.last_exit_time else None)
@@ -504,6 +556,28 @@ class SchedulerService:
                 out[token] = list(st.candles_5m.get(token, []))
         return out
 
+    @staticmethod
+    def _build_live_leader_rows(st) -> list:
+        """
+        Live (per-second) OPEN/CLOSE/VOLUME/SURGE snapshot of each leader
+        stock's CURRENT (possibly still-forming) bar — cosmetic only, for the
+        Entry Loop Monitor's leader table. Deliberately separate from
+        st.bn_diagnostic.leader_rows, which stays a frozen record of the data
+        evaluate_entry actually last decided on (once per closed bar) — this
+        live view must never feed evaluate_entry/evaluate_exit.
+        """
+        live_recent = {}
+        for name, token in cfg.BN_LEADER_STOCKS.items():
+            with st.candle_lock(token):
+                candles = list(st.candles_5m.get(token, []))
+            live_recent[name] = candles[-1:] if candles else []
+        surge = _leader_qty_surge(live_recent)
+        return [
+            {"stock": name, "open": c[0].open if c else None, "close": c[0].close if c else None,
+             "volume": c[0].volume if c else None, "surged": surge.get(name, False)}
+            for name, c in live_recent.items()
+        ]
+
     def _build_payload(self) -> dict:
         st = get_state()
         clock = _now().strftime("%H:%M:%S")
@@ -540,6 +614,12 @@ class SchedulerService:
                 "bnBullish": d.bn_bullish, "bnBearish": d.bn_bearish,
                 "noTradeReason": d.no_trade_reason, "atmStrike": d.atm_strike,
                 "atmPremium": d.atm_premium, "atmIv": d.atm_iv,
+                "cooldownOk": d.cooldown_ok, "sidewaysOk": d.sideways_ok,
+                "dirCountOk": d.dir_count_ok, "qtySurgeOk": d.qty_surge_ok,
+                "sameDirectionRequired": d.same_direction_required,
+                "gatesClear": d.gates_clear, "entryReady": d.entry_ready,
+                "marketOpen": d.market_open, "candleCloseOk": d.candle_close_ok,
+                "noActiveTrade": st.active_trade is None,
             }
 
         # ── Stock Candles panel data (breakout banner / weighted global signal /
@@ -558,10 +638,17 @@ class SchedulerService:
         latest_by_token = {tok: c[-1] for tok, c in all_candles.items() if c}
         global_signal   = bn_breakout.compute_global_signal(column_counts, latest_by_token, cfg.BN_INDEX_TOKEN)
 
+        # "surged" is only meaningful for the 6 leader stocks (the ones the
+        # Big Trades panel shows) — computed per-bar with the exact same
+        # threshold _leader_qty_surge uses for the latest bar, so the Big
+        # Trades table's highlight and the Entry Loop Monitor's SURGE column
+        # are always reading the identical volume + threshold.
         stock_candles = {
             token_to_name.get(tok, tok): [
                 {"startTime": c.start_time, "open": c.open, "close": c.close,
-                 "high": c.high, "low": c.low, "volume": c.volume}
+                 "high": c.high, "low": c.low, "volume": c.volume, "lastQty": c.last_qty,
+                 "surged": (c.volume >= _stock_qty_threshold(token_to_name.get(tok, tok)))
+                           if token_to_name.get(tok, tok) in cfg.BN_LEADER_STOCKS else False}
                 for c in candles[-_STOCK_TABLE_BARS:]
             ]
             for tok, candles in all_candles.items()
@@ -581,11 +668,13 @@ class SchedulerService:
             "wsStatus":     st.ws_status,
             "apiStatus":    st.api_status,
             "bnLtp":        st.bn_index_ltp,
+            "bnIndexSynthetic": st.bn_index_synthetic,
             "dailyPnl":     round(st.daily_pnl, 2),
             "funds":        round(st.funds, 2),
             "activeTrade":  active,
             "closedTrades": [_trade_dict(t) for t in st.closed_trades],
             "entryLoop":    diag,
+            "liveLeaderRows": self._build_live_leader_rows(st),
             "stockCandles": stock_candles,
             "globalSignal": global_signal,
             "breakout":     breakout,

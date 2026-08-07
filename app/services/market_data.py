@@ -24,6 +24,7 @@ from app.models import Candle, TradingPhase
 from app.state import get_state
 
 _LTP_PAT = re.compile(r"LTP\s*([\d.]+)")
+_QTY_PAT = re.compile(r"qty\s+(\d+)", re.IGNORECASE)
 
 _MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
@@ -34,6 +35,13 @@ class MarketDataService:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self.state = get_state()
+        # stock_symbol (token) -> this app's own internal ALL-CAPS display
+        # name. The vendor's per-tick echoed `stockname` field does NOT
+        # reliably match the casing we sent in the subscription request (e.g.
+        # it echoes "HDFC Bank" even though we subscribed with "HDFC BANK"),
+        # so `ltp` must be keyed off this reverse map, never off the raw
+        # echoed `stockname` text directly.
+        self._token_to_name = {token: name for name, token in cfg.BN_ALL_STOCKS.items()}
 
     def start(self) -> None:
         self._running = True
@@ -118,10 +126,23 @@ class MarketDataService:
 
     def _process_tick(self, n: dict) -> None:
         symbol    = n.get("stock_symbol", "")
-        stockname = n.get("stockname",    "")
         interval  = n.get("interval",     "")
         if not symbol or interval != "5m":
             return
+
+        # Real per-trade quantity, embedded as "...qty N..." inside the
+        # feed's `quote` text field (confirmed against the live server,
+        # 2026-07-23) — historical REST bars never carry this, only live
+        # WS ticks do, so it's 0 unless present on this specific tick.
+        last_qty = 0.0
+        quote_raw = n.get("quote")
+        if quote_raw:
+            m = _QTY_PAT.search(str(quote_raw))
+            if m:
+                try:
+                    last_qty = float(m.group(1))
+                except ValueError:
+                    pass
 
         candle = Candle(
             start_time=n.get("start_time", ""),
@@ -130,6 +151,7 @@ class MarketDataService:
             high=float(n.get("high",   0)),
             low=float(n.get("low",     0)),
             volume=float(n.get("volume", 0)),
+            last_qty=last_qty,
         )
 
         # Parse LTP
@@ -143,6 +165,10 @@ class MarketDataService:
                 pass
 
         if symbol == cfg.BN_INDEX_TOKEN:
+            # A genuine index tick arrived — the vendor may have resumed
+            # streaming it (currently doesn't). One-way latch: once real
+            # data is seen, never fall back to synthesizing again this run.
+            self.state.bn_index_synthetic = False
             with self.state._bn_index_lock:
                 self._upsert_list(self.state.bn_index_candles_5m, candle)
         else:
@@ -151,18 +177,76 @@ class MarketDataService:
                 # Bumped under the SAME lock, right after the mutation, so any
                 # reader observing the new version also sees the updated candle list.
                 self.state.tick_version[symbol] = self.state.tick_version.get(symbol, 0) + 1
+            if self.state.bn_index_synthetic:
+                self._update_synthetic_index()
 
         if ltp > 0:
             if symbol == cfg.BN_INDEX_TOKEN:
                 self.state.bn_index_ltp = ltp
-            elif stockname:
-                self.state.ltp[stockname] = ltp
+            else:
+                name = self._token_to_name.get(symbol)
+                if name:
+                    self.state.ltp[name] = ltp
 
         # Live-price ticker push — every 5m tick (index or stock) refreshes the
         # dashboard delta; the BN engine's entry/exit evaluation runs on its own
         # tick-wise loop timer, not off a per-tick dirty flag.
         if self.state.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
             self.state.dirty_ticks_push.add(symbol)
+
+    # ── Synthetic BankNifty index (vendor stopped streaming the real index
+    # under either the old or new protocol — confirmed empirically: both the
+    # live WS and historical REST return nothing for it) ───────────────────
+
+    def _update_synthetic_index(self) -> None:
+        """
+        Port of c1.html's updateSyntheticIndexCandle: approximate the
+        BankNifty index candle from the 11 constituent stocks' current
+        forming-bar % change, weighted by cfg.BN_INDEX_WEIGHTS. Recomputed
+        after every constituent stock tick so it stays as fresh as the real
+        index tick path would have been.
+        """
+        weighted_pct = 0.0
+        total_weight = 0.0
+        latest_time: Optional[str] = None
+
+        for symbol, weight in cfg.BN_INDEX_WEIGHTS.items():
+            with self.state.candle_lock(symbol):
+                candles = self.state.candles_5m.get(symbol)
+                candle = candles[-1] if candles else None
+            if not candle or not candle.open or not candle.close:
+                continue
+            pct = (candle.close - candle.open) / candle.open * 100.0
+            weighted_pct += pct * (weight / 100.0)
+            total_weight += weight
+            if candle.start_time and (latest_time is None or candle.start_time > latest_time):
+                latest_time = candle.start_time
+
+        if total_weight == 0 or latest_time is None:
+            return   # no constituent candles yet either
+
+        with self.state._bn_index_lock:
+            idx_candles = self.state.bn_index_candles_5m
+            prev = idx_candles[-1] if idx_candles else None
+            is_new_bar = prev is None or prev.start_time != latest_time
+
+            # Anchor the new bar's open to the PREVIOUS bar's close — only at
+            # the moment it actually rolls over, so weighted_pct (a full-bar %
+            # change) applies once per tick against a fixed base instead of
+            # compounding every tick within the same bar.
+            if is_new_bar and prev is not None:
+                self.state.bn_synthetic_anchor = prev.close
+            anchor = self.state.bn_synthetic_anchor
+            if anchor <= 0:
+                return   # no seed yet (startup seeding hasn't run / archive empty)
+
+            open_ = anchor if is_new_bar else (prev.open if prev else anchor)
+            close_ = open_ * (1 + weighted_pct / 100.0)
+            synthetic = Candle(start_time=latest_time, open=open_, close=close_,
+                               high=max(open_, close_), low=min(open_, close_))
+            self._upsert_list(idx_candles, synthetic)
+
+        self.state.bn_index_ltp = close_
 
     # ── Candle upsert helpers ─────────────────────────────────────────────────
 

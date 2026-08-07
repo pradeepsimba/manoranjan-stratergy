@@ -89,6 +89,8 @@ function render(d) {
   pb.className   = 'badge ' + (PHASE_CLS[phase] || 'gray');
 
   document.getElementById('stat-bnltp').textContent = d.bnLtp ? fmt2(d.bnLtp) : '—';
+  const synBadge = document.getElementById('bn-synthetic-badge');
+  if (synBadge) synBadge.style.display = d.bnIndexSynthetic ? '' : 'none';
 
   const pnl    = d.dailyPnl || 0;
   const pnlEl  = document.getElementById('stat-pnl');
@@ -122,13 +124,14 @@ function render(d) {
 
   renderTrade(d.activeTrade);
   renderClosedTrades(d.closedTrades || []);
-  renderEntryLoop(d.entryLoop);
+  renderEntryLoop(d.entryLoop, d.liveLeaderRows);
 
   if (d.bnLtp) window._lastBnLtp = d.bnLtp;
   if (typeof renderGlobalSignal === 'function') renderGlobalSignal(d.globalSignal);
   if (typeof renderBreakoutBanner === 'function') renderBreakoutBanner(d.breakout);
   if (typeof renderStockCandles === 'function') renderStockCandles(d.stockCandles);
   if (typeof renderSrLevels === 'function') renderSrLevels(d.srLevels);
+  if (typeof renderBigTradesFromCandles === 'function') renderBigTradesFromCandles(d.stockCandles);
 
   checkTradeTransitionForScreenshot(d.activeTrade);
   updateLocalTradeLog(d.activeTrade, d.closedTrades || []);
@@ -202,11 +205,14 @@ function renderClosedTrades(trades) {
 
 // ── Entry Loop Monitor ("why didn't it fire") ─────────────────────────────────
 
-function renderEntryLoop(d) {
+function renderEntryLoop(d, liveLeaderRows) {
   document.getElementById('entry-time').textContent = d && d.time ? d.time.substring(11, 16) : '—';
 
   const tbody = document.getElementById('leader-tbody');
-  const rows = (d && d.leaderRows) || [];
+  // Live (per-second, current forming bar) rows take priority — falls back
+  // to the frozen last-evaluated-bar snapshot only if the live feed hasn't
+  // populated yet (e.g. right at WAIT_ZONE before any candle has arrived).
+  const rows = (liveLeaderRows && liveLeaderRows.length ? liveLeaderRows : null) || (d && d.leaderRows) || [];
   if (!rows.length) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>';
   } else {
@@ -224,24 +230,85 @@ function renderEntryLoop(d) {
   }
 
   const gates = document.getElementById('gate-rows');
-  if (!d) { gates.innerHTML = ''; return; }
+  if (!d) {
+    const summary = document.getElementById('entry-summary');
+    if (summary) { summary.textContent = '—'; summary.className = 'entry-summary'; }
+    gates.innerHTML = '';
+    return;
+  }
+
+  const req = d.sameDirectionRequired || 0;
+  const sigOk = d.leaderSignal === 'BUY' || d.leaderSignal === 'SELL';
+  const macdOk = !!d.macdDir;
+  const emaOk = !!(d.emaBullish || d.emaBearish);
+  const gateOk = !!(d.bnBullish || d.bnBearish);
+
+  // Exact 14-condition list c.html's renderEntryLoopTable sums for its
+  // "N/14 passed" summary (allOk = [marketOk, timeOk, noTradeOk, cooldownOk,
+  // sidewaysOk, momOk, sigOk, dirOk, sqOk, ccOk, macdMet, emaMet, gateOk,
+  // noRepeatOk]) — the first 3 and #10/#14 are structurally guaranteed by
+  // this app's architecture (evaluate_entry is only ever invoked during the
+  // ACTIVE phase, with no active trade, on a just-closed bar it hasn't seen
+  // before — see scheduler.py's _tick_entries), so they can't actually fail
+  // here the way c.html's own 3-second poll loop could observe them failing,
+  // but they're still real conditions and shown for exact 1:1 fidelity.
+  const marketOk = !!d.marketOpen;
+  const timeOk = true;   // ACTIVE phase IS the 09:30-15:00 window — same guarantee
+  const noTradeOk = !!d.noActiveTrade;
+  const ccOk = !!d.candleCloseOk;
+  const noRepeatOk = true;   // last_evaluated_bar dedup — same guarantee
+
+  const gateList = [
+    marketOk, timeOk, noTradeOk, d.cooldownOk, d.sidewaysOk, d.momentumOk,
+    sigOk, d.dirCountOk, d.qtySurgeOk, ccOk, macdOk, emaOk, gateOk, noRepeatOk,
+  ];
+  const passed = gateList.filter(Boolean).length;
+
+  // Derived from the SAME gateList the "N/14 passed" count uses (which
+  // mixes the live noTradeOk with the rest of the frozen last-bar snapshot)
+  // — not the backend's own d.entryReady, which is frozen at the moment of
+  // that bar's evaluation and goes stale the instant a trade opens from it
+  // (noActiveTrade flips live, but a banner reading d.entryReady wouldn't).
+  const summary = document.getElementById('entry-summary');
+  if (summary) {
+    if (passed === gateList.length) {
+      summary.textContent = '✔ ENTRY READY';
+      summary.className = 'entry-summary ready';
+    } else {
+      summary.textContent = `✘ BLOCKED (${passed}/${gateList.length} passed)`;
+      summary.className = 'entry-summary blocked';
+    }
+  }
+
+  // [label, value, ok] — ok is true/false for an actual gate, null for
+  // informational-only rows (matches c.html's "Display only" rows, which
+  // show a value but no ✔/✘ — e.g. RSI, Leader Patterns, ATM strike/premium
+  // — and are NOT part of the 14-condition count above).
   const rows2 = [
-    ['Leader vote', `${d.leaderSignal} (${d.green} green / ${d.red} red)`],
-    ['Sideways range', d.sidewaysRange != null ? fmt2(d.sidewaysRange) + ' pts' : '—'],
-    ['Momentum', d.momentumOk ? `OK — ${escHtml(d.momentumReason || '')}` : `weak — ${escHtml(d.momentumReason || '')}`],
-    ['Volume surge count', `${d.strongQty} leaders`],
-    ['RSI', d.rsi != null ? Number(d.rsi).toFixed(1) : '—'],
-    ['MACD', `${d.macdDir || '—'}${d.macdVal != null ? ' (' + Number(d.macdVal).toFixed(2) + ')' : ''}`],
-    ['EMA stack', d.emaBullish ? 'Bullish' : d.emaBearish ? 'Bearish' : 'Neutral'],
-    ['BN score', `bull ${Number(d.bnBull || 0).toFixed(1)} / bear ${Number(d.bnBear || 0).toFixed(1)}`],
-    ['BN composite', d.bnBullish ? 'Bullish' : d.bnBearish ? 'Bearish' : 'Neutral'],
+    ['Market open', marketOk ? 'Open' : 'Closed', marketOk],
+    ['Time window', '09:30–15:00', timeOk],
+    ['No active trade', noTradeOk ? 'Clear' : 'Trade open', noTradeOk],
+    ['Cooldown', d.cooldownOk ? 'Clear' : `${Math.ceil((d.cooldownMs || 0) / 1000)}s remaining`, d.cooldownOk],
+    ['Sideways range', (d.sidewaysRange != null ? fmt2(d.sidewaysRange) + ' pts' : '—'), d.sidewaysOk],
+    ['Momentum', escHtml(d.momentumReason || (d.momentumOk ? 'OK' : 'weak')), d.momentumOk],
+    ['Leader vote', `${d.leaderSignal} (${d.green} green / ${d.red} red)`, sigOk],
+    ['Dir count', `G:${d.green} R:${d.red} (need ≥${req})`, d.dirCountOk],
+    ['Strong qty', `${d.strongQty}/6 above threshold (need ≥${req})`, d.qtySurgeOk],
+    ['Candle closed', ccOk ? 'Closed' : 'Forming', ccOk],
+    ['RSI (14)', d.rsi != null ? Number(d.rsi).toFixed(1) : '—', null],
+    ['MACD', `${d.macdDir || '—'}${d.macdVal != null ? ' (' + Number(d.macdVal).toFixed(2) + ')' : ''}`, macdOk],
+    ['EMA stack', d.emaBullish ? 'Bullish' : d.emaBearish ? 'Bearish' : 'Neutral', emaOk],
+    ['BN gate', `${d.bnBullish ? 'Bullish' : d.bnBearish ? 'Bearish' : 'Neutral'} (bull ${Number(d.bnBull || 0).toFixed(1)} / bear ${Number(d.bnBear || 0).toFixed(1)})`, gateOk],
+    ['No candle repeat', noRepeatOk ? 'New candle' : 'Already traded', noRepeatOk],
     ['ATM strike/premium', d.atmStrike != null
       ? `${d.atmStrike} @ ₹${fmt2(d.atmPremium)} (IV ${d.atmIv != null ? (d.atmIv * 100).toFixed(1) + '%' : '—'})`
-      : '—'],
+      : '—', null],
   ];
-  gates.innerHTML = rows2.map(([lbl, val]) =>
-    `<div class="gate-row"><span class="g-lbl">${lbl}</span><span class="g-val">${val}</span></div>`
-  ).join('');
+  gates.innerHTML = rows2.map(([lbl, val, ok]) => {
+    const indicator = ok === null ? '<span class="g-ok na">—</span>'
+      : ok ? '<span class="g-ok pass">✔</span>' : '<span class="g-ok fail">✘</span>';
+    return `<div class="gate-row"><span class="g-lbl">${lbl}</span><span class="g-val">${val}</span>${indicator}</div>`;
+  }).join('');
 
   const reasonEl = document.getElementById('no-trade-reason');
   if (d.noTradeReason) {
@@ -358,7 +425,7 @@ function renderTradeLog() {
         const pnlCls = r.pnl > 0 ? 'pnl-pos' : r.pnl < 0 ? 'pnl-neg' : '';
         return `<tr>
           <td>${escHtml(r.type)}</td><td>${fmt2(r.price)}</td>
-          <td>${new Date(r.time).toLocaleTimeString()}</td>
+          <td>${new Date(r.time).toLocaleString()}</td>
           <td>${r.confidence != null ? r.confidence + '%' : '—'}</td>
           <td class="${pnlCls}">${r.pnl != null ? fmt2(r.pnl) : '—'}</td>
         </tr>`;

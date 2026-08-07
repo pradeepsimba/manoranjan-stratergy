@@ -32,6 +32,10 @@ class Candle:            # cuts per-instance memory ~40% and speeds attribute ac
     high:       float = 0.0
     low:        float = 0.0
     volume:     float = 0.0
+    # Real per-trade quantity of the tick that produced/updated this bar,
+    # parsed from the feed's `quote` text (e.g. "...qty 91..."). Historical
+    # REST bars never carry this (only live WS ticks do) — defaults to 0.
+    last_qty:   float = 0.0
 
     def is_bullish(self) -> bool: return self.close > self.open
     def is_bearish(self) -> bool: return self.close < self.open
@@ -117,3 +121,14 @@ class BNDiagnostic:
     atm_strike:      Optional[int]    = None
     atm_premium:     Optional[float]  = None
     atm_iv:          Optional[float]  = None
+    # Per-gate pass/fail, for the dashboard's Entry Loop Monitor (c.html-style
+    # explicit ✔/✘ per row) — mirrors the same intermediate booleans
+    # evaluate_entry already computes to build no_trade_reason/gates_clear,
+    # just exposed individually instead of collapsed into one reason string.
+    cooldown_ok:      bool = True
+    sideways_ok:      bool = False
+    dir_count_ok:     bool = False
+    qty_surge_ok:     bool = False
+    same_direction_required: int = 0
+    gates_clear:      bool = False
+    entry_ready:      bool = False

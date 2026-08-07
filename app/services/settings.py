@@ -65,6 +65,24 @@ SPEC: List[Dict[str, Any]] = [
        min_=1, max_=6, help_="Of the 6 leader stocks."),
     _s("BN_ENTRY_COOLDOWN_S", "Post-exit cooldown (s)", "int", "BN Strategy", min_=0, max_=600),
 
+    # ── BN Qty Surge — per-stock bar-volume-surge thresholds (compared
+    # against each leader's latest 5m bar volume — the same figure shown in
+    # the Entry Loop Monitor's VOLUME column / Big Trades panel).
+    _s("BN_QTY_THRESHOLD_HDFC", "HDFC BANK volume threshold", "float", "BN Qty Surge",
+       min_=100, max_=1_000_000, step=100, help_="Bar volume (pre-multiplier) that counts as a surge."),
+    _s("BN_QTY_THRESHOLD_ICICI", "ICICI BANK volume threshold", "float", "BN Qty Surge",
+       min_=100, max_=1_000_000, step=100),
+    _s("BN_QTY_THRESHOLD_SBI", "STATE BANK OF INDIA volume threshold", "float", "BN Qty Surge",
+       min_=100, max_=1_000_000, step=100),
+    _s("BN_QTY_THRESHOLD_AXIS", "AXIS BANK volume threshold", "float", "BN Qty Surge",
+       min_=100, max_=1_000_000, step=100),
+    _s("BN_QTY_THRESHOLD_KOTAK", "KOTAK BANK volume threshold", "float", "BN Qty Surge",
+       min_=100, max_=1_000_000, step=100),
+    _s("BN_QTY_THRESHOLD_INDUSIND", "INDUSIND BANK volume threshold", "float", "BN Qty Surge",
+       min_=100, max_=1_000_000, step=100),
+    _s("BN_QTY_INTERVAL_MULTIPLIER", "Volume threshold multiplier", "float", "BN Qty Surge",
+       min_=0.1, max_=20, step=0.1, help_="Applied on top of each per-stock threshold above."),
+
     # ── BN Strategy — composite indicator gate ───────────────────────────────
     _s("BN_INDICATOR_LOOKBACK_BARS", "Indicator lookback bars", "int", "BN Strategy",
        min_=60, max_=290, help_="Tail fed to RSI/MACD/EMA; must stay under the 300-bar candle buffer."),
@@ -119,7 +137,7 @@ SPEC: List[Dict[str, Any]] = [
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
-GROUP_ORDER = ["Session Timings", "BN Strategy", "BN Risk", "BN Options Pricing",
+GROUP_ORDER = ["Session Timings", "BN Strategy", "BN Qty Surge", "BN Risk", "BN Options Pricing",
                "BN Options Costs", "Engine", "Backtest"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the

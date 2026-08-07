@@ -318,6 +318,22 @@ body {
 
 .panel-body { padding: 12px 14px; }
 
+/* ── Panel sub-sections (multiple logical panels merged under one
+   collapsible header, e.g. Trade Dashboard + Today's Trades + Local Trade
+   Log) ───────────────────────────────────────────────────────────────── */
+.panel-subsection {
+  margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--edge-soft);
+}
+.panel-subsection:first-of-type { margin-top: 14px; }
+.panel-subheader {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 8px;
+}
+.panel-subtitle {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--txt-2);
+}
+
 /* ── Scan meta counts ──────────────────────────────────────────────────────── */
 .scan-meta { display: flex; gap: 10px; align-items: center; }
 .scan-pass { font-size: 11px; font-weight: 600; color: var(--pos); }

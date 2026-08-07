@@ -39,6 +39,16 @@ class AppState:
         self.ltp:          Dict[str, float] = {}
         self.bn_index_ltp: float            = 0.0
 
+        # ── Synthetic BankNifty index (vendor stopped streaming the real index
+        # under either the old or new protocol — see market_data.py's
+        # _update_synthetic_index) — a one-way latch: flips to False forever
+        # the moment a genuine index tick is ever seen again. bn_synthetic_anchor
+        # is the running open-anchor for the CURRENT synthetic bar, seeded at
+        # startup from the last real close in the self-recorded bn_index_bars
+        # archive (see scheduler.py's startup sequence). ──────────────────────
+        self.bn_index_synthetic: bool = True
+        self.bn_synthetic_anchor: float = 0.0
+
         # ── The single active Bank Nifty options trade ────────────────────────
         self.active_trade:   Optional[BNTrade] = None
         self.closed_trades:  List[BNTrade]     = []   # today's closed trades
