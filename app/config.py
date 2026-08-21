@@ -26,7 +26,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 # ── Static: custom market data server ────────────────────────────────────────
-API_HOST          = "35.234.219.141"
+API_HOST          = "algo.vaangamart.com"
 API_URL_TEMPLATE  = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
 CLIENTSTATUS_URL  = f"https://{API_HOST}:8000/api/clientstatus/"
 WS_URL            = f"ws://{API_HOST}:8083/historical-data"
