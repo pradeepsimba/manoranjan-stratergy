@@ -23,8 +23,11 @@ import numpy as np
 import app.config as cfg
 from app.engine import bn_breakout
 from app.engine.bn_entry_exit import _leader_qty_surge, _stock_qty_threshold, evaluate_entry
-from app.models import BNTrade, PositionStatus, TradingPhase
-from app.services import bn_trade
+from app.engine.nf_entry_exit import _leader_qty_surge as _nf_leader_qty_surge
+from app.engine.nf_entry_exit import _stock_qty_threshold as _nf_stock_qty_threshold
+from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
+from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase
+from app.services import bn_trade, nf_trade
 from app.services.historical_data import fetch_indicator_history
 from app.services.market_data import MarketDataService
 from app.services.settings import BN_FUNDS_KEY
@@ -151,6 +154,25 @@ class SchedulerService:
             print("Synthetic BankNifty index anchor: no self-recorded history yet, "
                   f"using placeholder {st.bn_synthetic_anchor:.2f}")
 
+        try:
+            nf_bars = await self._db.get_nf_index_bars(from_iso, to_iso)
+        except Exception as e:
+            print(f"NF synthetic index anchor seed failed: {e}")
+            nf_bars = []
+        if nf_bars:
+            with st._nf_index_lock:
+                for c in nf_bars:
+                    MarketDataService._upsert_list(st.nf_index_candles_5m, c)
+                if len(st.nf_index_candles_5m) > cfg.MAX_CANDLE_BUFFER:
+                    del st.nf_index_candles_5m[:len(st.nf_index_candles_5m) - cfg.MAX_CANDLE_BUFFER]
+            st.nf_synthetic_anchor = nf_bars[-1].close
+            print(f"Synthetic Nifty 50 index: restored {len(st.nf_index_candles_5m)} self-recorded "
+                  f"bars from archive, anchor seeded at {st.nf_synthetic_anchor:.2f}")
+        else:
+            st.nf_synthetic_anchor = 25000.0
+            print("Synthetic Nifty 50 index anchor: no self-recorded history yet, "
+                  f"using placeholder {st.nf_synthetic_anchor:.2f}")
+
     async def _persist_funds(self) -> None:
         try:
             await self._db.set_app_settings({BN_FUNDS_KEY: get_state().funds})
@@ -254,6 +276,8 @@ class SchedulerService:
 
                 await self._tick_exits()
                 await self._tick_entries()
+                await self._tick_exits_nf()
+                await self._tick_entries_nf()
             except Exception as e:
                 print(f"Tick loop error: {e}")
 
@@ -330,9 +354,79 @@ class SchedulerService:
 
         trade = bn_trade.place_paper_order(signal, now)
         try:
-            await self._db.save_position(trade)
+            await self._db.save_position(trade, instrument="BANKNIFTY")
         except Exception as e:
             print(f"DB save_position error: {e}")
+
+    # ── Nifty 50 — mirrors _tick_exits/_tick_entries above ───────────────────
+
+    async def _tick_exits_nf(self) -> None:
+        st = get_state()
+        if st.active_trade_nf is None or st.nf_index_ltp <= 0:
+            return
+        with st._nf_index_lock:
+            nf_candles = list(st.nf_index_candles_5m)
+        if not nf_candles:
+            return
+        closes = np.fromiter((c.close for c in nf_candles), np.float64, len(nf_candles))
+        lookback = closes[-cfg.NF_IV_LOOKBACK_BARS:] if closes.size > cfg.NF_IV_LOOKBACK_BARS else closes
+        try:
+            closed = nf_trade.check_tick_exit(_now(), st.nf_index_ltp, lookback)
+            if closed:
+                await self._db.update_position_exit(
+                    order_id=closed.order_id, exit_price=closed.exit_index_price,
+                    exit_time=closed.exit_time, pnl=closed.pnl,
+                    exit_premium=closed.exit_premium,
+                )
+                await self._persist_funds()
+        except Exception as e:
+            print(f"NF tick exit error: {e}")
+
+    async def _tick_entries_nf(self) -> None:
+        st = get_state()
+        if st.phase != TradingPhase.ACTIVE or st.active_trade_nf is not None:
+            return
+
+        with st._nf_index_lock:
+            nf_candles = list(st.nf_index_candles_5m)
+        if not nf_candles:
+            return
+
+        new_bar_time = nf_candles[-1].start_time
+        if new_bar_time == st.last_evaluated_bar_nf:
+            return
+        st.last_evaluated_bar_nf = new_bar_time
+
+        closed_nf_candles = [c for c in nf_candles if c.start_time < new_bar_time]
+        if not closed_nf_candles:
+            return
+
+        nf_recent = closed_nf_candles[-max(20, cfg.NF_ATR_PERIOD + 5):]
+        closes = np.fromiter((c.close for c in closed_nf_candles), np.float64, len(closed_nf_candles))
+        nf_closes_lookback = closes[-cfg.NF_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.NF_INDICATOR_LOOKBACK_BARS else closes
+
+        leader_recent = {}
+        for name, token in cfg.NF_LEADER_STOCKS.items():
+            with st.candle_lock(token):
+                candles = list(st.candles_5m.get(token, []))
+            closed = [c for c in candles if c.start_time < new_bar_time]
+            leader_recent[name] = closed[-_LEADER_HISTORY_BARS:]
+
+        last_exit_time = (datetime.fromisoformat(st.last_exit_time_nf)
+                          if st.last_exit_time_nf else None)
+        now = _now()
+        signal, diagnostic = nf_evaluate_entry(now, nf_recent, nf_closes_lookback,
+                                               leader_recent, last_exit_time)
+        st.nf_diagnostic = diagnostic
+
+        if signal is None or signal.bar_time == st.last_trade_candle_nf:
+            return
+
+        trade = nf_trade.place_paper_order(signal, now)
+        try:
+            await self._db.save_position(trade, instrument="NIFTY50")
+        except Exception as e:
+            print(f"DB save_position (NF) error: {e}")
 
     async def _restore_from_db(self) -> None:
         """
@@ -354,7 +448,9 @@ class SchedulerService:
         for r in rows:
             status = (PositionStatus(r["status"])
                       if r.get("status") in ("OPEN", "CLOSED") else PositionStatus.OPEN)
-            trade = BNTrade(
+            is_nf = r.get("instrument") == "NIFTY50"
+            cls = NFTrade if is_nf else BNTrade
+            trade = cls(
                 direction=str(r.get("direction") or "BUY"),
                 entry_index_price=_f(r.get("entry_price")),
                 entry_time=str(r.get("entry_time") or ""),
@@ -364,7 +460,7 @@ class SchedulerService:
                 option_type=str(r.get("option_type") or "CE"),
                 expiry=str(r.get("expiry") or ""),
                 entry_premium=_f(r.get("entry_premium")),
-                lot_size=int(r.get("quantity") or cfg.BN_LOT_SIZE),
+                lot_size=int(r.get("quantity") or (cfg.NF_LOT_SIZE if is_nf else cfg.BN_LOT_SIZE)),
                 order_id=str(r.get("order_id") or ""),
                 status=status,
                 exit_index_price=float(r["exit_price"]) if r.get("exit_price") is not None else None,
@@ -373,17 +469,27 @@ class SchedulerService:
                 pnl=_f(r.get("pnl")),
             )
             if status == PositionStatus.CLOSED:
-                st.closed_trades.append(trade)
-                st.daily_pnl += trade.pnl
-                if trade.exit_time:
-                    st.last_exit_time = trade.exit_time
+                st.daily_pnl += trade.pnl   # shared account — every closed trade nets into the one daily_pnl
+                if is_nf:
+                    st.closed_trades_nf.append(trade)
+                    if trade.exit_time:
+                        st.last_exit_time_nf = trade.exit_time
+                else:
+                    st.closed_trades.append(trade)
+                    if trade.exit_time:
+                        st.last_exit_time = trade.exit_time
             else:
-                st.active_trade = trade
-                st.last_trade_candle = trade.entry_time[:16]
+                if is_nf:
+                    st.active_trade_nf = trade
+                    st.last_trade_candle_nf = trade.entry_time[:16]
+                else:
+                    st.active_trade = trade
+                    st.last_trade_candle = trade.entry_time[:16]
 
         print(
-            f"=== RECOVERY: restored {'1 open' if st.active_trade else '0 open'} / "
-            f"{len(st.closed_trades)} closed trades | daily P&L ₹{st.daily_pnl:+.2f} ==="
+            f"=== RECOVERY: restored BN {'1 open' if st.active_trade else '0 open'}/"
+            f"{len(st.closed_trades)} closed, NF {'1 open' if st.active_trade_nf else '0 open'}/"
+            f"{len(st.closed_trades_nf)} closed | daily P&L ₹{st.daily_pnl:+.2f} ==="
         )
 
     async def _run_eod(self) -> None:
@@ -409,12 +515,30 @@ class SchedulerService:
                     except Exception as e:
                         print(f"EOD square-off DB error: {e}")
 
+        if st.active_trade_nf is not None and st.nf_index_ltp > 0:
+            with st._nf_index_lock:
+                nf_candles = list(st.nf_index_candles_5m)
+            if nf_candles:
+                closes = np.fromiter((c.close for c in nf_candles), np.float64, len(nf_candles))
+                lookback = closes[-cfg.NF_IV_LOOKBACK_BARS:] if closes.size > cfg.NF_IV_LOOKBACK_BARS else closes
+                closed = nf_trade.force_close(_now(), st.nf_index_ltp, lookback)
+                if closed:
+                    try:
+                        await self._db.update_position_exit(
+                            order_id=closed.order_id, exit_price=closed.exit_index_price,
+                            exit_time=closed.exit_time, pnl=closed.pnl,
+                            exit_premium=closed.exit_premium,
+                        )
+                    except Exception as e:
+                        print(f"NF EOD square-off DB error: {e}")
+
         await self._mkt.stop()
         await self._persist_funds()
 
-        # Grow our own BankNifty history archive (see save_bn_index_bars) —
-        # the external server never gives us more than "today", so this is
-        # the only way multi-day backtesting becomes possible over time.
+        # Grow our own BankNifty/Nifty 50 history archives (see
+        # save_bn_index_bars/save_nf_index_bars) — the external server never
+        # gives us more than "today" for either index, so this is the only
+        # way multi-day backtesting becomes possible over time.
         with st._bn_index_lock:
             bn_snapshot = list(st.bn_index_candles_5m)
         if bn_snapshot:
@@ -422,6 +546,14 @@ class SchedulerService:
                 await self._db.save_bn_index_bars(bn_snapshot)
             except Exception as e:
                 print(f"BN index history save error: {e}")
+
+        with st._nf_index_lock:
+            nf_snapshot = list(st.nf_index_candles_5m)
+        if nf_snapshot:
+            try:
+                await self._db.save_nf_index_bars(nf_snapshot)
+            except Exception as e:
+                print(f"NF index history save error: {e}")
 
         trades  = st.closed_trades
         total   = len(trades)
@@ -433,19 +565,45 @@ class SchedulerService:
             peak = max(peak, cum)
             max_dd = max(max_dd, peak - cum)
 
-        if total > 0 or st.daily_pnl != 0.0:
+        nf_trades  = st.closed_trades_nf
+        nf_total   = len(nf_trades)
+        nf_winners = sum(1 for t in nf_trades if t.pnl > 0)
+
+        nf_peak = nf_cum = nf_max_dd = 0.0
+        for t in sorted(nf_trades, key=lambda x: (x.exit_time or "")):
+            nf_cum += t.pnl
+            nf_peak = max(nf_peak, nf_cum)
+            nf_max_dd = max(nf_max_dd, nf_peak - nf_cum)
+
+        # daily_pnl is the SHARED account total (BN + NF combined) — split
+        # each instrument's own total_pnl for its daily_stats row from its
+        # own closed_trades list, not from the shared daily_pnl figure.
+        bn_pnl = sum(t.pnl for t in trades)
+        nf_pnl = sum(t.pnl for t in nf_trades)
+
+        if total > 0:
             try:
                 await self._db.upsert_daily_stats(
                     total_trades=total, winning_trades=winners,
-                    total_pnl=st.daily_pnl, gemini_shortlist=None,
-                    max_drawdown=round(max_dd, 2),
+                    total_pnl=bn_pnl, gemini_shortlist=None,
+                    max_drawdown=round(max_dd, 2), instrument="BANKNIFTY",
                 )
             except Exception as e:
                 print(f"EOD stats error: {e}")
-        else:
+        if nf_total > 0:
+            try:
+                await self._db.upsert_daily_stats(
+                    total_trades=nf_total, winning_trades=nf_winners,
+                    total_pnl=nf_pnl, gemini_shortlist=None,
+                    max_drawdown=round(nf_max_dd, 2), instrument="NIFTY50",
+                )
+            except Exception as e:
+                print(f"NF EOD stats error: {e}")
+        if total == 0 and nf_total == 0:
             print("=== EOD: no session state in this process — daily_stats write skipped ===")
 
-        print(f"=== EOD: {total} trades | {winners} winners | Daily PnL ₹{st.daily_pnl:+.2f} ===")
+        print(f"=== EOD: BN {total} trades ({winners} winners) | NF {nf_total} trades "
+              f"({nf_winners} winners) | Shared daily P&L ₹{st.daily_pnl:+.2f} ===")
 
         st.active_trade = None
         st.closed_trades.clear()
@@ -453,20 +611,25 @@ class SchedulerService:
         st.last_exit_time = None
         st.last_evaluated_bar = None
         st.bn_diagnostic = None
+        st.active_trade_nf = None
+        st.closed_trades_nf.clear()
+        st.last_trade_candle_nf = None
+        st.last_exit_time_nf = None
+        st.last_evaluated_bar_nf = None
+        st.nf_diagnostic = None
         st.daily_pnl = 0.0
         st.ltp.clear()
         st.candles_5m.clear()
-        # bn_index_candles_5m is intentionally NOT cleared here — see
-        # _load_all_historical: this market-data server has no historical
-        # ARCHIVE for the BankNifty index (confirmed empirically — every
-        # from_date/to_date range returns only the current day's bars,
-        # unlike individual stocks and NIFTY 50, which both return full
-        # multi-day history). The composite indicator gate needs
-        # BN_INDICATOR_LOOKBACK_BARS (default 200) bars to converge, so the
-        # ONLY way to ever have that much BankNifty history is to let live
-        # WS ticks accumulate across real trading days (capped at
-        # MAX_CANDLE_BUFFER=300, ~4 sessions) — clearing it nightly would
-        # mean the gate never converges, ever.
+        # bn_index_candles_5m/nf_index_candles_5m are intentionally NOT
+        # cleared here — see _load_all_historical: this market-data server
+        # has no historical ARCHIVE for either index (confirmed empirically —
+        # every from_date/to_date range returns only the current day's bars,
+        # unlike individual stocks, which return full multi-day history). The
+        # composite indicator gate needs *_INDICATOR_LOOKBACK_BARS (default
+        # 200) bars to converge, so the ONLY way to ever have that much
+        # history is to let live WS ticks accumulate across real trading days
+        # (capped at MAX_CANDLE_BUFFER=300, ~4 sessions) — clearing nightly
+        # would mean the gate never converges, ever.
 
     # ── Historical data loader ────────────────────────────────────────────────
 
@@ -505,6 +668,34 @@ class SchedulerService:
             st.api_status = f"Load error: {e}"
             print(f"Historical load error: {e}")
 
+        try:
+            nf_hist = await fetch_indicator_history(cfg.NF_ALL_STOCKS, cfg.INTERVAL_5M, days_back=5)
+            for token_key, candles in nf_hist.items():
+                st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
+                st.tick_version[token_key] = st.tick_version.get(token_key, 0) + 1
+
+            # 1 day back, matching BN_INDEX_NAME's own fetch — an older repo
+            # comment claimed the vendor's REST API returns full multi-day
+            # history for "NIFTY 50" (unlike BankNifty), but that predates the
+            # 2026-07-23 protocol migration and is unverified under the
+            # current symbol scheme; a wider days_back here isn't worth the
+            # extra vendor load until that's actually confirmed. The
+            # self-recorded nf_index_bars archive + synthetic-index fallback
+            # cover the gap exactly like they do for BankNifty either way.
+            nf_idx_hist = await fetch_indicator_history(
+                {cfg.NF_INDEX_NAME: cfg.NF_INDEX_TOKEN}, cfg.INTERVAL_5M, days_back=1)
+            nf_idx_bars = nf_idx_hist.get(cfg.NF_INDEX_TOKEN, [])
+            with st._nf_index_lock:
+                for c in nf_idx_bars:
+                    MarketDataService._upsert_list(st.nf_index_candles_5m, c)
+                if len(st.nf_index_candles_5m) > cfg.MAX_CANDLE_BUFFER:
+                    del st.nf_index_candles_5m[:len(st.nf_index_candles_5m) - cfg.MAX_CANDLE_BUFFER]
+
+            print(f"NF historical load complete: {len(nf_hist)} stocks | "
+                  f"Nifty 50 buffer now {len(st.nf_index_candles_5m)} bars")
+        except Exception as e:
+            print(f"NF historical load error: {e}")
+
     # ── 15m support/resistance refresh (Stock Candles panel only) ────────────
 
     async def _refresh_15m_sr_loop(self) -> None:
@@ -524,6 +715,13 @@ class SchedulerService:
                     bn_hist = await fetch_indicator_history(
                         {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, "15m", days_back=1)
                     hist.update(bn_hist)
+
+                    nf_hist = await fetch_indicator_history(cfg.NF_ALL_STOCKS, "15m", days_back=7)
+                    nf_idx_hist = await fetch_indicator_history(
+                        {cfg.NF_INDEX_NAME: cfg.NF_INDEX_TOKEN}, "15m", days_back=1)
+                    hist.update(nf_hist)
+                    hist.update(nf_idx_hist)
+
                     levels = {
                         token: bn_breakout.detect_support_resistance(candles)
                         for token, candles in hist.items() if candles
@@ -552,6 +750,16 @@ class SchedulerService:
         with st._bn_index_lock:
             out[cfg.BN_INDEX_TOKEN] = list(st.bn_index_candles_5m)
         for token in cfg.BN_ALL_STOCKS.values():
+            with st.candle_lock(token):
+                out[token] = list(st.candles_5m.get(token, []))
+        return out
+
+    def _collect_all_candles_nf(self, st) -> dict:
+        """NF mirror of _collect_all_candles — Nifty 50 index + all 32 NF stocks."""
+        out = {}
+        with st._nf_index_lock:
+            out[cfg.NF_INDEX_TOKEN] = list(st.nf_index_candles_5m)
+        for token in cfg.NF_ALL_STOCKS.values():
             with st.candle_lock(token):
                 out[token] = list(st.candles_5m.get(token, []))
         return out
@@ -600,10 +808,13 @@ class SchedulerService:
             active = _trade_dict(st.active_trade)
             active["currentIndexPrice"] = st.bn_index_ltp
 
-        diag = None
-        if st.bn_diagnostic is not None:
-            d = st.bn_diagnostic
-            diag = {
+        active_nf = None
+        if st.active_trade_nf is not None:
+            active_nf = _trade_dict(st.active_trade_nf)
+            active_nf["currentIndexPrice"] = st.nf_index_ltp
+
+        def _diag_dict(d, no_active_trade: bool) -> dict:
+            return {
                 "time": d.time, "bnLtp": d.bn_ltp, "green": d.green, "red": d.red,
                 "strongQty": d.strong_qty, "leaderRows": d.leader_rows,
                 "leaderSignal": d.leader_signal, "sidewaysRange": d.sideways_range,
@@ -619,8 +830,11 @@ class SchedulerService:
                 "sameDirectionRequired": d.same_direction_required,
                 "gatesClear": d.gates_clear, "entryReady": d.entry_ready,
                 "marketOpen": d.market_open, "candleCloseOk": d.candle_close_ok,
-                "noActiveTrade": st.active_trade is None,
+                "noActiveTrade": no_active_trade,
             }
+
+        diag = _diag_dict(st.bn_diagnostic, st.active_trade is None) if st.bn_diagnostic is not None else None
+        diag_nf = _diag_dict(st.nf_diagnostic, st.active_trade_nf is None) if st.nf_diagnostic is not None else None
 
         # ── Stock Candles panel data (breakout banner / weighted global signal /
         # S-R table) — a c.html UI-parity port, entirely separate from the BN
@@ -632,11 +846,12 @@ class SchedulerService:
         token_to_name = {cfg.BN_INDEX_TOKEN: cfg.BN_INDEX_NAME,
                         **{tok: name for name, tok in cfg.BN_ALL_STOCKS.items()}}
 
-        breakout = bn_breakout.compute_breakout_prediction(bn_candles, all_candles)
+        breakout = bn_breakout.compute_breakout_prediction(bn_candles, all_candles, cfg.BN_INDEX_WEIGHTS)
 
         column_counts   = bn_breakout.compute_column_counts(all_candles, _NUM_SIGNAL_CANDLES)
         latest_by_token = {tok: c[-1] for tok, c in all_candles.items() if c}
-        global_signal   = bn_breakout.compute_global_signal(column_counts, latest_by_token, cfg.BN_INDEX_TOKEN)
+        global_signal   = bn_breakout.compute_global_signal(column_counts, latest_by_token,
+                                                             cfg.BN_INDEX_TOKEN, cfg.BN_INDEX_WEIGHTS)
 
         # "surged" is only meaningful for the 6 leader stocks (the ones the
         # Big Trades panel shows) — computed per-bar with the exact same
@@ -661,6 +876,38 @@ class SchedulerService:
             for tok, candles in all_candles.items()
         }
 
+        # ── Nifty 50 Stock Candles panel data — mirrors the BN block above,
+        # over NF's own 32-stock + index universe, using NF_INDEX_WEIGHTS. ───
+        all_candles_nf = self._collect_all_candles_nf(st)
+        nf_candles     = all_candles_nf.get(cfg.NF_INDEX_TOKEN, [])
+        token_to_name_nf = {cfg.NF_INDEX_TOKEN: cfg.NF_INDEX_NAME,
+                           **{tok: name for name, tok in cfg.NF_ALL_STOCKS.items()}}
+
+        breakout_nf = bn_breakout.compute_breakout_prediction(nf_candles, all_candles_nf, cfg.NF_INDEX_WEIGHTS)
+
+        column_counts_nf   = bn_breakout.compute_column_counts(all_candles_nf, _NUM_SIGNAL_CANDLES)
+        latest_by_token_nf = {tok: c[-1] for tok, c in all_candles_nf.items() if c}
+        global_signal_nf   = bn_breakout.compute_global_signal(column_counts_nf, latest_by_token_nf,
+                                                                cfg.NF_INDEX_TOKEN, cfg.NF_INDEX_WEIGHTS)
+
+        stock_candles_nf = {
+            token_to_name_nf.get(tok, tok): [
+                {"startTime": c.start_time, "open": c.open, "close": c.close,
+                 "high": c.high, "low": c.low, "volume": c.volume, "lastQty": c.last_qty,
+                 "surged": (c.volume >= _nf_stock_qty_threshold(token_to_name_nf.get(tok, tok)))
+                           if token_to_name_nf.get(tok, tok) in cfg.NF_LEADER_STOCKS else False}
+                for c in candles[-_STOCK_TABLE_BARS:]
+            ]
+            for tok, candles in all_candles_nf.items()
+        }
+        sr_levels_nf = {
+            token_to_name_nf.get(tok, tok): {
+                "m5":  bn_breakout.detect_support_resistance(candles),
+                "m15": st.sr_15m_levels.get(tok, {"supports": [], "resistances": []}),
+            }
+            for tok, candles in all_candles_nf.items()
+        }
+
         return {
             "type":         "STATE_UPDATE",
             "clock":        clock,
@@ -669,16 +916,25 @@ class SchedulerService:
             "apiStatus":    st.api_status,
             "bnLtp":        st.bn_index_ltp,
             "bnIndexSynthetic": st.bn_index_synthetic,
-            "dailyPnl":     round(st.daily_pnl, 2),
-            "funds":        round(st.funds, 2),
+            "nfLtp":        st.nf_index_ltp,
+            "nfIndexSynthetic": st.nf_index_synthetic,
+            "dailyPnl":     round(st.daily_pnl, 2),   # shared account — BN + NF combined
+            "funds":        round(st.funds, 2),        # shared account — BN + NF combined
             "activeTrade":  active,
             "closedTrades": [_trade_dict(t) for t in st.closed_trades],
             "entryLoop":    diag,
+            "activeTradeNf":  active_nf,
+            "closedTradesNf": [_trade_dict(t) for t in st.closed_trades_nf],
+            "entryLoopNf":    diag_nf,
             "liveLeaderRows": self._build_live_leader_rows(st),
             "stockCandles": stock_candles,
             "globalSignal": global_signal,
             "breakout":     breakout,
             "srLevels":     sr_levels,
+            "stockCandlesNf": stock_candles_nf,
+            "globalSignalNf": global_signal_nf,
+            "breakoutNf":     breakout_nf,
+            "srLevelsNf":     sr_levels_nf,
         }
 
     async def _push_tick_updates_loop(self) -> None:
@@ -693,8 +949,13 @@ class SchedulerService:
                         prices = {}
                         if cfg.BN_INDEX_TOKEN in dirty:
                             prices[cfg.BN_INDEX_NAME] = st.bn_index_ltp
+                        if cfg.NF_INDEX_TOKEN in dirty:
+                            prices[cfg.NF_INDEX_NAME] = st.nf_index_ltp
                         for sym in cfg.BN_ALL_STOCKS:
                             if cfg.BN_ALL_STOCKS[sym] in dirty:
+                                prices[sym] = st.ltp.get(sym, 0.0)
+                        for sym in cfg.NF_ALL_STOCKS:
+                            if cfg.NF_ALL_STOCKS[sym] in dirty:
                                 prices[sym] = st.ltp.get(sym, 0.0)
                         if prices:
                             await self._ws.broadcast(

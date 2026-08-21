@@ -15,21 +15,43 @@ const QTY_AUDIT_LEADER_STOCKS = [
   'HDFC BANK', 'ICICI BANK', 'AXIS BANK',
   'STATE BANK OF INDIA', 'KOTAK BANK', 'INDUSIND BANK',
 ];
+// Nifty 50's 12 leaders (app/config.py's NF_LEADER_STOCKS keys) — the Big
+// Trades panel's Nifty 50 counterpart. Kept as a separate constant (not a
+// rename of QTY_AUDIT_LEADER_STOCKS above) since dashboard.js's CSV/file
+// export still only ever meant to cover BankNifty, matching c.html.
+const QTY_AUDIT_LEADER_STOCKS_NF = [
+  'HDFC BANK', 'RELIANCE INDUSTRIES', 'ICICI BANK', 'INFOSYS',
+  'BHARTI AIRTEL', 'ITC', 'HCL TECHNOLOGIES', 'LARSEN & TOUBRO',
+  'KOTAK BANK', 'AXIS BANK', 'STATE BANK OF INDIA', 'HINDUSTAN UNILEVER',
+];
 // c.html's getIntervalMinutes()/getQtyMultiplier() read a UI interval
 // selector this app doesn't have (it's fixed 5m throughout) — hardcoded here.
 const QTY_AUDIT_INTERVAL_MIN = 5;
 
+const BIGTRADE_IDS_BN = {
+  thead: 'bigtrade-thead', tbody: 'bigtrade-tbody',
+  status: 'bigtrade-status', audit: 'bigtrade-audit',
+  stocks: QTY_AUDIT_LEADER_STOCKS,
+};
+const BIGTRADE_IDS_NF = {
+  thead: 'bigtrade-thead-nf', tbody: 'bigtrade-tbody-nf',
+  status: 'bigtrade-status-nf', audit: 'bigtrade-audit-nf',
+  stocks: QTY_AUDIT_LEADER_STOCKS_NF,
+};
+
 let _qtyDb = null;
 
-function setBigTradeStatus(message, isFallback) {
-  const status = document.getElementById('bigtrade-status');
+function setBigTradeStatus(message, isFallback, ids) {
+  ids = ids || BIGTRADE_IDS_BN;
+  const status = document.getElementById(ids.status);
   if (!status) return;
   status.textContent = message;
   status.style.color = isFallback ? 'var(--warn)' : 'var(--accent-2)';
 }
 
-function setBigTradeAudit(message) {
-  const audit = document.getElementById('bigtrade-audit');
+function setBigTradeAudit(message, ids) {
+  ids = ids || BIGTRADE_IDS_BN;
+  const audit = document.getElementById(ids.audit);
   if (audit) audit.innerHTML = message;
 }
 
@@ -45,8 +67,9 @@ function initStockDB() {
   };
   req.onsuccess = (e) => {
     _qtyDb = e.target.result;
-    auditStockQtyStorage();
-    setInterval(auditStockQtyStorage, 15000);
+    const auditBoth = () => { auditStockQtyStorage(200, BIGTRADE_IDS_BN); auditStockQtyStorage(200, BIGTRADE_IDS_NF); };
+    auditBoth();
+    setInterval(auditBoth, 15000);
     // The table itself no longer reads from here, but the store still
     // grows unboundedly from recordTickForAudit — keep reclaiming space.
     setInterval(pruneOldStockRecords, 60000);
@@ -116,13 +139,18 @@ function pruneOldStockRecords(daysToKeep = 2) {
   countReq.onerror = (e) => console.error('Count failed:', e.target.error?.name, e.target.error?.message);
 }
 
-// Called from dashboard.js on every TICK_UPDATE — logs only the 6 leader
-// stocks, matching c.html's scope exactly.
+// Called from dashboard.js on every TICK_UPDATE — logs the UNION of BN's 6
+// and NF's 12 leader stocks (c.html only ever had the 6; the NF panel's own
+// "DB Check" audit needs its 12 tracked in the same shared IndexedDB store).
+const QTY_AUDIT_ALL_LEADER_STOCKS = Array.from(
+  new Set(QTY_AUDIT_LEADER_STOCKS.concat(QTY_AUDIT_LEADER_STOCKS_NF))
+);
+
 function recordTickForAudit(prices) {
   if (!prices) return;
   const now = new Date().toISOString();
   const qtys = window._lastQtyByStock || {};
-  QTY_AUDIT_LEADER_STOCKS.forEach(name => {
+  QTY_AUDIT_ALL_LEADER_STOCKS.forEach(name => {
     if (prices[name] === undefined) return;
     const qty = qtys[name] !== undefined ? qtys[name] : 0;
     console.log(`[qty-audit] ${name} LTP=${prices[name]} qty=${qty}`);
@@ -131,14 +159,15 @@ function recordTickForAudit(prices) {
 }
 
 // Port of c.html's auditStockQtyStorage — exact scan/tally/status logic.
-function auditStockQtyStorage(limit = 200) {
+function auditStockQtyStorage(limit = 200, ids) {
+  ids = ids || BIGTRADE_IDS_BN;
   if (!_qtyDb) {
-    setBigTradeStatus('Waiting for DB...');
-    setBigTradeAudit('IndexedDB is not ready yet.');
+    setBigTradeStatus('Waiting for DB...', false, ids);
+    setBigTradeAudit('IndexedDB is not ready yet.', ids);
     return;
   }
 
-  const trackedStocks = new Set(QTY_AUDIT_LEADER_STOCKS);
+  const trackedStocks = new Set(ids.stocks);
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
 
   const tx = _qtyDb.transaction('stocks', 'readonly');
@@ -170,38 +199,40 @@ function auditStockQtyStorage(limit = 200) {
       return;
     }
 
-    if (trackedTodayQtyRows > 0) setBigTradeStatus(`DB OK: ${trackedTodayQtyRows} qty rows today`);
-    else if (trackedQtyRows > 0) setBigTradeStatus('DB has qty rows, but not today', true);
-    else if (recentQtyRows > 0) setBigTradeStatus('Recent rows exist, tracked qty missing', true);
-    else setBigTradeStatus('Recent rows have no qty', true);
+    if (trackedTodayQtyRows > 0) setBigTradeStatus(`DB OK: ${trackedTodayQtyRows} qty rows today`, false, ids);
+    else if (trackedQtyRows > 0) setBigTradeStatus('DB has qty rows, but not today', true, ids);
+    else if (recentQtyRows > 0) setBigTradeStatus('Recent rows exist, tracked qty missing', true, ids);
+    else setBigTradeStatus('Recent rows have no qty', true, ids);
 
     const sampleHtml = samples.length
       ? samples.map(s => `${s.stockname} | ${s.time} | Qty: ${s.qty}`).join('<br>')
       : 'No recent stock rows found in the last scan.';
     setBigTradeAudit(
-      `Recent scan: ${scanned} rows | Qty rows: ${recentQtyRows} | Tracked qty: ${trackedQtyRows} | Tracked today qty: ${trackedTodayQtyRows}<br>${sampleHtml}`
+      `Recent scan: ${scanned} rows | Qty rows: ${recentQtyRows} | Tracked qty: ${trackedQtyRows} | Tracked today qty: ${trackedTodayQtyRows}<br>${sampleHtml}`,
+      ids
     );
   };
   req.onerror = () => {
-    setBigTradeStatus('DB read failed', true);
-    setBigTradeAudit('Could not read IndexedDB cursor for StockDB.stocks.');
+    setBigTradeStatus('DB read failed', true, ids);
+    setBigTradeAudit('Could not read IndexedDB cursor for StockDB.stocks.', ids);
   };
 }
 
 // Renders the Big Trades table straight from stockCandles (server bar
 // volume + per-bar "surged" flag, computed in scheduler.py using the exact
-// same BN_QTY_THRESHOLD_* setting the Entry Loop Monitor's SURGE column
+// same *_QTY_THRESHOLD_* setting the Entry Loop Monitor's SURGE column
 // checks) — one column per leader stock, up to 10 most-recent bars per
 // stock, newest first. Called from dashboard.js's render() on every
 // STATE_UPDATE (1/sec), same cadence the rest of the dashboard uses.
-function renderBigTradesFromCandles(stockCandles) {
-  const thead = document.getElementById('bigtrade-thead');
-  const tbody = document.getElementById('bigtrade-tbody');
+function renderBigTradesFromCandles(stockCandles, ids) {
+  ids = ids || BIGTRADE_IDS_BN;
+  const thead = document.getElementById(ids.thead);
+  const tbody = document.getElementById(ids.tbody);
   if (!thead || !tbody || !stockCandles) return;
 
-  const stocks = QTY_AUDIT_LEADER_STOCKS;
+  const stocks = ids.stocks;
   const haveAnyData = stocks.some(s => (stockCandles[s] || []).length);
-  if (!haveAnyData) setBigTradeStatus('No qty data yet', true);
+  if (!haveAnyData) setBigTradeStatus('No qty data yet', true, ids);
 
   thead.innerHTML = '<tr>' + stocks.map(s => `<th>${s}</th>`).join('') + '</tr>';
 
@@ -232,7 +263,7 @@ function renderBigTradesFromCandles(stockCandles) {
   }
   tbody.innerHTML = html;
   if (haveAnyData) {
-    setBigTradeStatus(`Live (${stocks.filter(s => (stockCandles[s] || []).length).length}/${stocks.length} stocks)`);
+    setBigTradeStatus(`Live (${stocks.filter(s => (stockCandles[s] || []).length).length}/${stocks.length} stocks)`, false, ids);
   }
 }
 

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
-  <link rel="stylesheet" href="/css/dashboard.css?v=12">
+  <link rel="stylesheet" href="/css/dashboard.css?v=18">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -117,6 +117,12 @@
     </div>
   </div>
 
+  <div class="nav-seg" id="instr-filter" aria-label="Instrument view">
+    <button id="instr-btn-both" onclick="setInstrumentFilter('both')">Both</button>
+    <button id="instr-btn-bn" onclick="setInstrumentFilter('bn')">BankNifty</button>
+    <button id="instr-btn-nf" onclick="setInstrumentFilter('nf')">Nifty 50</button>
+  </div>
+
   <nav class="nav-seg" aria-label="Pages">
     <a href="/" class="active">Dashboard</a>
     <a href="/settings">Settings</a>
@@ -137,21 +143,29 @@
 
 <!-- ── Stat strip ──────────────────────────────────────────────────────────── -->
 <div class="stat-strip">
-  <div class="stat-card">
+  <div class="stat-card" data-instr="bn">
     <span class="stat-label">BANKNIFTY <span id="bn-synthetic-badge" class="badge yellow" style="display:none" title="Vendor isn't streaming the real BankNifty index right now — this level is approximated from the 11 constituent stocks' weighted move.">~ synthetic</span></span>
     <span class="stat-value" id="stat-bnltp">—</span>
   </div>
+  <div class="stat-card" data-instr="nf">
+    <span class="stat-label">NIFTY 50 <span id="nf-synthetic-badge" class="badge yellow" style="display:none" title="Vendor isn't streaming the real Nifty 50 index right now — this level is approximated from its 32 constituent stocks' weighted move.">~ synthetic</span></span>
+    <span class="stat-value" id="stat-nfltp">—</span>
+  </div>
   <div class="stat-card" id="card-pnl">
-    <span class="stat-label">Daily P&amp;L</span>
+    <span class="stat-label">Daily P&amp;L <span class="muted-text" title="Shared paper account — BankNifty + Nifty 50 combined">(shared)</span></span>
     <span class="stat-value" id="stat-pnl">—</span>
   </div>
   <div class="stat-card">
     <span class="stat-label">Funds</span>
     <span class="stat-value" id="stat-funds">—</span>
   </div>
-  <div class="stat-card">
-    <span class="stat-label">Active Trade</span>
+  <div class="stat-card" data-instr="bn">
+    <span class="stat-label">BN Active Trade</span>
     <span class="stat-value" id="stat-active">—</span>
+  </div>
+  <div class="stat-card" data-instr="nf">
+    <span class="stat-label">NF Active Trade</span>
+    <span class="stat-value" id="stat-active-nf">—</span>
   </div>
 </div>
 
@@ -162,6 +176,29 @@
   <div class="col">
 
     <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Today's Trades</span>
+        <div>
+          <span id="closed-count" class="badge gray">0</span>
+          <button class="dash-toggle" data-target="todays-trades-body" onclick="toggleSection(this)">▼</button>
+        </div>
+      </div>
+      <div class="panel-body dash-body" id="todays-trades-body">
+        <div class="tbl-wrap">
+          <table class="cardify">
+            <thead><tr>
+              <th>Instr</th><th>Dir</th><th>Option</th><th>Entry Idx</th><th>Exit Idx</th>
+              <th>Entry Prem</th><th>Exit Prem</th><th>Outcome</th><th>P&amp;L ₹</th>
+            </tr></thead>
+            <tbody id="closed-tbody">
+              <tr><td colspan="9" class="empty-cell">No trades yet today</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" data-instr="bn">
       <div class="panel-header">
         <span class="panel-title">Trade Dashboard</span>
         <div>
@@ -214,24 +251,6 @@
 
         <div class="panel-subsection">
           <div class="panel-subheader">
-            <span class="panel-subtitle">Today's Trades</span>
-            <span id="closed-count" class="badge gray">0</span>
-          </div>
-          <div class="tbl-wrap">
-            <table class="cardify">
-              <thead><tr>
-                <th>Dir</th><th>Option</th><th>Entry Idx</th><th>Exit Idx</th>
-                <th>Entry Prem</th><th>Exit Prem</th><th>Outcome</th><th>P&amp;L ₹</th>
-              </tr></thead>
-              <tbody id="closed-tbody">
-                <tr><td colspan="8" class="empty-cell">No trades yet today</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="panel-subsection">
-          <div class="panel-subheader">
             <span class="panel-subtitle">Local Trade Log (browser-only)</span>
             <div>
               <button class="btn-mini" onclick="setTradeLogFilter('today')" id="tl-filter-today">Today</button>
@@ -255,7 +274,21 @@
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-instr="nf">
+      <div class="panel-header">
+        <span class="panel-title">Nifty 50 Trade Dashboard</span>
+        <div>
+          <span id="trade-badge-nf" class="badge gray">none</span>
+          <button class="dash-toggle" data-target="trade-dashboard-nf-body" onclick="toggleSection(this)">▼</button>
+        </div>
+      </div>
+      <div class="panel-body dash-body" id="trade-dashboard-nf-body">
+        <div id="trade-empty-nf" class="empty-cell">No active trade</div>
+        <div id="trade-card-nf" class="trade-card" style="display:none"></div>
+      </div>
+    </div>
+
+    <div class="panel" data-instr="bn">
       <div class="panel-header">
         <span class="panel-title">🔥 Big Trades <span id="bigtrade-status" class="muted-text">Loading...</span></span>
         <div>
@@ -280,12 +313,33 @@
       </div>
     </div>
 
+    <div class="panel" data-instr="nf">
+      <div class="panel-header">
+        <span class="panel-title">🔥 Nifty 50 Big Trades <span id="bigtrade-status-nf" class="muted-text">Loading...</span></span>
+        <div>
+          <button class="btn-mini" onclick="auditStockQtyStorage(200, BIGTRADE_IDS_NF)">DB Check</button>
+          <button class="dash-toggle" data-target="bigtrade-body-nf" onclick="toggleSection(this)">▼</button>
+        </div>
+      </div>
+      <div class="panel-body dash-body" id="bigtrade-body-nf">
+        <div class="tbl-wrap" style="overflow-x:auto">
+          <table id="bigtrade-table-nf">
+            <thead id="bigtrade-thead-nf"></thead>
+            <tbody id="bigtrade-tbody-nf">
+              <tr><td class="empty-cell">Waiting for ticks…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="audit-line" id="bigtrade-audit-nf">DB not checked yet.</div>
+      </div>
+    </div>
+
   </div>
 
   <!-- RIGHT: Entry Loop Monitor + Stock Candles + Backtest ─────────────────── -->
   <div class="col">
 
-    <div class="panel">
+    <div class="panel" data-instr="bn">
       <div class="panel-header">
         <span class="panel-title">Entry Loop Monitor</span>
         <div>
@@ -308,15 +362,42 @@
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-instr="nf">
+      <div class="panel-header">
+        <span class="panel-title">Nifty 50 Entry Loop Monitor</span>
+        <div>
+          <span id="entry-time-nf" class="badge gray">—</span>
+          <button class="dash-toggle" data-target="entry-loop-nf-body" onclick="toggleSection(this)">▼</button>
+        </div>
+      </div>
+      <div class="panel-body dash-body" id="entry-loop-nf-body">
+        <div id="entry-summary-nf" class="entry-summary">—</div>
+        <div class="tbl-wrap">
+          <table class="cardify">
+            <thead><tr><th>Leader</th><th>Open</th><th>Close</th><th>Volume</th><th>Surge</th></tr></thead>
+            <tbody id="leader-tbody-nf">
+              <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="gate-rows-nf"></div>
+        <div id="no-trade-reason-nf" class="no-trade-reason">—</div>
+      </div>
+    </div>
+
+    <div class="panel" data-instr="bn">
       <div class="panel-header">
         <span class="panel-title">Stock Candles</span>
-        <button class="dash-toggle" data-target="stock-candles-body" onclick="toggleSection(this)">▼</button>
+        <div>
+          <button class="btn-mini" id="stock-candles-expand-btn"
+            onclick="toggleTableExpand(this, ['stock-table-wrap', 'sr-table-wrap'])">Show all rows</button>
+          <button class="dash-toggle" data-target="stock-candles-body" onclick="toggleSection(this)">▼</button>
+        </div>
       </div>
       <div class="panel-body dash-body" id="stock-candles-body">
         <div class="global-signal-badge" id="global-signal-badge">GLOBAL SIGNAL: —</div>
         <div class="breakout-banner" id="breakout-banner">No breakout detected.</div>
-        <div class="tbl-wrap">
+        <div class="tbl-wrap" id="stock-table-wrap">
           <table class="cardify" id="stock-table">
             <thead><tr id="stock-table-head"><th>Stock</th></tr></thead>
             <tbody id="stock-table-body">
@@ -324,13 +405,47 @@
             </tbody>
           </table>
         </div>
-        <div class="tbl-wrap" style="margin-top:10px">
+        <div class="tbl-wrap" id="sr-table-wrap" style="margin-top:10px">
           <table class="sr-table" id="sr-table">
             <thead><tr>
               <th>Stock</th><th>5m Support</th><th>5m Resistance</th>
               <th>15m Support</th><th>15m Resistance</th>
             </tr></thead>
             <tbody id="sr-table-body">
+              <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" data-instr="nf">
+      <div class="panel-header">
+        <span class="panel-title">Nifty 50 Stock Candles</span>
+        <div>
+          <button class="btn-mini" id="stock-candles-nf-expand-btn"
+            onclick="toggleTableExpand(this, ['stock-table-nf-wrap', 'sr-table-nf-wrap'])">Show all rows</button>
+          <button class="dash-toggle" data-target="stock-candles-nf-body" onclick="toggleSection(this)">▼</button>
+        </div>
+      </div>
+      <div class="panel-body dash-body" id="stock-candles-nf-body">
+        <div class="global-signal-badge" id="global-signal-badge-nf">GLOBAL SIGNAL: —</div>
+        <div class="breakout-banner" id="breakout-banner-nf">No breakout detected.</div>
+        <div class="tbl-wrap" id="stock-table-nf-wrap">
+          <table class="cardify" id="stock-table-nf">
+            <thead><tr id="stock-table-head-nf"><th>Stock</th></tr></thead>
+            <tbody id="stock-table-body-nf">
+              <tr><td class="empty-cell">Waiting for data…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tbl-wrap" id="sr-table-nf-wrap" style="margin-top:10px">
+          <table class="sr-table" id="sr-table-nf">
+            <thead><tr>
+              <th>Stock</th><th>5m Support</th><th>5m Resistance</th>
+              <th>15m Support</th><th>15m Resistance</th>
+            </tr></thead>
+            <tbody id="sr-table-body-nf">
               <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
             </tbody>
           </table>
@@ -425,10 +540,10 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="/js/util.js?v=12"></script>
-<script src="/js/breakout.js?v=12"></script>
-<script src="/js/qtyAudit.js?v=12"></script>
-<script src="/js/kiteForm.js?v=12"></script>
-<script src="/js/dashboard.js?v=12"></script>
+<script src="/js/util.js?v=18"></script>
+<script src="/js/breakout.js?v=18"></script>
+<script src="/js/qtyAudit.js?v=18"></script>
+<script src="/js/kiteForm.js?v=18"></script>
+<script src="/js/dashboard.js?v=18"></script>
 </body>
 </html>

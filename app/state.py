@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Dict, List, Optional
 
-from app.models import BNDiagnostic, BNTrade, Candle, TradingPhase
+from app.models import BNDiagnostic, BNTrade, Candle, NFDiagnostic, NFTrade, TradingPhase
 
 
 class AppState:
@@ -78,6 +78,24 @@ class AppState:
         self._token_locks:      Dict[str, threading.Lock] = {}
         self._token_locks_meta: threading.Lock            = threading.Lock()
         self._bn_index_lock: threading.Lock = threading.Lock()
+
+        # ── Nifty 50 — a second, independent instrument running in parallel
+        # to BankNifty above. candles_5m/ltp (keyed by symbol string) are
+        # SHARED across both instruments — no separate store needed there.
+        # funds/daily_pnl are also SHARED (one paper account, two strategies)
+        # — only per-instrument STRATEGY EXECUTION state is separate. ───────
+        self.nf_index_candles_5m: List[Candle] = []
+        self.nf_index_ltp:        float        = 0.0
+        self.nf_index_synthetic:  bool         = True
+        self.nf_synthetic_anchor: float        = 0.0
+        self._nf_index_lock: threading.Lock = threading.Lock()
+
+        self.active_trade_nf:      Optional[NFTrade] = None
+        self.closed_trades_nf:     List[NFTrade]      = []
+        self.last_trade_candle_nf: Optional[str]      = None
+        self.last_exit_time_nf:    Optional[str]      = None
+        self.nf_diagnostic:        Optional[NFDiagnostic] = None
+        self.last_evaluated_bar_nf: Optional[str]     = None
 
     def candle_lock(self, token: str) -> threading.Lock:
         """Return (and lazily create) the per-token candle lock."""

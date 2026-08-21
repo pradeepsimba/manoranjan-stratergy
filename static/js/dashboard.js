@@ -92,6 +92,11 @@ function render(d) {
   const synBadge = document.getElementById('bn-synthetic-badge');
   if (synBadge) synBadge.style.display = d.bnIndexSynthetic ? '' : 'none';
 
+  const nfLtpEl = document.getElementById('stat-nfltp');
+  if (nfLtpEl) nfLtpEl.textContent = d.nfLtp ? fmt2(d.nfLtp) : '—';
+  const nfSynBadge = document.getElementById('nf-synthetic-badge');
+  if (nfSynBadge) nfSynBadge.style.display = d.nfIndexSynthetic ? '' : 'none';
+
   const pnl    = d.dailyPnl || 0;
   const pnlEl  = document.getElementById('stat-pnl');
   pnlEl.textContent = (pnl >= 0 ? '+' : '') + '₹' + fmt2(pnl);
@@ -122,27 +127,63 @@ function render(d) {
     activeEl.className = 'stat-value';
   }
 
-  renderTrade(d.activeTrade);
-  renderClosedTrades(d.closedTrades || []);
-  renderEntryLoop(d.entryLoop, d.liveLeaderRows);
+  const activeNfEl = document.getElementById('stat-active-nf');
+  if (activeNfEl) {
+    if (d.activeTradeNf) {
+      activeNfEl.textContent = `${d.activeTradeNf.direction} ${d.activeTradeNf.optionType}`;
+      activeNfEl.className = 'stat-value ' + (d.activeTradeNf.direction === 'BUY' ? 'pnl-pos' : 'pnl-neg');
+    } else {
+      activeNfEl.textContent = 'None';
+      activeNfEl.className = 'stat-value';
+    }
+  }
+
+  renderTrade(d.activeTrade, TRADE_IDS_BN);
+  renderTrade(d.activeTradeNf, TRADE_IDS_NF);
+  renderClosedTrades(d.closedTrades || [], d.closedTradesNf || []);
+  renderEntryLoop(d.entryLoop, d.liveLeaderRows, ENTRY_IDS_BN);
+  renderEntryLoop(d.entryLoopNf, null, ENTRY_IDS_NF);
 
   if (d.bnLtp) window._lastBnLtp = d.bnLtp;
-  if (typeof renderGlobalSignal === 'function') renderGlobalSignal(d.globalSignal);
-  if (typeof renderBreakoutBanner === 'function') renderBreakoutBanner(d.breakout);
-  if (typeof renderStockCandles === 'function') renderStockCandles(d.stockCandles);
-  if (typeof renderSrLevels === 'function') renderSrLevels(d.srLevels);
-  if (typeof renderBigTradesFromCandles === 'function') renderBigTradesFromCandles(d.stockCandles);
+  if (typeof renderGlobalSignal === 'function') {
+    renderGlobalSignal(d.globalSignal);
+    renderGlobalSignal(d.globalSignalNf, STOCK_IDS_NF);
+  }
+  if (typeof renderBreakoutBanner === 'function') {
+    renderBreakoutBanner(d.breakout);
+    renderBreakoutBanner(d.breakoutNf, STOCK_IDS_NF);
+  }
+  if (typeof renderStockCandles === 'function') {
+    renderStockCandles(d.stockCandles);
+    renderStockCandles(d.stockCandlesNf, STOCK_IDS_NF);
+  }
+  if (typeof renderSrLevels === 'function') {
+    renderSrLevels(d.srLevels);
+    renderSrLevels(d.srLevelsNf, STOCK_IDS_NF);
+  }
+  if (typeof renderBigTradesFromCandles === 'function') {
+    renderBigTradesFromCandles(d.stockCandles);
+    renderBigTradesFromCandles(d.stockCandlesNf, BIGTRADE_IDS_NF);
+  }
 
   checkTradeTransitionForScreenshot(d.activeTrade);
   updateLocalTradeLog(d.activeTrade, d.closedTrades || []);
 }
 
 // ── Active trade card ─────────────────────────────────────────────────────────
+// renderTrade/renderEntryLoop take an `ids` set so the identical BankNifty
+// rendering logic can also target the Nifty 50 panel's own DOM nodes,
+// instead of duplicating each function body.
 
-function renderTrade(t) {
-  const badge = document.getElementById('trade-badge');
-  const empty = document.getElementById('trade-empty');
-  const card  = document.getElementById('trade-card');
+const TRADE_IDS_BN = { badge: 'trade-badge', empty: 'trade-empty', card: 'trade-card' };
+const TRADE_IDS_NF = { badge: 'trade-badge-nf', empty: 'trade-empty-nf', card: 'trade-card-nf' };
+
+function renderTrade(t, ids) {
+  ids = ids || TRADE_IDS_BN;
+  const badge = document.getElementById(ids.badge);
+  const empty = document.getElementById(ids.empty);
+  const card  = document.getElementById(ids.card);
+  if (!badge || !empty || !card) return;
 
   if (!t) {
     badge.textContent = 'none'; badge.className = 'badge gray';
@@ -179,17 +220,22 @@ function renderTrade(t) {
 
 // ── Closed trades ──────────────────────────────────────────────────────────────
 
-function renderClosedTrades(trades) {
-  document.getElementById('closed-count').textContent = trades.length;
+function renderClosedTrades(bnTrades, nfTrades) {
+  const merged = bnTrades.map(t => ({ ...t, _instr: 'BN' }))
+    .concat((nfTrades || []).map(t => ({ ...t, _instr: 'NF' })))
+    .sort((a, b) => (a.exitTime || '').localeCompare(b.exitTime || ''));
+
+  document.getElementById('closed-count').textContent = merged.length;
   const tbody = document.getElementById('closed-tbody');
-  if (!trades.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-cell">No trades yet today</td></tr>';
+  if (!merged.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-cell">No trades yet today</td></tr>';
     return;
   }
-  const html = trades.slice().reverse().map(t => {
+  const html = merged.slice().reverse().map(t => {
     const pnlCls = t.pnl > 0 ? 'pnl-pos' : t.pnl < 0 ? 'pnl-neg' : '';
     const ocCls  = t.status === 'CLOSED' ? '' : '';
     return `<tr>
+      <td data-label="Instr"><span class="badge ${t._instr === 'NF' ? 'blue' : 'gray'}">${t._instr}</span></td>
       <td data-label="Dir">${escHtml(t.direction)}</td>
       <td data-label="Option">${t.strike} ${escHtml(t.optionType)}</td>
       <td data-label="Entry Idx">${fmt2(t.entryIndexPrice)}</td>
@@ -205,10 +251,22 @@ function renderClosedTrades(trades) {
 
 // ── Entry Loop Monitor ("why didn't it fire") ─────────────────────────────────
 
-function renderEntryLoop(d, liveLeaderRows) {
-  document.getElementById('entry-time').textContent = d && d.time ? d.time.substring(11, 16) : '—';
+const ENTRY_IDS_BN = {
+  time: 'entry-time', leaderTbody: 'leader-tbody', summary: 'entry-summary',
+  gates: 'gate-rows', noTradeReason: 'no-trade-reason',
+};
+const ENTRY_IDS_NF = {
+  time: 'entry-time-nf', leaderTbody: 'leader-tbody-nf', summary: 'entry-summary-nf',
+  gates: 'gate-rows-nf', noTradeReason: 'no-trade-reason-nf',
+};
 
-  const tbody = document.getElementById('leader-tbody');
+function renderEntryLoop(d, liveLeaderRows, ids) {
+  ids = ids || ENTRY_IDS_BN;
+  const timeEl = document.getElementById(ids.time);
+  if (!timeEl) return;
+  timeEl.textContent = d && d.time ? d.time.substring(11, 16) : '—';
+
+  const tbody = document.getElementById(ids.leaderTbody);
   // Live (per-second, current forming bar) rows take priority — falls back
   // to the frozen last-evaluated-bar snapshot only if the live feed hasn't
   // populated yet (e.g. right at WAIT_ZONE before any candle has arrived).
@@ -229,11 +287,11 @@ function renderEntryLoop(d, liveLeaderRows) {
     }).join('');
   }
 
-  const gates = document.getElementById('gate-rows');
+  const gates = document.getElementById(ids.gates);
   if (!d) {
-    const summary = document.getElementById('entry-summary');
+    const summary = document.getElementById(ids.summary);
     if (summary) { summary.textContent = '—'; summary.className = 'entry-summary'; }
-    gates.innerHTML = '';
+    if (gates) gates.innerHTML = '';
     return;
   }
 
@@ -269,7 +327,7 @@ function renderEntryLoop(d, liveLeaderRows) {
   // — not the backend's own d.entryReady, which is frozen at the moment of
   // that bar's evaluation and goes stale the instant a trade opens from it
   // (noActiveTrade flips live, but a banner reading d.entryReady wouldn't).
-  const summary = document.getElementById('entry-summary');
+  const summary = document.getElementById(ids.summary);
   if (summary) {
     if (passed === gateList.length) {
       summary.textContent = '✔ ENTRY READY';
@@ -293,7 +351,7 @@ function renderEntryLoop(d, liveLeaderRows) {
     ['Momentum', escHtml(d.momentumReason || (d.momentumOk ? 'OK' : 'weak')), d.momentumOk],
     ['Leader vote', `${d.leaderSignal} (${d.green} green / ${d.red} red)`, sigOk],
     ['Dir count', `G:${d.green} R:${d.red} (need ≥${req})`, d.dirCountOk],
-    ['Strong qty', `${d.strongQty}/6 above threshold (need ≥${req})`, d.qtySurgeOk],
+    ['Strong qty', `${d.strongQty}/${d.leaderRows ? d.leaderRows.length : req} above threshold (need ≥${req})`, d.qtySurgeOk],
     ['Candle closed', ccOk ? 'Closed' : 'Forming', ccOk],
     ['RSI (14)', d.rsi != null ? Number(d.rsi).toFixed(1) : '—', null],
     ['MACD', `${d.macdDir || '—'}${d.macdVal != null ? ' (' + Number(d.macdVal).toFixed(2) + ')' : ''}`, macdOk],
@@ -304,13 +362,14 @@ function renderEntryLoop(d, liveLeaderRows) {
       ? `${d.atmStrike} @ ₹${fmt2(d.atmPremium)} (IV ${d.atmIv != null ? (d.atmIv * 100).toFixed(1) + '%' : '—'})`
       : '—', null],
   ];
-  gates.innerHTML = rows2.map(([lbl, val, ok]) => {
+  if (gates) gates.innerHTML = rows2.map(([lbl, val, ok]) => {
     const indicator = ok === null ? '<span class="g-ok na">—</span>'
       : ok ? '<span class="g-ok pass">✔</span>' : '<span class="g-ok fail">✘</span>';
     return `<div class="gate-row"><span class="g-lbl">${lbl}</span><span class="g-val">${val}</span>${indicator}</div>`;
   }).join('');
 
-  const reasonEl = document.getElementById('no-trade-reason');
+  const reasonEl = document.getElementById(ids.noTradeReason);
+  if (!reasonEl) return;
   if (d.noTradeReason) {
     reasonEl.textContent = d.noTradeReason;
     reasonEl.className = 'no-trade-reason';
@@ -318,6 +377,37 @@ function renderEntryLoop(d, liveLeaderRows) {
     reasonEl.textContent = 'All gates clear — ready to fire on the next qualifying bar.';
     reasonEl.className = 'no-trade-reason ready';
   }
+}
+
+// ── Instrument view filter (Both / BankNifty / Nifty 50) ─────────────────────
+// Purely a display filter — both engines keep trading in the background
+// regardless of which view is selected; this just shows/hides the
+// [data-instr] stat cards and panels. Persisted like the theme choice.
+
+function setInstrumentFilter(which) {
+  localStorage.setItem('instrFilter', which);
+  document.querySelectorAll('[data-instr]').forEach(el => {
+    el.style.display = (which === 'both' || el.dataset.instr === which) ? '' : 'none';
+  });
+  ['both', 'bn', 'nf'].forEach(w => {
+    const btn = document.getElementById('instr-btn-' + w);
+    if (btn) btn.classList.toggle('active', w === which);
+  });
+}
+
+setInstrumentFilter(localStorage.getItem('instrFilter') || 'both');
+
+// Drops the .tbl-wrap max-height clamp (see dashboard.css) so a long table
+// (Nifty 50's 32+1 rows in particular) can render fully instead of scrolling
+// inside a small fixed box. wrapIds may be one id or an array of ids so a
+// single button can expand a panel's stock-candle table + S-R table together.
+function toggleTableExpand(btn, wrapIds) {
+  const ids = Array.isArray(wrapIds) ? wrapIds : [wrapIds];
+  const wraps = ids.map(id => document.getElementById(id)).filter(Boolean);
+  if (!wraps.length) return;
+  const expand = !wraps[0].classList.contains('expanded');
+  wraps.forEach(w => w.classList.toggle('expanded', expand));
+  btn.textContent = expand ? 'Show fewer rows' : 'Show all rows';
 }
 
 // ── Collapsible sections (c.html's toggleSection) ─────────────────────────────

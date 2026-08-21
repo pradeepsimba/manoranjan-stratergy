@@ -3,11 +3,13 @@ from __future__ import annotations
 """
 Live WebSocket feed from the custom market data server.
 
-Fixed, small universe (BankNifty index + 11 stocks = 12 symbol-interval
-pairs, well under the server's ~40-entries-per-connection output buffer), so
-a SINGLE WS connection covers everything — no need for the equity engine's
-split primary-5m/primary-1h/secondary connections (BN never uses 1h data or
-a "non-Gemini" secondary universe).
+Fixed universe: BankNifty index + its 11 stocks, plus Nifty 50 index + its
+32 stocks, deduped on the 6 stocks both strategies share (see
+_build_filters) = 39 symbol-interval pairs. Still a SINGLE WS connection,
+but now close to the server's documented ~40-entries-per-connection output
+buffer limit — if that limit is a hard cap (not just a rough historical
+observation), adding any further instrument would need a second connection,
+mirroring the deleted equity engine's split primary/secondary approach.
 """
 
 import asyncio
@@ -40,8 +42,12 @@ class MarketDataService:
         # reliably match the casing we sent in the subscription request (e.g.
         # it echoes "HDFC Bank" even though we subscribed with "HDFC BANK"),
         # so `ltp` must be keyed off this reverse map, never off the raw
-        # echoed `stockname` text directly.
-        self._token_to_name = {token: name for name, token in cfg.BN_ALL_STOCKS.items()}
+        # echoed `stockname` text directly. Merged across BOTH instruments —
+        # the 6 stocks BN and NF share resolve to the same name either way.
+        self._token_to_name = {
+            **{token: name for name, token in cfg.BN_ALL_STOCKS.items()},
+            **{token: name for name, token in cfg.NF_ALL_STOCKS.items()},
+        }
 
     def start(self) -> None:
         self._running = True
@@ -110,15 +116,24 @@ class MarketDataService:
     # ── Subscription filter builder ────────────────────────────────────────────
 
     def _build_filters(self) -> list:
-        """BankNifty index + the 11 BN stocks, all at 5m — the fixed strategy universe."""
-        filters = [{
-            "stock_symbol": cfg.BN_INDEX_TOKEN,
-            "stockname":    cfg.BN_INDEX_NAME,
-            "interval":     "5m",
-        }]
+        """
+        BankNifty index + its 11 stocks, and Nifty 50 index + its 32 stocks,
+        all at 5m. Stock filters are deduped by stock_symbol (6 stocks are
+        shared between the two universes — HDFCBANK, ICICIBANK, AXISBANK,
+        SBIN, KOTAKBANK, INDUSINDBK — each must be subscribed exactly once).
+        """
+        filters = [
+            {"stock_symbol": cfg.BN_INDEX_TOKEN, "stockname": cfg.BN_INDEX_NAME, "interval": "5m"},
+            {"stock_symbol": cfg.NF_INDEX_TOKEN, "stockname": cfg.NF_INDEX_NAME, "interval": "5m"},
+        ]
+        stock_by_symbol = {}
+        for sym, token in cfg.BN_ALL_STOCKS.items():
+            stock_by_symbol[token] = sym
+        for sym, token in cfg.NF_ALL_STOCKS.items():
+            stock_by_symbol.setdefault(token, sym)
         filters += [
             {"stock_symbol": token, "stockname": sym, "interval": "5m"}
-            for sym, token in cfg.BN_ALL_STOCKS.items()
+            for token, sym in stock_by_symbol.items()
         ]
         return filters
 
@@ -171,6 +186,10 @@ class MarketDataService:
             self.state.bn_index_synthetic = False
             with self.state._bn_index_lock:
                 self._upsert_list(self.state.bn_index_candles_5m, candle)
+        elif symbol == cfg.NF_INDEX_TOKEN:
+            self.state.nf_index_synthetic = False
+            with self.state._nf_index_lock:
+                self._upsert_list(self.state.nf_index_candles_5m, candle)
         else:
             with self.state.candle_lock(symbol):
                 self._upsert(self.state.candles_5m, symbol, candle)
@@ -179,10 +198,14 @@ class MarketDataService:
                 self.state.tick_version[symbol] = self.state.tick_version.get(symbol, 0) + 1
             if self.state.bn_index_synthetic:
                 self._update_synthetic_index()
+            if self.state.nf_index_synthetic:
+                self._update_synthetic_nf_index()
 
         if ltp > 0:
             if symbol == cfg.BN_INDEX_TOKEN:
                 self.state.bn_index_ltp = ltp
+            elif symbol == cfg.NF_INDEX_TOKEN:
+                self.state.nf_index_ltp = ltp
             else:
                 name = self._token_to_name.get(symbol)
                 if name:
@@ -247,6 +270,46 @@ class MarketDataService:
             self._upsert_list(idx_candles, synthetic)
 
         self.state.bn_index_ltp = close_
+
+    def _update_synthetic_nf_index(self) -> None:
+        """NF mirror of _update_synthetic_index — same anchor-and-weighted-% logic, cfg.NF_*."""
+        weighted_pct = 0.0
+        total_weight = 0.0
+        latest_time: Optional[str] = None
+
+        for symbol, weight in cfg.NF_INDEX_WEIGHTS.items():
+            with self.state.candle_lock(symbol):
+                candles = self.state.candles_5m.get(symbol)
+                candle = candles[-1] if candles else None
+            if not candle or not candle.open or not candle.close:
+                continue
+            pct = (candle.close - candle.open) / candle.open * 100.0
+            weighted_pct += pct * (weight / 100.0)
+            total_weight += weight
+            if candle.start_time and (latest_time is None or candle.start_time > latest_time):
+                latest_time = candle.start_time
+
+        if total_weight == 0 or latest_time is None:
+            return
+
+        with self.state._nf_index_lock:
+            idx_candles = self.state.nf_index_candles_5m
+            prev = idx_candles[-1] if idx_candles else None
+            is_new_bar = prev is None or prev.start_time != latest_time
+
+            if is_new_bar and prev is not None:
+                self.state.nf_synthetic_anchor = prev.close
+            anchor = self.state.nf_synthetic_anchor
+            if anchor <= 0:
+                return
+
+            open_ = anchor if is_new_bar else (prev.open if prev else anchor)
+            close_ = open_ * (1 + weighted_pct / 100.0)
+            synthetic = Candle(start_time=latest_time, open=open_, close=close_,
+                               high=max(open_, close_), low=min(open_, close_))
+            self._upsert_list(idx_candles, synthetic)
+
+        self.state.nf_index_ltp = close_
 
     # ── Candle upsert helpers ─────────────────────────────────────────────────
 

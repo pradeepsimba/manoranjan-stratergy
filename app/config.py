@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
 # ── Static: custom market data server ────────────────────────────────────────
-API_HOST          = "35.234.219.141"
+API_HOST          = "algo.vaangamart.com"
 API_URL_TEMPLATE  = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
 WS_URL            = f"ws://{API_HOST}:8083/historical-data"
 
@@ -135,6 +135,92 @@ BN_INDEX_WEIGHTS: Dict[str, float] = {
 # BankNifty exchange lot size — a contract-spec fact, not a user tunable.
 BN_LOT_SIZE = 30
 
+# ── Static: Nifty 50 options strategy universe (parallel to the BN block
+# above — a second, independent instrument, not a replacement) ──────────────
+# The 32-stock stock_symbol list originally supplied for this universe used
+# the OLD pre-migration Kite-style numeric tokens (e.g. "1333" for HDFC
+# BANK) — the exact dead scheme BN_ALL_STOCKS already moved off of (see the
+# migration note above). Values below are the corrected current NSE trading-
+# symbol strings; dict KEYS (stockname text sent to the vendor) are kept as
+# originally supplied, with the same Kotak fix BN_ALL_STOCKS already needed
+# ("KOTAK BANK", not "KOTAK MAHINDRA BANK" — vendor matches by stockname text).
+NF_INDEX_NAME = "NIFTY50"
+NF_INDEX_TOKEN = "NIFTY 50"
+
+# The 12 highest-weighted of the 32 (by real-world NSE index weight) — drive
+# the leader-vote + volume-surge gates, same role BN_LEADER_STOCKS plays.
+NF_LEADER_STOCKS: Dict[str, str] = {
+    "HDFC BANK":                "HDFCBANK",
+    "RELIANCE INDUSTRIES":      "RELIANCE",
+    "ICICI BANK":               "ICICIBANK",
+    "INFOSYS":                  "INFY",
+    "BHARTI AIRTEL":            "BHARTIARTL",
+    "ITC":                      "ITC",
+    "HCL TECHNOLOGIES":         "HCLTECH",   # was TCS (any stockname/symbol variant tried) — confirmed via direct vendor query that TCS has NO data at all under this vendor, not a naming mismatch; swapped for HCL Technologies, which does
+    "LARSEN & TOUBRO":          "LT",
+    "KOTAK BANK":               "KOTAKBANK",   # was "KOTAK MAHINDRA BANK" — same gotcha as BN_ALL_STOCKS
+    "AXIS BANK":                "AXISBANK",
+    "STATE BANK OF INDIA":      "SBIN",
+    "HINDUSTAN UNILEVER":       "HINDUNILVR",
+}
+
+NF_QTY_THRESHOLD_ATTR: Dict[str, str] = {
+    "HDFC BANK":                "NF_QTY_THRESHOLD_HDFC",
+    "RELIANCE INDUSTRIES":      "NF_QTY_THRESHOLD_RELIANCE",
+    "ICICI BANK":               "NF_QTY_THRESHOLD_ICICI",
+    "INFOSYS":                  "NF_QTY_THRESHOLD_INFY",
+    "BHARTI AIRTEL":            "NF_QTY_THRESHOLD_BHARTIARTL",
+    "ITC":                      "NF_QTY_THRESHOLD_ITC",
+    "HCL TECHNOLOGIES":         "NF_QTY_THRESHOLD_HCLTECH",
+    "LARSEN & TOUBRO":          "NF_QTY_THRESHOLD_LT",
+    "KOTAK BANK":               "NF_QTY_THRESHOLD_KOTAK",
+    "AXIS BANK":                "NF_QTY_THRESHOLD_AXIS",
+    "STATE BANK OF INDIA":      "NF_QTY_THRESHOLD_SBI",
+    "HINDUSTAN UNILEVER":       "NF_QTY_THRESHOLD_HUL",
+}
+
+# All 32 stocks fetched/displayed — the 20 beyond the leaders never feed the
+# entry decision but are kept for parity with the BN universe's own
+# "leaders + extras" shape.
+NF_ALL_STOCKS: Dict[str, str] = {
+    **NF_LEADER_STOCKS,
+    "BAJAJ FINANCE":            "BAJFINANCE",
+    "ASIAN PAINTS":             "ASIANPAINT",
+    "TITAN":                    "TITAN",   # was "TITAN COMPANY" — vendor returned zero candles for that stockname; "TITAN" itself matches (same gotcha class as Kotak/HCL Tech above)
+    "WIPRO":                    "WIPRO",
+    "NTPC":                     "NTPC",
+    "ULTRATECH CEMENT":         "ULTRACEMCO",
+    "JSW STEEL":                "JSWSTEEL",
+    "TATA MOTORS":              "TATAMOTORS",
+    "TECH MAHINDRA":            "TECHM",
+    "BAJAJ AUTO":               "BAJAJ-AUTO",
+    "INDUSIND BANK":            "INDUSINDBK",
+    "AU SMALL FINANCE BANK":    "AUBANK",
+    "FEDERAL BANK":             "FEDERALBNK",
+    "IDFC FIRST BANK":          "IDFCFIRSTB",
+    "PUNJAB NATIONAL BANK":     "PNB",
+    "CANARA BANK":              "CANBK",
+    # Replacements for MARUTI SUZUKI INDIA / SUN PHARMACEUTICAL IND L /
+    # POWER GRID CORP. — all three confirmed to have ZERO vendor data under
+    # every stockname/symbol variant tried (not a naming mismatch, a genuine
+    # coverage gap). These 4 were confirmed working via direct vendor query.
+    "MAHINDRA & MAHINDRA":      "M&M",
+    "TATA STEEL":               "TATASTEEL",
+    "SBI LIFE INSURANCE":       "SBILIFE",
+    "HDFC LIFE INSURANCE":      "HDFCLIFE",
+}
+
+# Equal weight across all 32 (100/32) — no real per-stock Nifty 50 weights
+# were supplied (unlike BN_INDEX_WEIGHTS' real Oct-2025 snapshot), per an
+# explicit user decision. Keyed by stock_symbol, same convention as
+# BN_INDEX_WEIGHTS. Used only for the synthetic-index fallback.
+NF_INDEX_WEIGHTS: Dict[str, float] = {
+    token: 100.0 / len(NF_ALL_STOCKS) for token in NF_ALL_STOCKS.values()
+}
+
+# Nifty 50 exchange lot size — a contract-spec fact, not a user tunable.
+NF_LOT_SIZE = 65
+
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
 HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
 MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
@@ -224,6 +310,77 @@ _DEFAULTS: Dict[str, Any] = {
     # Backtest
     "BACKTEST_WARMUP_DAYS": 7,
     "SLIPPAGE_BPS":         2.0,
+
+    # ── NF (Nifty 50) Strategy — parallel to the BN block above. Point-based
+    # thresholds (sideways/momentum/target/stop/breakeven/trail) start scaled
+    # down ~0.45x from BN's own calibrated values, matching Nifty 50 trading
+    # at roughly 0.45x BankNifty's spot level (~25,000 vs ~55,000) — a
+    # starting point only, same "recalibrate from live bars" caveat as BN's
+    # own qty thresholds. Dimensionless gates (RSI/EMA/MACD periods, score
+    # levels) reuse BN's exact defaults — those don't scale with spot price.
+    "NF_SIDEWAYS_RANGE_MIN":   6.0,    # min 5-bar Nifty 50 close range to trade
+    "NF_MOMENTUM_THRESHOLD":   13.0,   # fixed 5m momentum threshold (points)
+    "NF_ATR_PERIOD":           10,
+    "NF_SAME_DIRECTION_REQUIRED": 6,   # of 12 leaders must agree
+    "NF_ENTRY_COOLDOWN_S":     60,
+
+    # NF Strategy — per-stock volume-surge thresholds. PLACEHOLDER values —
+    # no live volume data yet for these stocks on this feed; calibrate the
+    # same way BN's own thresholds were (see BN_QTY_THRESHOLD_* comment).
+    "NF_QTY_THRESHOLD_HDFC":       55_000.0,
+    "NF_QTY_THRESHOLD_RELIANCE":   40_000.0,
+    "NF_QTY_THRESHOLD_ICICI":      48_000.0,
+    "NF_QTY_THRESHOLD_INFY":       35_000.0,
+    "NF_QTY_THRESHOLD_BHARTIARTL": 30_000.0,
+    "NF_QTY_THRESHOLD_ITC":        30_000.0,
+    "NF_QTY_THRESHOLD_HCLTECH":    20_000.0,
+    "NF_QTY_THRESHOLD_LT":         15_000.0,
+    "NF_QTY_THRESHOLD_KOTAK":      43_000.0,
+    "NF_QTY_THRESHOLD_AXIS":       28_000.0,
+    "NF_QTY_THRESHOLD_SBI":        18_000.0,
+    "NF_QTY_THRESHOLD_HUL":        15_000.0,
+    "NF_QTY_INTERVAL_MULTIPLIER": 1.0,
+
+    # NF Strategy — composite indicator gate (same dimensionless defaults as BN)
+    "NF_INDICATOR_LOOKBACK_BARS": 200,
+    "NF_RSI_PERIOD":       14,
+    "NF_EMA_FAST":         20,
+    "NF_EMA_SLOW":         50,
+    "NF_MACD_FAST":        12,
+    "NF_MACD_SLOW":        26,
+    "NF_RSI_BULL_LEVEL":   58,
+    "NF_RSI_BEAR_LEVEL":   42,
+    "NF_RSI_OVERBOUGHT":   72,
+    "NF_RSI_OVERSOLD":     28,
+    "NF_EMA_EXTENSION_PCT": 1.2,
+    "NF_SCORE_MIN":        2.0,
+    "NF_SCORE_MARGIN":     0.9,
+
+    # NF Risk — target/stop/trailing on the underlying Nifty 50 index (points)
+    "NF_TARGET_POINTS":     16.0,
+    "NF_STOPLOSS_POINTS":   8.0,
+    "NF_BREAKEVEN_TRIGGER": 5.5,
+    "NF_TRAIL_TRIGGER":     8.0,
+    "NF_TRAIL_DISTANCE":    5.5,
+    # No NF_STARTING_FUNDS — BN and NF share one paper account balance
+    # (st.funds), seeded once from BN_STARTING_FUNDS; see scheduler._load_funds.
+
+    # NF Options Pricing — synthetic Black-Scholes premium, no real option data
+    "NF_RISK_FREE_RATE": 0.065,
+    "NF_IV_MIN":         0.20,
+    "NF_IV_MAX":         0.70,
+    "NF_IV_DEFAULT":     0.28,
+    "NF_IV_LOOKBACK_BARS": 50,
+    "NF_IV_MANUAL_ENABLED": False,
+    "NF_IV_MANUAL_VALUE":   0.30,
+
+    # NF Options Costs — same placeholder rates as BN (confirm current India
+    # options STT/exchange-txn figures before trusting absolute ₹ P&L).
+    "NF_COST_BROKERAGE_FLAT": 20.0,
+    "NF_COST_STT_SELL_PCT":   0.001,
+    "NF_COST_TXN_PCT":        0.0005,
+    "NF_COST_GST_PCT":        0.18,
+    "NF_COST_SEBI_PCT":       0.000001,
 }
 
 _runtime_overrides: Dict[str, Any] = {}

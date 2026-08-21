@@ -40,8 +40,10 @@ def status() -> Dict[str, Any]:
         "apiStatus":   st.api_status,
         "hasActiveTrade": st.active_trade is not None,
         "closedToday": len(st.closed_trades),
-        "dailyPnl":    round(st.daily_pnl, 2),
-        "funds":       round(st.funds, 2),
+        "hasActiveTradeNf": st.active_trade_nf is not None,
+        "closedTodayNf":    len(st.closed_trades_nf),
+        "dailyPnl":    round(st.daily_pnl, 2),   # shared account — BN + NF combined
+        "funds":       round(st.funds, 2),        # shared account — BN + NF combined
     }
 
 
@@ -99,7 +101,7 @@ async def get_all_positions() -> List[Dict[str, Any]]:
 @router.get("/api/prices")
 def get_prices() -> Dict[str, float]:
     st = get_state()
-    prices = {cfg.BN_INDEX_NAME: st.bn_index_ltp}
+    prices = {cfg.BN_INDEX_NAME: st.bn_index_ltp, cfg.NF_INDEX_NAME: st.nf_index_ltp}
     prices.update(st.ltp)
     return prices
 

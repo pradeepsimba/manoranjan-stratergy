@@ -7,11 +7,23 @@
 // STATE_UPDATE — this file only renders it, plus applies live TICK_UPDATE
 // price deltas onto the most-recent column for a live "flash" feel.
 
+// _lastStockOrder/_lastOpenByStock accumulate across BOTH the BankNifty and
+// Nifty 50 panels (renderStockCandles is called once per instrument) so
+// applyStockTickPrices' live-flash works for whichever table(s) a ticking
+// stock actually appears in — the 11 stocks BN and NF share render in both.
 let _lastStockOrder = [];
 let _lastOpenByStock = {};   // {name: open price of the newest/forming bar} — for live tick point-move
 
-function renderGlobalSignal(gs) {
-  const box = document.getElementById('global-signal-badge');
+const STOCK_IDS_BN = { signal: 'global-signal-badge', banner: 'breakout-banner',
+                      head: 'stock-table-head', body: 'stock-table-body',
+                      srBody: 'sr-table-body', indexKey: 'BANKNIFTY' };
+const STOCK_IDS_NF = { signal: 'global-signal-badge-nf', banner: 'breakout-banner-nf',
+                      head: 'stock-table-head-nf', body: 'stock-table-body-nf',
+                      srBody: 'sr-table-body-nf', indexKey: 'NIFTY50' };
+
+function renderGlobalSignal(gs, ids) {
+  ids = ids || STOCK_IDS_BN;
+  const box = document.getElementById(ids.signal);
   if (!box) return;
   if (!gs) { box.innerHTML = 'GLOBAL SIGNAL: —'; return; }
   const pts = gs.points !== null && gs.points !== undefined
@@ -23,8 +35,9 @@ function renderGlobalSignal(gs) {
   `;
 }
 
-function renderBreakoutBanner(b) {
-  const box = document.getElementById('breakout-banner');
+function renderBreakoutBanner(b, ids) {
+  ids = ids || STOCK_IDS_BN;
+  const box = document.getElementById(ids.banner);
   if (!box) return;
   if (!b || !b.type) { box.innerHTML = '<b>No Breakout Detected</b>'; return; }
   if (!b.valid) { box.innerHTML = '<b>No Valid Breakout</b> (insufficient contributions)'; return; }
@@ -74,14 +87,16 @@ function _colLabel(posFromNewest, n) {
   return `Prev${i}`;
 }
 
-function renderStockCandles(stockCandles) {
-  const head = document.getElementById('stock-table-head');
-  const body = document.getElementById('stock-table-body');
+function renderStockCandles(stockCandles, ids) {
+  ids = ids || STOCK_IDS_BN;
+  const head = document.getElementById(ids.head);
+  const body = document.getElementById(ids.body);
   if (!head || !body || !stockCandles) return;
 
   const names = Object.keys(stockCandles);
-  _lastStockOrder = names;
-  _lastOpenByStock = {};
+  // Merge (not replace) — this fn is called once per instrument, and a
+  // stock shared between BN and NF should stay tracked either way.
+  _lastStockOrder = Array.from(new Set(_lastStockOrder.concat(names)));
   // Shared with qtyAudit.js (window-level, no module system here) — the
   // vendor's current protocol embeds a real per-trade quantity on live
   // ticks (parsed server-side into Candle.last_qty); the Big Trades panel
@@ -99,10 +114,10 @@ function renderStockCandles(stockCandles) {
   const maxBars = Math.max(0, ...names.map(n => (stockCandles[n] || []).length));
 
   // Column header time subtext = that column's actual bar time, taken from
-  // BANKNIFTY specifically — matches c.html's renderTable, which only ever
-  // updates the header time span from the BankNifty index row (stock_symbol
-  // "26009"), on the theory that every instrument shares the same 5m bars.
-  const refBars = (stockCandles['BANKNIFTY'] || []).slice().reverse();
+  // this panel's own index row (BANKNIFTY or NIFTY50) — matches c.html's
+  // renderTable, which only ever updates the header time span from the
+  // index row, on the theory that every instrument shares the same 5m bars.
+  const refBars = (stockCandles[ids.indexKey] || []).slice().reverse();
 
   let headHtml = '<th>Stock</th>';
   for (let i = 0; i < maxBars; i++) {
@@ -128,8 +143,9 @@ function renderStockCandles(stockCandles) {
   }).join('');
 }
 
-function renderSrLevels(srLevels) {
-  const body = document.getElementById('sr-table-body');
+function renderSrLevels(srLevels, ids) {
+  ids = ids || STOCK_IDS_BN;
+  const body = document.getElementById(ids.srBody);
   if (!body) return;
   const names = Object.keys(srLevels || {});
   if (!names.length) {
@@ -156,12 +172,16 @@ function applyStockTickPrices(prices) {
     const price = prices[name];
     const open = _lastOpenByStock[name];
     if (price === undefined || !open) continue;
-    const row = document.querySelector(`#stock-table-body tr[data-stock="${CSS.escape(name)}"]`);
-    if (!row) continue;
-    const cell = row.querySelector('td[data-col="0"] .candle-cell');
-    if (!cell) continue;
+    // Not scoped to one table's id — a stock shared between the BN and NF
+    // panels has a row in both, and both should flash.
+    const rows = document.querySelectorAll(`tr[data-stock="${CSS.escape(name)}"]`);
+    if (!rows.length) continue;
     const diff = price - open;
-    cell.textContent = _floorToTwo(Math.abs(diff));
-    cell.className = 'candle-cell ' + (diff > 0 ? 'positive' : diff < 0 ? 'negative' : 'neutral');
+    rows.forEach(row => {
+      const cell = row.querySelector('td[data-col="0"] .candle-cell');
+      if (!cell) return;
+      cell.textContent = _floorToTwo(Math.abs(diff));
+      cell.className = 'candle-cell ' + (diff > 0 ? 'positive' : diff < 0 ? 'negative' : 'neutral');
+    });
   }
 }

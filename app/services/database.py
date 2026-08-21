@@ -8,7 +8,7 @@ and daily P&L summary.
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -16,7 +16,7 @@ _IST = ZoneInfo("Asia/Kolkata")
 import asyncpg
 
 import app.config as cfg
-from app.models import BNTrade, Candle
+from app.models import BNTrade, Candle, NFTrade
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS positions (
@@ -138,6 +138,34 @@ CREATE TABLE IF NOT EXISTS bn_index_bars (
     close      NUMERIC(10,2),
     volume     NUMERIC(14,2)
 );
+
+-- Nifty 50 parallel-engine additions ─────────────────────────────────────────
+
+-- `instrument` disambiguates BankNifty vs Nifty 50 rows in the shared
+-- positions/daily_stats tables — added rather than splitting into separate
+-- tables, since order_id is already globally unique (BN-/NF- prefixes) and
+-- the dashboard just needs one flat "today's trades" log with a column.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS instrument VARCHAR(20) DEFAULT 'BANKNIFTY';
+
+-- Self-recorded Nifty 50 5m history — same rationale/shape as bn_index_bars,
+-- populated from day one even though backtest-for-NF isn't wired up yet, so
+-- the archive is already accumulating by the time that follow-up happens.
+CREATE TABLE IF NOT EXISTS nf_index_bars (
+    start_time TEXT PRIMARY KEY,
+    open       NUMERIC(10,2),
+    high       NUMERIC(10,2),
+    low        NUMERIC(10,2),
+    close      NUMERIC(10,2),
+    volume     NUMERIC(14,2)
+);
+
+-- daily_stats gains its own instrument-scoped row so BN and NF get separate
+-- daily summaries instead of being blended into one. The original
+-- `stat_date UNIQUE` constraint (auto-named daily_stats_stat_date_key) is
+-- replaced by a composite (stat_date, instrument) unique index.
+ALTER TABLE daily_stats ADD COLUMN IF NOT EXISTS instrument VARCHAR(20) NOT NULL DEFAULT 'BANKNIFTY';
+ALTER TABLE daily_stats DROP CONSTRAINT IF EXISTS daily_stats_stat_date_key;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_daily_stats_date_instrument ON daily_stats(stat_date, instrument);
 """
 
 
@@ -157,7 +185,9 @@ class DatabaseService:
 
     # ── Positions (the single Bank Nifty options trade) ────────────────────────
 
-    async def save_position(self, trade: BNTrade) -> None:
+    async def save_position(self, trade: Union[BNTrade, NFTrade], instrument: str = "BANKNIFTY") -> None:
+        symbol = cfg.BN_INDEX_NAME if instrument == "BANKNIFTY" else cfg.NF_INDEX_NAME
+        token  = cfg.BN_INDEX_TOKEN if instrument == "BANKNIFTY" else cfg.NF_INDEX_TOKEN
         target_offset = abs(trade.target - trade.entry_index_price)
         iv_used = trade.entry_signal.iv_used if trade.entry_signal else None
         async with self._pool.acquire() as conn:
@@ -167,15 +197,15 @@ class DatabaseService:
                     (symbol, token, entry_price, entry_time, quantity,
                      stop_loss, target, sl_offset, target_offset, order_id,
                      status, direction, strike, option_type, expiry,
-                     entry_premium, iv_used)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                     entry_premium, iv_used, instrument)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                 """,
-                cfg.BN_INDEX_NAME, cfg.BN_INDEX_TOKEN,
+                symbol, token,
                 trade.entry_index_price, trade.entry_time, trade.lot_size,
                 trade.current_sl, trade.target, trade.stoploss_points, target_offset,
                 trade.order_id, trade.status.value, trade.direction,
                 trade.strike, trade.option_type, trade.expiry,
-                trade.entry_premium, iv_used,
+                trade.entry_premium, iv_used, instrument,
             )
 
     async def update_position_exit(self, order_id: str, exit_price: float,
@@ -246,6 +276,41 @@ class DatabaseService:
             for r in rows
         ]
 
+    # ── Self-recorded Nifty 50 index history (mirrors bn_index_bars above) ────
+
+    async def save_nf_index_bars(self, candles: List[Candle]) -> None:
+        if not candles:
+            return
+        rows = [(c.start_time, c.open, c.high, c.low, c.close, c.volume) for c in candles]
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO nf_index_bars (start_time, open, high, low, close, volume)
+                VALUES ($1,$2,$3,$4,$5,$6)
+                ON CONFLICT (start_time) DO UPDATE
+                    SET open=$2, high=$3, low=$4, close=$5, volume=$6
+                """,
+                rows,
+            )
+
+    async def get_nf_index_bars(self, from_iso: str, to_iso: str) -> List[Candle]:
+        """Our self-recorded Nifty 50 bars in [from_iso, to_iso), chronological."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM nf_index_bars WHERE start_time >= $1 AND start_time < $2 "
+                "ORDER BY start_time",
+                from_iso, to_iso,
+            )
+        return [
+            Candle(
+                start_time=r["start_time"],
+                open=float(r["open"] or 0), high=float(r["high"] or 0),
+                low=float(r["low"] or 0), close=float(r["close"] or 0),
+                volume=float(r["volume"] or 0),
+            )
+            for r in rows
+        ]
+
     # ── Daily stats ───────────────────────────────────────────────────────────
 
     async def upsert_daily_stats(
@@ -255,6 +320,7 @@ class DatabaseService:
         total_pnl: float,
         gemini_shortlist: Optional[List[str]],
         max_drawdown: float = 0.0,
+        instrument: str = "BANKNIFTY",
     ) -> None:
         # IST calendar date — the trading day, regardless of the host timezone.
         # gemini_shortlist=None → keep whatever is already stored (COALESCE): a
@@ -267,15 +333,15 @@ class DatabaseService:
                 """
                 INSERT INTO daily_stats
                     (stat_date, total_trades, winning_trades, total_pnl,
-                     gemini_shortlist, max_drawdown)
-                VALUES ($1,$2,$3,$4,$5,$6)
-                ON CONFLICT (stat_date) DO UPDATE
+                     gemini_shortlist, max_drawdown, instrument)
+                VALUES ($1,$2,$3,$4,$5,$6,$7)
+                ON CONFLICT (stat_date, instrument) DO UPDATE
                     SET total_trades=$2, winning_trades=$3, total_pnl=$4,
                         gemini_shortlist=COALESCE($5, daily_stats.gemini_shortlist),
                         max_drawdown=$6
                 """,
                 today, total_trades, winning_trades, total_pnl,
-                shortlist, max_drawdown,
+                shortlist, max_drawdown, instrument,
             )
 
     # ── App settings (runtime overrides + internal key-value state) ──────────

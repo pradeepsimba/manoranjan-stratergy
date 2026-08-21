@@ -134,11 +134,90 @@ SPEC: List[Dict[str, Any]] = [
     _s("BACKTEST_WARMUP_DAYS", "Backtest warmup days", "int", "Backtest", min_=3, max_=30),
     _s("SLIPPAGE_BPS", "Slippage (bps)", "float", "Backtest", min_=0, max_=100, step=0.5,
        help_="Applied to the option premium fill."),
+
+    # ── NF (Nifty 50) Strategy — gates ───────────────────────────────────────
+    _s("NF_SIDEWAYS_RANGE_MIN", "Min 5-bar range (pts)", "float", "NF Strategy",
+       min_=1, max_=200, step=0.5, help_="Block entries when Nifty 50's last 5 closes span less than this.", bt=False),
+    _s("NF_MOMENTUM_THRESHOLD", "Momentum threshold (pts)", "float", "NF Strategy",
+       min_=1, max_=200, step=0.5, help_="Fixed 5m move threshold; ATR can only lower it.", bt=False),
+    _s("NF_ATR_PERIOD", "ATR period (bars)", "int", "NF Strategy", min_=3, max_=50, bt=False),
+    _s("NF_SAME_DIRECTION_REQUIRED", "Leaders required to agree", "int", "NF Strategy",
+       min_=1, max_=12, help_="Of the 12 leader stocks.", bt=False),
+    _s("NF_ENTRY_COOLDOWN_S", "Post-exit cooldown (s)", "int", "NF Strategy", min_=0, max_=600, bt=False),
+
+    # ── NF Qty Surge — per-stock bar-volume-surge thresholds ─────────────────
+    _s("NF_QTY_THRESHOLD_HDFC", "HDFC BANK volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_RELIANCE", "RELIANCE INDUSTRIES volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_ICICI", "ICICI BANK volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_INFY", "INFOSYS volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_BHARTIARTL", "BHARTI AIRTEL volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_ITC", "ITC volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_HCLTECH", "HCL TECHNOLOGIES volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_LT", "LARSEN & TOUBRO volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_KOTAK", "KOTAK BANK volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_AXIS", "AXIS BANK volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_SBI", "STATE BANK OF INDIA volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_THRESHOLD_HUL", "HINDUSTAN UNILEVER volume threshold", "float", "NF Qty Surge",
+       min_=100, max_=1_000_000, step=100, bt=False),
+    _s("NF_QTY_INTERVAL_MULTIPLIER", "Volume threshold multiplier", "float", "NF Qty Surge",
+       min_=0.1, max_=20, step=0.1, bt=False),
+
+    # ── NF Strategy — composite indicator gate ───────────────────────────────
+    _s("NF_INDICATOR_LOOKBACK_BARS", "Indicator lookback bars", "int", "NF Strategy",
+       min_=60, max_=290, help_="Tail fed to RSI/MACD/EMA; must stay under the 300-bar candle buffer.", bt=False),
+    _s("NF_RSI_PERIOD", "RSI period", "int", "NF Strategy", min_=5, max_=50, bt=False),
+    _s("NF_EMA_FAST", "EMA fast period", "int", "NF Strategy", min_=2, max_=100, bt=False),
+    _s("NF_EMA_SLOW", "EMA slow period", "int", "NF Strategy", min_=3, max_=200, bt=False),
+    _s("NF_MACD_FAST", "MACD fast period (EMA, no signal line)", "int", "NF Strategy", min_=2, max_=100, bt=False),
+    _s("NF_MACD_SLOW", "MACD slow period (EMA, no signal line)", "int", "NF Strategy", min_=3, max_=200, bt=False),
+    _s("NF_RSI_BULL_LEVEL", "RSI bullish level", "int", "NF Strategy", min_=50, max_=90, bt=False),
+    _s("NF_RSI_BEAR_LEVEL", "RSI bearish level", "int", "NF Strategy", min_=10, max_=50, bt=False),
+    _s("NF_RSI_OVERBOUGHT", "RSI overbought penalty level", "int", "NF Strategy", min_=50, max_=95, bt=False),
+    _s("NF_RSI_OVERSOLD", "RSI oversold bonus level", "int", "NF Strategy", min_=5, max_=50, bt=False),
+    _s("NF_EMA_EXTENSION_PCT", "EMA extension penalty (%)", "float", "NF Strategy", min_=0.1, max_=10, step=0.1, bt=False),
+    _s("NF_SCORE_MIN", "Min bull/bear score to fire", "float", "NF Strategy", min_=0.5, max_=10, step=0.1, bt=False),
+    _s("NF_SCORE_MARGIN", "Score margin over the other side", "float", "NF Strategy", min_=0, max_=5, step=0.1, bt=False),
+
+    # ── NF Risk ────────────────────────────────────────────────────────────────
+    _s("NF_TARGET_POINTS", "Target (Nifty 50 pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
+    _s("NF_STOPLOSS_POINTS", "Initial stop (Nifty 50 pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
+    _s("NF_BREAKEVEN_TRIGGER", "Breakeven trigger (pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
+    _s("NF_TRAIL_TRIGGER", "Trailing-stop trigger (pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
+    _s("NF_TRAIL_DISTANCE", "Trailing-stop distance (pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
+
+    # ── NF Options Pricing (synthetic Black-Scholes — no real option data) ──
+    _s("NF_RISK_FREE_RATE", "Risk-free rate", "float", "NF Options Pricing", min_=0, max_=0.2, step=0.005, bt=False),
+    _s("NF_IV_MIN", "IV floor", "float", "NF Options Pricing", min_=0.05, max_=1.0, step=0.01, bt=False),
+    _s("NF_IV_MAX", "IV ceiling", "float", "NF Options Pricing", min_=0.05, max_=2.0, step=0.01, bt=False),
+    _s("NF_IV_DEFAULT", "IV default (insufficient data)", "float", "NF Options Pricing", min_=0.05, max_=2.0, step=0.01, bt=False),
+    _s("NF_IV_LOOKBACK_BARS", "IV lookback bars", "int", "NF Options Pricing", min_=5, max_=290, bt=False),
+    _s("NF_IV_MANUAL_ENABLED", "Manual IV override", "bool", "NF Options Pricing", bt=False),
+    _s("NF_IV_MANUAL_VALUE", "Manual IV value", "float", "NF Options Pricing",
+       min_=0.05, max_=2.0, step=0.01, cond="NF_IV_MANUAL_ENABLED", bt=False),
+
+    # ── NF Options Costs ──────────────────────────────────────────────────────
+    _s("NF_COST_BROKERAGE_FLAT", "Brokerage ₹/order (flat)", "float", "NF Options Costs", min_=0, max_=100, bt=False),
+    _s("NF_COST_STT_SELL_PCT", "STT sell-side (fraction)", "float", "NF Options Costs", min_=0, max_=0.01, step=0.0001, bt=False),
+    _s("NF_COST_TXN_PCT", "Exchange txn (fraction)", "float", "NF Options Costs", min_=0, max_=0.01, step=0.00001, bt=False),
+    _s("NF_COST_GST_PCT", "GST (fraction)", "float", "NF Options Costs", min_=0, max_=1, step=0.01, bt=False),
+    _s("NF_COST_SEBI_PCT", "SEBI fee (fraction)", "float", "NF Options Costs", min_=0, max_=0.001, step=0.000001, bt=False),
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
 GROUP_ORDER = ["Session Timings", "BN Strategy", "BN Qty Surge", "BN Risk", "BN Options Pricing",
-               "BN Options Costs", "Engine", "Backtest"]
+               "BN Options Costs", "Engine", "Backtest",
+               "NF Strategy", "NF Qty Surge", "NF Risk", "NF Options Pricing", "NF Options Costs"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.
@@ -266,6 +345,32 @@ def validate_bn_indicator_periods(attr_changes: Dict[str, Any]) -> None:
         raise ValueError(
             f"BN indicator lookback ({lookback}) is too small — needs "
             f"≥ {need} bars; raise BN_INDICATOR_LOOKBACK_BARS or lower the period(s)")
+
+
+# NF (Nifty 50) equivalent of BN_INDICATOR_PERIOD_KEYS / validate_bn_indicator_periods.
+NF_INDICATOR_PERIOD_KEYS = ("NF_MACD_FAST", "NF_MACD_SLOW", "NF_EMA_FAST",
+                           "NF_EMA_SLOW", "NF_RSI_PERIOD", "NF_INDICATOR_LOOKBACK_BARS")
+
+
+def validate_nf_indicator_periods(attr_changes: Dict[str, Any]) -> None:
+    """NF mirror of validate_bn_indicator_periods — same guard, NF_* keys."""
+    if not any(k in attr_changes for k in NF_INDICATOR_PERIOD_KEYS):
+        return
+
+    def eff(k: str) -> int:
+        return attr_changes.get(k, getattr(cfg, k))
+
+    fast, slow = eff("NF_MACD_FAST"), eff("NF_MACD_SLOW")
+    if fast >= slow:
+        raise ValueError(
+            f"NF MACD fast period ({fast}) must be less than the slow period ({slow})")
+
+    lookback = eff("NF_INDICATOR_LOOKBACK_BARS")
+    need = max(eff("NF_EMA_SLOW"), slow, eff("NF_RSI_PERIOD")) + 1
+    if lookback < need:
+        raise ValueError(
+            f"NF indicator lookback ({lookback}) is too small — needs "
+            f"≥ {need} bars; raise NF_INDICATOR_LOOKBACK_BARS or lower the period(s)")
 
 
 def _coerce_attr(key: str, raw: Any) -> Any:
@@ -397,6 +502,15 @@ async def load_and_apply(db) -> None:
         print(f"Settings: stored indicator periods invalid ({e}) — "
               f"dropped {dropped}, using defaults")
 
+    try:
+        validate_nf_indicator_periods(valid)
+    except ValueError as e:
+        dropped = [k for k in NF_INDICATOR_PERIOD_KEYS if k in valid]
+        for k in dropped:
+            valid.pop(k, None)
+        print(f"Settings: stored indicator periods invalid ({e}) — "
+              f"dropped {dropped}, using defaults")
+
     if valid:
         cfg.set_runtime_overrides(valid)
         print(f"Settings: applied {len(valid)} stored overrides")
@@ -411,6 +525,7 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     attr_changes = expand_changes(changes)
     validate_time_order(attr_changes)
     validate_bn_indicator_periods(attr_changes)
+    validate_nf_indicator_periods(attr_changes)
 
     defaults   = cfg.dynamic_defaults()
     store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
@@ -443,6 +558,7 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
     post_reset = {k: defaults[k] for k in attr_keys}
     validate_time_order(post_reset)
     validate_bn_indicator_periods(post_reset)
+    validate_nf_indicator_periods(post_reset)
 
     await db.delete_app_settings(attr_keys)
     cfg.clear_runtime_overrides(attr_keys)

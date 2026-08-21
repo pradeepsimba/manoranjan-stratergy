@@ -93,6 +93,95 @@ class BNTrade:
     entry_signal:      Optional[BNSignal] = None
 
 
+# ── Nifty 50 options strategy — parallel to the BN dataclasses above, same
+# field shapes (kept as distinct classes, not a shared base, matching this
+# repo's convention of explicit duplication over inheritance). ──────────────
+
+@dataclass(slots=True)
+class NFSignal:
+    direction:         str
+    entry_index_price: float
+    bar_time:          str
+    confidence:        float
+    green:             int
+    red:               int
+    strong_qty:        int
+    leader_signal:     str
+    bn_bull:           float
+    bn_bear:           float
+    strike:            int
+    expiry:            str
+    entry_premium:     float
+    iv_used:           float
+
+
+@dataclass(slots=True)   # the single active Nifty 50 trade — at most one at a time
+class NFTrade:
+    direction:    str
+    entry_index_price: float
+    entry_time:   str
+    target:       float
+    current_sl:   float
+    strike:       int
+    option_type:  str
+    expiry:       str
+    entry_premium: float
+    stoploss_points:   float = 0.0
+    breakeven_trigger: float = 0.0
+    trail_trigger:     float = 0.0
+    trail_distance:    float = 0.0
+    lot_size:     int             = 65
+    order_id:     str             = ""
+    sl_stage:     str             = "Initial"
+    current_premium: float        = 0.0
+    current_iv:      float        = 0.0
+    status:       PositionStatus  = PositionStatus.OPEN
+    exit_index_price: Optional[float] = None
+    exit_time:        Optional[str]   = None
+    exit_premium:     Optional[float] = None
+    pnl:              float           = 0.0
+    index_pnl_points:  float           = 0.0
+    confidence:        float           = 0.0
+    entry_signal:      Optional[NFSignal] = None
+
+
+@dataclass(slots=True)
+class NFDiagnostic:
+    time:            str
+    bn_ltp:          float
+    green:           int
+    red:             int
+    strong_qty:      int
+    leader_rows:     List[dict] = field(default_factory=list)
+    leader_signal:   str        = "Nobuysell"
+    sideways_range:  Optional[float] = None
+    momentum_ok:     bool             = False
+    momentum_reason: str              = ""
+    rsi:             Optional[float]  = None
+    macd_dir:        Optional[str]    = None
+    macd_val:        Optional[float]  = None
+    ema_bullish:     Optional[bool]   = None
+    ema_bearish:     Optional[bool]   = None
+    bn_bull:         float            = 0.0
+    bn_bear:         float            = 0.0
+    bn_bullish:      bool             = False
+    bn_bearish:      bool             = False
+    no_trade_reason: Optional[str]    = None
+    candle_close_ok: bool             = True
+    cooldown_ms:     float            = 0.0
+    market_open:     bool             = True
+    atm_strike:      Optional[int]    = None
+    atm_premium:     Optional[float]  = None
+    atm_iv:          Optional[float]  = None
+    cooldown_ok:      bool = True
+    sideways_ok:      bool = False
+    dir_count_ok:     bool = False
+    qty_surge_ok:     bool = False
+    same_direction_required: int = 0
+    gates_clear:      bool = False
+    entry_ready:      bool = False
+
+
 @dataclass(slots=True)   # rebuilt every ~100ms tick for the dashboard's "why didn't it fire" panel
 class BNDiagnostic:
     time:            str

@@ -22,7 +22,6 @@ oldest-to-newest (see CLAUDE.md), so every "arr[0]" in the source becomes
 
 from typing import Dict, List, Optional
 
-import app.config as cfg
 from app.models import Candle
 
 
@@ -142,14 +141,15 @@ def detect_support_resistance(candles: List[Candle]) -> Dict[str, List[float]]:
 # ── Contribution analysis + the combined breakout-prediction banner ─────────
 
 def analyze_contributions(breakout_direction: str, breakout_candle: Candle,
-                          leader_candles: Dict[str, List[Candle]]) -> Dict:
+                          leader_candles: Dict[str, List[Candle]],
+                          weights: Dict[str, float]) -> Dict:
     """
     Port of c.html's analyzeContributions — top-5-by-weight stocks (from
-    cfg.BN_INDEX_WEIGHTS, keyed by token) checked for a same-direction,
-    >0.1% move on the SAME bar as the breakout candle. `leader_candles` is
-    keyed by token, matching cfg.BN_INDEX_WEIGHTS' keys.
+    `weights`, keyed by token — cfg.BN_INDEX_WEIGHTS or cfg.NF_INDEX_WEIGHTS)
+    checked for a same-direction, >0.1% move on the SAME bar as the breakout
+    candle. `leader_candles` is keyed by token, matching `weights`' keys.
     """
-    top5 = sorted(cfg.BN_INDEX_WEIGHTS.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    top5 = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:5]
     contributors: List[Dict] = []
     contributing_count = 0
     for token, weight in top5:
@@ -173,11 +173,14 @@ def analyze_contributions(breakout_direction: str, breakout_candle: Candle,
     return {"contributors": contributors, "valid": contributing_count >= 3}
 
 
-def compute_breakout_prediction(bn_candles: List[Candle], leader_candles: Dict[str, List[Candle]]) -> Dict:
+def compute_breakout_prediction(bn_candles: List[Candle], leader_candles: Dict[str, List[Candle]],
+                                weights: Dict[str, float]) -> Dict:
     """
     Port of c.html's detectBreakouts — tries swing, then S/R, then pivot
-    breakouts (first hit wins) on the BankNifty index candles, and — if one
-    fires — validates it against the top-5-weighted-stock contribution check.
+    breakouts (first hit wins) on the index candles, and — if one fires —
+    validates it against the top-5-weighted-stock contribution check.
+    `weights` is cfg.BN_INDEX_WEIGHTS or cfg.NF_INDEX_WEIGHTS depending on
+    which instrument's candles are passed in.
     """
     if len(bn_candles) < 3:
         return {"type": None, "direction": None, "level": None, "contributors": [], "valid": False}
@@ -195,7 +198,7 @@ def compute_breakout_prediction(bn_candles: List[Candle], leader_candles: Dict[s
     if not breakout["type"]:
         return {"type": None, "direction": None, "level": None, "contributors": [], "valid": False}
 
-    contributions = analyze_contributions(breakout["direction"], latest, leader_candles)
+    contributions = analyze_contributions(breakout["direction"], latest, leader_candles, weights)
     return {
         "type":         breakout["type"],
         "direction":    breakout["direction"],
@@ -229,12 +232,13 @@ def compute_column_counts(all_candles: Dict[str, List[Candle]], num_candles: int
 
 
 def compute_global_signal(counts: List[Dict[str, int]], latest_by_token: Dict[str, Candle],
-                          bn_token: str) -> Dict:
+                          bn_token: str, weights: Dict[str, float]) -> Dict:
     """
     Port of c.html's updateGlobalSignal. `counts` from compute_column_counts;
     `latest_by_token` is each stock's single most-recent candle (index/leader
     stocks alike, keyed by token) — c.html's asymmetric allGreen(>=4)/
     allRed(>=5) thresholds are intentional quirks of the source, kept as-is.
+    `weights` is cfg.BN_INDEX_WEIGHTS or cfg.NF_INDEX_WEIGHTS.
     """
     num_candles = len(counts)
     all_green = num_candles > 0 and all(c["g"] >= 4 for c in counts)
@@ -248,7 +252,7 @@ def compute_global_signal(counts: List[Dict[str, int]], latest_by_token: Dict[st
 
     weighted_pct = 0.0
     total_weight = 0.0
-    for token, weight_pct in cfg.BN_INDEX_WEIGHTS.items():
+    for token, weight_pct in weights.items():
         w = weight_pct / 100.0
         candle = latest_by_token.get(token)
         pct = ((candle.close - candle.open) / candle.open) * 100.0 if candle and candle.open and candle.close else 0.0

@@ -220,6 +220,7 @@ body {
 .badge.red    { background: var(--neg-bg);  color: var(--neg);  border-color: var(--neg-edge);  }
 .badge.yellow { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-edge); }
 .badge.gray   { background: var(--surf-raised); color: var(--txt-2); border-color: var(--edge); }
+.badge.blue   { background: var(--prime-container); color: var(--prime); border-color: var(--prime); }
 
 /* ── Stat strip ────────────────────────────────────────────────────────────── */
 .stat-strip {
@@ -345,6 +346,12 @@ body {
   overflow-y: auto;
   max-height: 290px;
 }
+
+/* "Show all rows" toggle (Stock Candles panels) — drops the vertical clamp
+   so a 32+1-row table (Nifty 50) isn't stuck scrolling inside a 290px box
+   sized for BankNifty's 12 rows. overflow-y stays auto (harmless) so a
+   still-longer table isn't forced fully open either. */
+.tbl-wrap.expanded { max-height: none; }
 
 .bt-tbl { max-height: 200px; }
 
@@ -746,6 +753,30 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 }
 .nav-seg a:hover { color: var(--txt); }
 .nav-seg a.active {
+  background: var(--prime-container);
+  color: var(--prime);
+  box-shadow: inset 0 0 0 1px rgba(85,193,255,.25);
+}
+
+/* Same segmented look, but for <button>s (e.g. the instrument-view toggle) */
+.nav-seg button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 13px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--txt-2);
+  white-space: nowrap;
+  transition: background .15s, color .15s;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+.nav-seg button:hover { color: var(--txt); }
+.nav-seg button.active {
   background: var(--prime-container);
   color: var(--prime);
   box-shadow: inset 0 0 0 1px rgba(85,193,255,.25);
