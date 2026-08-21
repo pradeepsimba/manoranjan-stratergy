@@ -32,6 +32,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Assertion labels contain ₹, ≈, ×. A Windows console defaults to cp1252 and
+# raises UnicodeEncodeError printing those, failing the run on output encoding
+# rather than on logic (the assertions themselves all pass).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
+
 # ── numpy shim (only when numpy is unavailable) ───────────────────────────────
 try:
     import numpy  # noqa: F401
@@ -614,7 +622,55 @@ def s16():
           f"qty {tr[0].qty} vs {exp_qty}, stop dist {tr[0].entry_price - tr[0].stop_loss}")
 
 
+def s17():
+    """
+    The loss stop must be REPORTED, not just enforced.
+
+    A positional (delivery / 1d) run applies the loss limit at RUN level and
+    never resets it, so breaching it silently ends every remaining entry in the
+    range — the most common reason a long backtest shows only a handful of
+    trades. simulate() reports it through its `stats` out-param.
+
+    Scenario: three identical symbols rise on day 1 (one enters, the others are
+    blocked by the 1-position cap) and gap far below the stop on day 2. Day 2
+    resolves the exit BEFORE entries are considered, so the realized loss trips
+    the ₹1 limit and nothing else can enter for the rest of the run.
+    """
+    print("")
+    print("=== s17: loss-limit reporting ===")
+    days  = [DAY1, DAY2]
+    nifty = nifty_series(days)
+    syms  = {str(i): series(str(i), f"S{i}",
+                            rising_day(DAY1, 100.0) + rising_day(DAY2, 60.0))
+             for i in (1, 2, 3)}
+    ovr = {**BASE, "DELIVERY_MAX_CONCURRENT_POSITIONS": 1,
+           "DELIVERY_DAILY_LOSS_LIMIT": 1.0}
+
+    stats = {}
+    trades, _, _ = simulate(syms, nifty, D1, D2, 0.0, 40_000.0, ovr,
+                            "5m", "delivery", stats)
+    check("the scenario really does lose", trades and trades[0].net_pnl < 0,
+          [t.net_pnl for t in trades])
+    check("positional run REPORTS the loss stop",
+          stats.get("loss_limit_hit") is True, stats)
+    check("...and it truncates the run", len(trades) < 3, f"{len(trades)} trades")
+
+    # A limit that is never breached must NOT be flagged.
+    stats2 = {}
+    simulate(syms, nifty, D1, D2, 0.0, 40_000.0,
+             {**ovr, "DELIVERY_DAILY_LOSS_LIMIT": 10_000_000.0},
+             "5m", "delivery", stats2)
+    check("an unbreached limit is not reported",
+          stats2.get("loss_limit_hit") is False, stats2)
+
+    # The 3-tuple contract is unchanged when stats is omitted — every existing
+    # caller (and every other scenario in this file) depends on it.
+    out = simulate(syms, nifty, D1, D2, 0.0, 40_000.0, ovr, "5m", "delivery")
+    check("simulate() still returns exactly 3 values without stats",
+          isinstance(out, tuple) and len(out) == 3, len(out))
+
+
 if __name__ == "__main__":
-    for fn in (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16):
+    for fn in (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17):
         fn()
     print(f"\nALL GREEN — {PASS} assertions passed")

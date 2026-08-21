@@ -30,6 +30,17 @@
     .chip-x:hover { opacity: 1; color: var(--neg); }
     .chip-ai::before { content: '✦ '; opacity: .8; }
     .wl-hint { font-size: 10px; color: var(--txt-3); margin-top: 6px; }
+    /* Stocks the AI risk screen removed (exclude_risky mode) — shown
+       separately from the tradeable chips so the screen's verdict is
+       visible, not just its survivors. */
+    .wl-excluded-head {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--neg); margin: 10px 0 6px;
+    }
+    .stock-chip.chip-risky {
+      background: var(--neg-bg); border-color: var(--neg-edge); color: var(--neg);
+      text-decoration: line-through; opacity: .85;
+    }
 
   </style>
 </head>
@@ -62,6 +73,7 @@
 
   <nav class="nav-seg" aria-label="Pages">
     <a href="/" class="active">Dashboard</a>
+    <a href="/scalping">Scalping</a>
     <a href="/backtest">Backtest</a>
     <a href="/indicators">Indicators</a>
     <a href="/settings">Settings</a>
@@ -165,10 +177,26 @@
         <div class="chip-cloud" id="gemini-list">
           <span class="muted-text">Building at 09:00 IST…</span>
         </div>
-        <div class="wl-hint">✦ = picked by the AI screen · × removes a stock (blocked while it has an open position)</div>
+        <div class="wl-hint">✦ = cleared by the AI screen · × removes a stock (blocked while it has an open position)</div>
+        <div id="gemini-excluded"></div>
       </div>
     </div>
 
+    <!-- Order-book scalper: the second strategy. Shows the session window in
+         force, its own P&L/book, and — most usefully — the aggregated reasons
+         signals are being rejected. -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Order-Book Scalper</span>
+        <span id="scalp-badge" class="badge gray">OFF</span>
+      </div>
+      <div class="panel-body">
+        <div class="scalp-grid" id="scalp-stats"></div>
+        <div id="scalp-open"></div>
+        <div id="scalp-rejects"></div>
+        <div id="scalp-log"></div>
+      </div>
+    </div>
 
   </div>
 

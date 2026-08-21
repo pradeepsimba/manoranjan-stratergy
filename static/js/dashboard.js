@@ -105,8 +105,118 @@ function render(d) {
   document.getElementById('stat-watch').textContent = (d.watchlist || []).length;
 
   renderPositions(positions, openCount);
-  renderWatchlist(d.watchlist || [], d.geminiList || []);
+  renderWatchlist(d.watchlist || [], d.geminiList || [],
+                  d.geminiExcluded || [], d.geminiMode);
   renderScans(d.scanResults || []);
+  renderScalp(d.scalp);
+}
+
+// What the AI screen REMOVED (exclude_risky mode only). The tradeable chips
+// above show what survived; without this the screen's actual verdict — which
+// stocks it judged risky, and whether it found any at all — is invisible.
+function renderExcluded(excluded, mode) {
+  const el = document.getElementById('gemini-excluded');
+  if (!el) return;
+  let html = '';
+  if (mode === 'exclude_risky') {
+    html = !excluded.length
+      ? '<div class="wl-hint">AI risk screen: no stocks excluded today.</div>'
+      : '<div class="wl-excluded-head">Excluded by AI risk screen · ' +
+        excluded.length + '</div><div class="chip-cloud">' +
+        excluded.map(sym => `<span class="stock-chip chip-risky">${escHtml(sym)}</span>`)
+          .join('') + '</div>';
+  }
+  if (el._h !== html) { el._h = html; el.innerHTML = html; }
+}
+
+// ── Order-book scalper panel ───────────────────────────────────────────────────
+// Rebuilt via innerHTML but ONLY when its content signature changes, so a 1 Hz
+// payload whose scalper state is unchanged repaints nothing (the same
+// no-flash goal as the _rowEls diffing used by the high-frequency tables).
+function _setBlock(el, sig, html) {
+  if (!el || el._sig === sig) return;
+  el._sig = sig;
+  el.innerHTML = html;
+}
+
+const _SCALP_WINDOW_CLS = {
+  closed: 'gray', warmup: 'yellow', morning: 'green',
+  midday: 'yellow', afternoon: 'green', squareoff: 'red',
+};
+
+function renderScalp(s) {
+  const badge = document.getElementById('scalp-badge');
+  if (!badge) return;
+  if (!s || !s.enabled) {
+    badge.textContent = 'OFF';
+    badge.className   = 'badge gray';
+    _setBlock(document.getElementById('scalp-stats'), 'off',
+      '<div class="muted-text">Disabled — enable it under ' +
+      '<a href="/settings#scalper">Settings → Scalper</a>.</div>');
+    _setBlock(document.getElementById('scalp-open'),    'off', '');
+    _setBlock(document.getElementById('scalp-rejects'), 'off', '');
+    _setBlock(document.getElementById('scalp-log'),     'off', '');
+    return;
+  }
+
+  // DRY RUN is called out loudly: it is the difference between "watching" and
+  // "trading", and mistaking one for the other is the costly error here.
+  badge.textContent = s.dryRun ? 'DRY RUN · ' + (s.window || '—')
+                               : (s.window || '—').toUpperCase();
+  badge.className   = 'badge ' + (s.dryRun ? 'yellow'
+                                : (_SCALP_WINDOW_CLS[s.window] || 'gray'));
+
+  const pnl = s.scalpPnl || 0;
+  const cells = [
+    ['Window',    escHtml(s.window || '—'), ''],
+    ['Needs W-OBI', s.requiredRatio != null ? '≥ ' + s.requiredRatio : '—', ''],
+    ['Executing', s.execute ? 'yes' : 'no', s.execute ? 'pnl-pos' : ''],
+    ['Scalp P&L', (pnl >= 0 ? '+' : '') + '₹' + fmt2(pnl),
+                  pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : ''],
+    ['Open',      (s.openScalps || []).length, ''],
+    ['Trades',    s.tradesToday || 0, ''],
+    ['Signals',   (s.signals || 0) + ' / ' + (s.evaluated || 0), ''],
+    ['Fills',     s.fills || 0, ''],
+    ['Books',     s.booksTracked || 0, ''],
+  ];
+  _setBlock(document.getElementById('scalp-stats'), JSON.stringify(cells),
+    cells.map(c => `<div class="scalp-cell"><span class="k">${c[0]}</span>` +
+                   `<span class="v ${c[2]}">${c[1]}</span></div>`).join(''));
+
+  const open = s.openScalps || [];
+  _setBlock(document.getElementById('scalp-open'), JSON.stringify(open),
+    !open.length ? '' :
+    '<div class="scalp-sub">Open scalps</div>' + open.map(p => {
+      const live = ((p.ltp - p.entry) * p.qty);
+      return `<div class="scalp-row"><span class="r-sym">${escHtml(p.symbol)}</span>` +
+             `<span class="r-detail">${p.qty} @ ${fmt2(p.entry)} · SL ${fmt2(p.sl)}` +
+             ` · T ${fmt2(p.target)}${p.heldS != null ? ' · ' + p.heldS + 's' : ''}</span>` +
+             `<span class="${live >= 0 ? 'pnl-pos' : 'pnl-neg'}">` +
+             `${live >= 0 ? '+' : ''}₹${fmt2(live)}</span></div>`;
+    }).join(''));
+
+  // The single most useful diagnostic: WHY nothing is firing.
+  const rej = s.rejects || [];
+  _setBlock(document.getElementById('scalp-rejects'), JSON.stringify(rej),
+    !rej.length ? '' :
+    '<div class="scalp-sub">Rejected because</div>' + rej.map(r =>
+      `<div class="scalp-row"><span class="r-detail" style="text-align:left">` +
+      `${escHtml(r.reason)}</span><span class="r-count">${r.symbols}</span></div>`
+    ).join(''));
+
+  const log = (s.log || []).slice(-8).reverse();
+  _setBlock(document.getElementById('scalp-log'), JSON.stringify(log),
+    !log.length ? '' :
+    '<div class="scalp-sub">Recent signals</div>' + log.map(e => {
+      const m = e.metrics || {};
+      const detail = e.mode === 'exit'
+        ? escHtml(e.note || '') + (e.pnl != null ? ' · ₹' + fmt2(e.pnl) : '')
+        : `obi ${m.obiRatio != null ? m.obiRatio : '—'} · tape ${m.tapeBuyQty != null ? m.tapeBuyQty : '—'}` +
+          (e.qty ? ` · ${e.qty} @ ${fmt2(e.entry)}` : '');
+      return `<div class="scalp-row"><span class="r-sym scalp-mode-${escHtml(e.mode)}">` +
+             `${escHtml(e.symbol)}</span><span class="r-detail">${detail}</span>` +
+             `<span class="r-count">${escHtml(e.time || '')}</span></div>`;
+    }).join(''));
 }
 
 // (escHtml lives in the shared /js/util.js)
@@ -185,8 +295,9 @@ function renderPositions(positions, openCount) {
   }
 }
 
-function renderWatchlist(list, aiList) {
+function renderWatchlist(list, aiList, excluded, mode) {
   document.getElementById('gemini-count').textContent = list.length;
+  renderExcluded(excluded || [], mode);
   const el = document.getElementById('gemini-list');
   const ai = new Set(aiList);
   const html = !list.length
@@ -216,9 +327,14 @@ function loadUniverse() {
     .then(r => r.json())
     .then(rows => {
       if (!Array.isArray(rows)) return;
+      // Label AI-flagged symbols in the picker. Adding one is allowed (an
+      // explicit override that also clears the exclusion server-side), but it
+      // should never happen unknowingly.
       document.getElementById('wl-options').innerHTML = rows
         .filter(r => !r.active)
-        .map(r => `<option value="${escHtml(r.symbol)}"></option>`)
+        .map(r => `<option value="${escHtml(r.symbol)}"` +
+                  (r.risky ? ' label="⚠ flagged risky by the AI screen"' : '') +
+                  `></option>`)
         .join('');
     })
     .catch(() => { _universeLoaded = 0; });

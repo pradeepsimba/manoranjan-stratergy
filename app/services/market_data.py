@@ -26,6 +26,7 @@ bar anyway.
 import asyncio
 import json
 import re
+import time
 from collections import deque as _deque
 from typing import Callable, Dict, List, Optional
 
@@ -33,7 +34,8 @@ import websockets
 import websockets.exceptions
 
 import app.config as cfg
-from app.models import Candle, TradingPhase
+from app.engine.orderbook import append_tape, parse_snap
+from app.models import Candle, TapeEvent, TradingPhase
 from app.services.historical_data import fetch_today_candles
 from app.state import get_state, nifty_token
 
@@ -99,6 +101,10 @@ class MarketDataService:
         # expensive part of _process_tick, and the book often doesn't move
         # between pushes — identical snap ⇒ identical parse ⇒ skip it.
         self._last_snap: Dict[str, str] = {}
+        # symbol → last (LTQ, price) pair appended to the scalper's tape. LTQ is a
+        # LEVEL, not a delta, so this is what stops a quiet tick from re-counting
+        # the previous print (see the tape block in _process_tick).
+        self._last_ltq: Dict[str, tuple] = {}
 
     def start(self) -> None:
         self._running = True
@@ -151,6 +157,11 @@ class MarketDataService:
         # or a byte-identical first snap tomorrow would skip the parse and
         # leave that symbol's depth missing until its book changes.
         self._last_snap.clear()
+        self._last_ltq.clear()
+        # Same reasoning for the tape's volume baseline: bars keep completing
+        # during an outage, so the first tick after a reconnect must re-baseline
+        # rather than book the whole outage's volume as one giant print.
+        self.state.last_bar_volume.clear()
         # Cancellation skips _run_ws's post-loop status update — set it here so
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
@@ -404,6 +415,15 @@ class MarketDataService:
             except (ValueError, AttributeError):
                 pass
 
+        # Scalper eligibility, resolved once: the 5-level book parse and the tape
+        # are only maintained for TRADEABLE symbols and only while the scalper is
+        # switched on. At a ~10,000-symbol universe, running them for every
+        # display-only stock would add real per-tick cost for data nothing reads.
+        st = self.state
+        scalp_on = (interval == "5m" and not is_nifty and bool(stockname)
+                    and cfg.SCALP_ENABLED and stockname in st.active_watchlist)
+        dvol = 0.0
+
         # Per-token lock for regular stocks; separate nifty lock for the shared
         # NIFTY candle lists so scan workers never contend across unrelated tokens.
         # ltp is written INSIDE the same lock as the candle mutation, right below -
@@ -423,6 +443,39 @@ class MarketDataService:
         else:
             with self.state.candle_lock(symbol):
                 if interval == "5m":
+                    # Traded quantity since the previous tick = the forming bar's
+                    # volume delta. Computed BEFORE the upsert (which overwrites
+                    # the bar) and under the same lock, so it can't race a
+                    # concurrent reader. This is the tape's primary volume source
+                    # because it is always present, whatever the snap format —
+                    # and it aggregates EVERY print since the last tick, where a
+                    # single LTQ field would only describe the last one.
+                    if scalp_on:
+                        prev = st.last_bar_volume.get(stockname)
+                        if prev is None:
+                            # First sighting: record the baseline only. Emitting
+                            # the forming bar's whole accumulated volume as one
+                            # print would fake a huge burst of tape activity on
+                            # startup / reconnect.
+                            dvol = 0.0
+                            st.last_bar_volume[stockname] = (candle.start_time,
+                                                             candle.volume)
+                        elif prev[0] == candle.start_time:
+                            dvol = max(0.0, candle.volume - prev[1])
+                            st.last_bar_volume[stockname] = (candle.start_time,
+                                                             candle.volume)
+                        elif candle.start_time > prev[0]:
+                            dvol = candle.volume      # bar rolled: all of it is new
+                            st.last_bar_volume[stockname] = (candle.start_time,
+                                                             candle.volume)
+                        else:
+                            # STALE out-of-order bar (reconnect replay). _upsert
+                            # drops it from the candle series and the tape must
+                            # drop it too: treating it as a rolled bar would emit
+                            # its whole volume as a phantom print AND rebase the
+                            # baseline backwards, so the next legitimate tick
+                            # would dump its full bar volume as a second one.
+                            dvol = 0.0
                     self._upsert(self.state.candles_5m, symbol, candle)
                     # Bumped under the SAME lock, right after the mutation, so
                     # any reader observing the new version is guaranteed to
@@ -445,8 +498,10 @@ class MarketDataService:
         # real order book — its snap shows -0.01 sentinels which _parse_depth
         # discards via the bid_p > 0 guard).
         snap = n.get("snap", "")
-        if (snap and stockname and not is_nifty and interval == "5m"
-                and self._last_snap.get(stockname) != snap):
+        snap_changed = bool(
+            snap and stockname and not is_nifty and interval == "5m"
+            and self._last_snap.get(stockname) != snap)
+        if snap_changed:
             self._last_snap[stockname] = snap
             depth = _parse_depth(snap)
             if depth:
@@ -458,12 +513,69 @@ class MarketDataService:
                 prev = self.state.depth.get(stockname)
                 self.state.depth[stockname] = {**prev, **depth} if prev else depth
 
+        # ── Scalper: 5-level book + tape (tradeable symbols only) ─────────────
+        # Independent of the legacy depth parse above — that one stays byte-for-
+        # byte as it was so `depth_bullish` and the indicators page cannot
+        # regress; this one adds the per-level quantities/order counts the W-OBI
+        # and anti-spoofing filters need.
+        if scalp_on:
+            now_m = time.monotonic()
+            book  = st.book.get(stockname)
+            if snap:
+                if snap_changed or book is None:
+                    book = parse_snap(snap, ts=now_m)
+                    st.book[stockname] = book
+                else:
+                    # Byte-identical snap = the exchange re-published the SAME
+                    # book, so it is confirmed live as of now. Refreshing the
+                    # timestamp (a lone atomic float write) keeps the staleness
+                    # guard from rejecting a quiet-but-current book; rebuilding
+                    # the object would be pure waste.
+                    book.ts = now_m
+
+            # One tape print per tick, carrying the book that was live when it
+            # traded — that pairing is what lets tape_stats tell an ask-hitting
+            # buy from a bid-hitting sell.
+            #
+            # The volume delta is authoritative. LTQ is only a FALLBACK for a feed
+            # that publishes no bar volume, and it must be de-duplicated: LTQ is a
+            # level (the last print's size), not a delta, so re-reading it on every
+            # quiet tick would append the SAME trade again and again — at ~10
+            # ticks/s a single 500-share print would fabricate thousands of shares
+            # of "aggressive buying" per second and fire entries on nothing. Only
+            # an LTQ/price pair that CHANGED counts as a new print; two identical
+            # consecutive prints are undercounted, which is the safe direction.
+            qty = dvol
+            if qty <= 0 and book is not None and book.ltq:
+                ltq_key = (book.ltq, book.ltp or ltp)
+                if self._last_ltq.get(stockname) != ltq_key:
+                    self._last_ltq[stockname] = ltq_key
+                    qty = float(book.ltq)
+            price = ltp if ltp > 0 else (book.ltp if book else 0.0)
+            if qty > 0 and price > 0:
+                st.tape[stockname] = append_tape(
+                    st.tape.get(stockname),
+                    TapeEvent(
+                        ts    = now_m,
+                        price = price,
+                        qty   = qty,
+                        bid   = book.best_bid() if book else 0.0,
+                        ask   = book.best_ask() if book else 0.0,
+                    ),
+                    int(cfg.SCALP_TAPE_MAXLEN),
+                )
+
         # Tick-wise engine: flag this stock for re-evaluation on the next loop
         # cycle. Only 5m ticks update the forming bar; 1h ticks must not enqueue
         # dirty_ticks or they trigger scans on stale 5m bars. Only while ACTIVE.
         if interval == "5m" and not is_nifty and self.state.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
             self.state.dirty_ticks.add(symbol)
             self.state.dirty_ticks_push.add(symbol)
+            if scalp_on:
+                self.state.dirty_ticks_scalp.add(symbol)
+            # See state.last_tick_wallclock's docstring - this is what the tick loop's stale-feed
+            # alarm reads.
+            self.state.last_tick_wallclock = time.monotonic()
 
     # ── Candle upsert helpers ─────────────────────────────────────────────────
 

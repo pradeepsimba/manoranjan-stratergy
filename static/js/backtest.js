@@ -182,11 +182,32 @@ function renderBacktestMeta(run) {
   if (p.capital != null)      tags.push(`<span class="tag">Capital <b>₹${fmt2(p.capital)}</b></span>`);
   if (p.risk)                 tags.push(`<span class="tag">Risk <b>${escHtml(p.risk)}</b></span>`);
   if (p.slippage_bps != null) tags.push(`<span class="tag">Slippage <b>${p.slippage_bps} bps</b></span>`);
-  // Data source held less history than requested — show where the replay
-  // really began so a short days_traded doesn't look like a bug.
+  // The replay's REAL span. The data server often holds less history than the
+  // requested range, and the engine silently replays only the days it has — so
+  // show both ends plus the day count. Showing only the start (as this did)
+  // still left "why are trades missing from June?" unanswered when the data
+  // ended in May.
   const sm = run.summary || {};
-  if (sm.data_from && run.from_date && sm.data_from > run.from_date) {
-    tags.push(`<span class="tag ovr">data starts <b>${escHtml(sm.data_from)}</b></span>`);
+  const truncStart = sm.data_from && run.from_date && sm.data_from > run.from_date;
+  const truncEnd   = sm.data_to   && run.to_date   && sm.data_to   < run.to_date;
+  if (truncStart || truncEnd) {
+    const span = `${escHtml(sm.data_from || '?')} → ${escHtml(sm.data_to || '?')}`;
+    const nd   = sm.days_traded != null ? ` (${sm.days_traded} days)` : '';
+    tags.push(`<span class="tag ovr" title="The requested range was ` +
+      `${escHtml(run.from_date)} → ${escHtml(run.to_date)}, but the data server ` +
+      `only holds bars for this span, so only these days were replayed.">` +
+      `data ${span}${nd}</span>`);
+  }
+  // A run stopped by the loss limit looks exactly like one that found no more
+  // setups — say which it was. In positional (delivery / 1d) mode the limit is
+  // RUN-level and never resets, so breaching it ends entries for the whole
+  // remaining range; intraday resets it each day.
+  if (sm.loss_limit_hit) {
+    const scope = sm.loss_limit_scope === 'run' ? 'run-level' : 'per-day';
+    tags.push(`<span class="tag warn" title="Entries were blocked once ` +
+      `cumulative P&L reached −₹${fmt2(sm.loss_limit || 0)} (${scope} loss stop). ` +
+      `In positional mode this halts every remaining entry in the range.">` +
+      `⚠ loss limit hit <b>${scope}</b></span>`);
   }
 
   const ovr = p.overrides || {};

@@ -218,11 +218,13 @@ function rowHtml(s, nested) {
     </div>${s.type === 'rules' ? `<div class="rb-wrap" data-rules="${escHtml(s.key)}"></div>` : ''}`;
 }
 
-// ── General / Intraday / Delivery page tabs ───────────────────────────────────
-// Three pages: General = system-level (AI screen, timings, engine, backtest
+// ── General / Intraday / Scalper / Delivery page tabs ─────────────────────────
+// Four pages: General = system-level (AI screen, timings, engine, backtest
 // plumbing & costs); Intraday = the live/intraday strategy + risk knobs;
-// Delivery = the positional profile that shadows them in delivery replays.
-// Deep-linkable: /settings#intraday, /settings#delivery.
+// Scalper = the order-book/tape strategy (session windows, book & tape filters,
+// its own sizing/risk); Delivery = the positional profile that shadows the
+// intraday one in delivery replays.
+// Deep-linkable: /settings#intraday, /settings#scalper, /settings#delivery.
 const _TAB_OF_GROUP = {
   'AI Pre-market Screen': 'general',
   'Session Timings':      'general',
@@ -232,9 +234,12 @@ const _TAB_OF_GROUP = {
   'Strategy':             'intraday',
   'Entry Conditions':     'intraday',
   'Trend Gates':          'intraday',
+  'Scalper':              'scalper',
+  'Scalper Filters':      'scalper',
+  'Scalper Risk':         'scalper',
   'Delivery Mode':        'delivery',
 };
-const _TABS = ['general', 'intraday', 'delivery'];
+const _TABS = ['general', 'intraday', 'scalper', 'delivery'];
 
 function _tabFromHash() {
   const h = location.hash.replace('#', '');
@@ -273,8 +278,10 @@ _TABS.forEach(t => {
 
 function _updateTabBadges(groups) {
   // Unsaved-edit counts per tab so a change parked on ANOTHER page is
-  // never invisible while the save bar shows a nonzero total.
-  const counts = { general: 0, intraday: 0, delivery: 0 };
+  // never invisible while the save bar shows a nonzero total. Derived from
+  // _TABS so adding a page can't leave its badge silently stuck at undefined.
+  const counts = {};
+  _TABS.forEach(t => { counts[t] = 0; });
   groups.forEach(g => g.settings.forEach(s => {
     if (s.key in edits) counts[tabOf(g.name)]++;
   }));

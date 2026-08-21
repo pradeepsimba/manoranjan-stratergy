@@ -42,6 +42,10 @@
     .bt-meta .tag.tf { background: var(--prime-container); border-color: var(--prime-dim); color: var(--prime); }
     .bt-meta .tag.tf b { color: var(--prime); }
     .bt-meta .tag.ovr { background: var(--accent-2-bg); border-color: var(--accent-2); color: var(--accent-2); }
+    /* A run truncated by the loss stop is a WARNING, not a neutral fact —
+       it is the usual reason a range produced fewer trades than expected. */
+    .bt-meta .tag.warn { background: var(--warn-bg); border-color: var(--warn-edge); color: var(--warn); }
+    .bt-meta .tag.warn b { color: var(--warn); }
     .bt-meta .strat { font-size: 11px; color: var(--txt-2); }
     .bt-meta .strat b { color: var(--txt); }
 
@@ -73,6 +77,7 @@
   <div class="hdr-actions" style="display:flex;gap:10px;align-items:center">
     <nav class="nav-seg" aria-label="Pages">
       <a href="/">Dashboard</a>
+      <a href="/scalping">Scalping</a>
       <a href="/backtest" class="active">Backtest</a>
       <a href="/indicators">Indicators</a>
       <a href="/settings">Settings</a>

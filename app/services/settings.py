@@ -45,9 +45,18 @@ SPEC: List[Dict[str, Any]] = [
        help_="Off = skip the AI screen and trade the capped full high-volume list.", bt=False),
     _s("GEMINI_MODEL", "Gemini model id", "str", "AI Pre-market Screen",
        help_="Must be a real google-genai model id; a bad id silently disables the screen.", bt=False),
+    _s("GEMINI_MODE", "Screen mode", "choice", "AI Pre-market Screen",
+       choices=cfg.GEMINI_MODES, bt=False,
+       help_="bullish = trade ONLY the symbols Gemini calls bullish (whitelist) · "
+             "exclude_risky = trade the whole universe EXCEPT the symbols Gemini "
+             "flags as risky today (blacklist). Both respect the cap below."),
     _s("GEMINI_MAX_STOCKS", "Max tradeable stocks", "int", "AI Pre-market Screen",
-       min_=1, max_=100, help_="Cap on the shortlist / fallback list "
-       "(the WS feed chunks across connections, so any value here is safe).", bt=False),
+       min_=1, max_=2000, help_="Hard cap on the tradeable list in BOTH screen "
+       "modes — in exclude_risky it is what stops 'everything that isn't risky' "
+       "from becoming thousands of symbols. The WS feed chunks safely across "
+       "connections, but every TRADEABLE symbol gets a full TA-Lib scan on each "
+       "tick cycle, so raising this far past a few hundred needs CPU headroom "
+       "(watch for 'Scan pool timed out' in the logs).", bt=False),
 
     # ── Session timings ───────────────────────────────────────────────────────
     _s("PREMARKET_TIME", "Pre-market screen", "time", "Session Timings",
@@ -155,6 +164,141 @@ SPEC: List[Dict[str, Any]] = [
     _s("FULL_SCAN_INTERVAL_S", "Full-watchlist scan interval s", "int", "Engine",
        min_=30, max_=3600, bt=False),
 
+    # ── Order-book scalper ────────────────────────────────────────────────────
+    # A second strategy on the same tick loop (app/engine/scalper.py). EVERY key
+    # here is bt=False: a backtest replays historical candles, which carry no
+    # order book or tape at all, so none of this can be per-run overridden —
+    # forward-test it with SCALP_DRY_RUN instead (see CLAUDE.md).
+    _s("SCALP_ENABLED", "Scalper enabled", "bool", "Scalper", bt=False,
+       help_="Master switch. Off = no book parsing, no tape, no scalp signals "
+             "(zero cost on the tick path)."),
+    _s("SCALP_DRY_RUN", "Dry run (log only)", "bool", "Scalper", bt=False,
+       help_="On = evaluate and log every signal but place NO order. Leave on "
+             "until the signal log looks right — this is the forward-test mode."),
+    _s("SCALP_WARMUP_TIME", "Warm-up start (scan only)", "time", "Scalper",
+       parts=("SCALP_WARMUP_HOUR", "SCALP_WARMUP_MIN"), bt=False,
+       help_="Scanning starts; execution does NOT (avoids the opening auction)."),
+    _s("SCALP_MORNING_TIME", "Morning window start", "time", "Scalper",
+       parts=("SCALP_MORNING_HOUR", "SCALP_MORNING_MIN"), bt=False,
+       help_="First window that may execute."),
+    _s("SCALP_MIDDAY_TIME", "Midday window start", "time", "Scalper",
+       parts=("SCALP_MIDDAY_HOUR", "SCALP_MIDDAY_MIN"), bt=False),
+    _s("SCALP_AFTERNOON_TIME", "Afternoon window start", "time", "Scalper",
+       parts=("SCALP_AFTERNOON_HOUR", "SCALP_AFTERNOON_MIN"), bt=False),
+    _s("SCALP_SQUAREOFF_TIME", "Square-off / stop scanning", "time", "Scalper",
+       parts=("SCALP_SQUAREOFF_HOUR", "SCALP_SQUAREOFF_MIN"), bt=False,
+       help_="Cancels pending intents and flattens every scalp position."),
+    _s("SCALP_MIDDAY_ENABLED", "Trade the midday window", "bool", "Scalper", bt=False,
+       help_="Off = scanner paused through the midday chop (diagnostics only)."),
+    _s("SCALP_RATIO_MORNING", "Required W-OBI ratio — morning", "float", "Scalper",
+       min_=1.0, max_=50, step=0.1, bt=False,
+       help_="Weighted bid depth ÷ weighted ask depth an entry must clear."),
+    _s("SCALP_RATIO_MIDDAY", "Required W-OBI ratio — midday", "float", "Scalper",
+       min_=1.0, max_=50, step=0.1, bt=False,
+       help_="Deliberately stricter: midday imbalances mean-revert more often."),
+    _s("SCALP_RATIO_AFTERNOON", "Required W-OBI ratio — afternoon", "float", "Scalper",
+       min_=1.0, max_=50, step=0.1, bt=False),
+
+    # ── Scalper: book + tape filters ──────────────────────────────────────────
+    _s("SCALP_OBI_WEIGHTS", "Level weights", "str", "Scalper Filters", bt=False,
+       help_="Comma-separated, nearest touch first (e.g. 1.0,0.8,0.6,0.4,0.2). "
+             "Fewer entries = a shallower book is considered."),
+    _s("SCALP_MIN_LEVELS", "Min levels per side", "int", "Scalper Filters",
+       min_=1, max_=5, bt=False,
+       help_="Both sides need this many parsed levels before the book is judged."),
+    _s("SCALP_MIN_ORDER_COUNT", "Min bid-side order count", "int", "Scalper Filters",
+       min_=0, max_=100_000, bt=False,
+       help_="Aggregate orders across the depth below — many small orders are "
+             "real interest; few large ones are one participant."),
+    _s("SCALP_ORDER_COUNT_DEPTH", "Order-count depth (levels)", "int", "Scalper Filters",
+       min_=1, max_=5, bt=False),
+    _s("SCALP_SPOOF_DEPTH", "Anti-spoof depth (levels)", "int", "Scalper Filters",
+       min_=1, max_=5, bt=False,
+       help_="Check levels 1..N for a single-ticket wall."),
+    _s("SCALP_SPOOF_MIN_SHARE", "Anti-spoof qty share", "float", "Scalper Filters",
+       min_=0.05, max_=1.0, step=0.05, bt=False,
+       help_="A level with orders==1 holding at least this share of displayed "
+             "bid quantity is treated as a spoof and rejected (0.5 = 50%)."),
+    _s("SCALP_REQUIRE_ORDER_DATA", "Require order-count data", "bool", "Scalper Filters",
+       bt=False,
+       help_="On = refuse to trade when the feed publishes no per-level order "
+             "counts (fail-closed). Off = skip the count/spoof filters instead."),
+    _s("SCALP_TAPE_WINDOW_S", "Tape window (s)", "float", "Scalper Filters",
+       min_=1, max_=60, step=0.5, bt=False),
+    _s("SCALP_TAPE_MAXLEN", "Tape prints retained", "int", "Scalper Filters",
+       min_=5, max_=500, bt=False,
+       help_="Per symbol. Must comfortably cover the tape window at your tick rate."),
+    _s("SCALP_MIN_TAPE_TRADES", "Min tape prints", "int", "Scalper Filters",
+       min_=1, max_=100, bt=False),
+    _s("SCALP_MIN_TAPE_QTY", "Min aggressive buy qty", "float", "Scalper Filters",
+       min_=0, max_=10_000_000, step=100, bt=False,
+       help_="Shares bought AT the ask inside the tape window."),
+    _s("SCALP_MIN_TAPE_BUY_RATIO", "Min tape buy ratio", "float", "Scalper Filters",
+       min_=0.0, max_=1.0, step=0.05, bt=False,
+       help_="Aggressive buy ÷ (buy + sell) volume. 0.6 = 60% of directional flow."),
+    _s("SCALP_REQUIRE_ASK_HIT", "Require a print at the ask", "bool", "Scalper Filters",
+       bt=False, help_="Confirms someone is actively paying up right now."),
+    _s("SCALP_ASK_HIT_WINDOW_S", "Ask-hit window (s)", "float", "Scalper Filters",
+       min_=0.5, max_=30, step=0.5, bt=False),
+    _s("SCALP_MAX_BOOK_AGE_S", "Max book age (s)", "float", "Scalper Filters",
+       min_=0.5, max_=60, step=0.5, bt=False,
+       help_="A stale book is the most dangerous input here — the socket can "
+             "stay connected while the depth feed goes quiet."),
+    _s("SCALP_MAX_SPREAD_PCT", "Max spread %", "float", "Scalper Filters",
+       min_=0.01, max_=5, step=0.01, bt=False,
+       help_="Percent of price. The round trip pays the spread twice."),
+    _s("SCALP_MAX_SLIPPAGE_PCT", "Max slippage %", "float", "Scalper Filters",
+       min_=0.01, max_=5, step=0.01, bt=False,
+       help_="Tolerated gap between the signal LTP and the projected fill."),
+    _s("SCALP_ENTRY_AT_ASK", "Enter at the ask", "bool", "Scalper Filters", bt=False,
+       help_="On = price the entry at the offer (a market buy crosses the "
+             "spread). Off = price it at the last trade, which flatters fills."),
+
+    # ── Scalper: sizing & risk ────────────────────────────────────────────────
+    _s("SCALP_ALLOC_PCT", "Capital per trade %", "float", "Scalper Risk",
+       min_=1, max_=100, step=1, bt=False,
+       help_="% of account equity of OWN funds per scalp, before intraday "
+             "leverage and capped by capital the open book hasn't committed."),
+    _s("SCALP_RISK_MODE", "Risk basis", "choice", "Scalper Risk",
+       choices=cfg.RISK_MODES, bt=False,
+       help_="fixed_amount = risk ₹X per scalp · capital_pct = risk X% of equity."),
+    _s("SCALP_RISK_PER_TRADE", "Risk per trade ₹", "float", "Scalper Risk",
+       min_=1, max_=100_000_000, step=25, bt=False),
+    _s("SCALP_RISK_CAPITAL_PERCENT", "Risk % of capital", "float", "Scalper Risk",
+       min_=0.05, max_=100, step=0.05, bt=False,
+       help_="A true percentage: 0.5 = a stop-out loses 0.5% of equity."),
+    _s("SCALP_SL_PCT", "Stop-loss % of fill", "float", "Scalper Risk",
+       min_=0.01, max_=10, step=0.01, bt=False),
+    _s("SCALP_MIN_SL_OFFSET", "Min stop distance ₹", "float", "Scalper Risk",
+       min_=0.01, max_=1000, step=0.05, bt=False,
+       help_="Floor, so a low-priced stock can't get a sub-tick stop."),
+    _s("SCALP_RR_RATIO", "Reward : risk ratio", "float", "Scalper Risk",
+       min_=0.1, max_=20, step=0.1, bt=False, help_="1.5 = a 1:1.5 R:R scalp."),
+    _s("SCALP_COST_BUFFER_MULT", "Cost buffer ×", "float", "Scalper Risk",
+       min_=1.0, max_=20, step=0.1, bt=False,
+       help_="Gross P&L at target must exceed round-trip costs × this, or the "
+             "trade is refused as cost-dominated."),
+    _s("SCALP_MAX_CONCURRENT_POSITIONS", "Max open scalps", "int", "Scalper Risk",
+       min_=1, max_=20, bt=False,
+       help_="Counted over scalp positions only — total open positions are "
+             "bounded by this PLUS the core strategy's own cap."),
+    _s("SCALP_MAX_TRADES_PER_SYMBOL", "Max trades per symbol", "int", "Scalper Risk",
+       min_=1, max_=50, bt=False,
+       help_="Unlike the core strategy, a scalp symbol may be re-entered; this "
+             "caps the churn."),
+    _s("SCALP_MAX_TRADES_PER_DAY", "Max scalps per day", "int", "Scalper Risk",
+       min_=1, max_=500, bt=False),
+    _s("SCALP_REENTRY_COOLDOWN_S", "Re-entry cooldown (s)", "float", "Scalper Risk",
+       min_=0, max_=3600, step=5, bt=False),
+    _s("SCALP_DAILY_LOSS_LIMIT", "Scalp daily loss limit ₹", "float", "Scalper Risk",
+       min_=100, max_=10_000_000, step=100, bt=False,
+       help_="Applies to realized scalp P&L only; the account-wide daily loss "
+             "limit also stops the scalper."),
+    _s("SCALP_MAX_HOLD_S", "Max hold (s) — time stop", "float", "Scalper Risk",
+       min_=10, max_=7200, step=10, bt=False,
+       help_="A scalp that hasn't reached target or stop by then is flattened; "
+             "dead trades tie up capital and margin."),
+
     # ── Delivery mode (positional backtests: mode="delivery" and "1d", which is
     # always positional) — independent stop/target/risk/leverage/toggle profile
     # for overnight holds. Shadows the plain keys only inside a positional
@@ -247,6 +391,7 @@ SPEC: List[Dict[str, Any]] = [
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
 GROUP_ORDER = ["AI Pre-market Screen", "Session Timings", "Risk & Capital",
                "Strategy", "Entry Conditions", "Trend Gates", "Engine",
+               "Scalper", "Scalper Filters", "Scalper Risk",
                "Delivery Mode", "Backtest & Costs"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
@@ -273,9 +418,23 @@ if _spec_attr_keys != _defaults_keys:
 
 # Session times must stay ordered or the phase driver / backtest window breaks.
 _TIME_ORDER = ("PREMARKET", "MARKET_OPEN", "SCAN_START", "CUTOFF", "SESSION_END")
+# The scalper's windows form their OWN independent chain (see
+# app/engine/scalper._WINDOWS): its profile picks the last window whose start
+# time has passed, so an out-of-order boundary would make a window unreachable —
+# e.g. a midday start before the morning start silently deletes the morning
+# window instead of erroring.
+_SCALP_TIME_ORDER = ("SCALP_WARMUP", "SCALP_MORNING", "SCALP_MIDDAY",
+                     "SCALP_AFTERNOON", "SCALP_SQUAREOFF")
+_TIME_CHAINS = (_TIME_ORDER, _SCALP_TIME_ORDER)
 _TIME_LABEL = {"PREMARKET": "pre-market", "MARKET_OPEN": "market open",
                "SCAN_START": "scan start", "CUTOFF": "entry cutoff",
-               "SESSION_END": "session end"}
+               "SESSION_END": "session end",
+               "SCALP_WARMUP": "scalp warm-up", "SCALP_MORNING": "scalp morning",
+               "SCALP_MIDDAY": "scalp midday", "SCALP_AFTERNOON": "scalp afternoon",
+               "SCALP_SQUAREOFF": "scalp square-off"}
+# Points that must be STRICTLY before the next one — a zero-width window is
+# useless (scan start == cutoff never scans; afternoon == square-off never trades).
+_STRICT_BEFORE_NEXT = frozenset({"SCAN_START", "SCALP_AFTERNOON"})
 
 
 # ── Value coercion / validation ───────────────────────────────────────────────
@@ -402,6 +561,37 @@ def validate_indicator_periods(attr_changes: Dict[str, Any]) -> None:
 validate_macd_periods = validate_indicator_periods
 
 
+def validate_obi_weights(attr_changes: Dict[str, Any]) -> None:
+    """
+    Validate the scalper's level-weight vector at SAVE time.
+
+    orderbook.parse_weights deliberately falls back to the defaults on anything
+    unparseable (a bad value must never crash the tick loop), which means a typo
+    would otherwise be silently ignored — the user would see their weights
+    "saved" while the engine used 1.0,0.8,0.6,0.4,0.2. This is where the typo
+    gets reported instead. No-op unless the key changed.
+    """
+    if "SCALP_OBI_WEIGHTS" not in attr_changes:
+        return
+    raw   = attr_changes["SCALP_OBI_WEIGHTS"]
+    parts = [p for p in str(raw).replace(" ", "").split(",") if p != ""]
+    if not parts or len(parts) > 5:
+        raise ValueError("Level weights: expected 1–5 comma-separated numbers "
+                         "(e.g. 1.0,0.8,0.6,0.4,0.2)")
+    vals = []
+    for p in parts:
+        try:
+            vals.append(float(p))
+        except ValueError:
+            raise ValueError(f"Level weights: {p!r} is not a number") from None
+    if any(v < 0 for v in vals):
+        raise ValueError("Level weights: must be non-negative")
+    if not any(v > 0 for v in vals):
+        # All-zero weights make both weighted depths 0, so the ratio is
+        # undefined and the scalper could never fire a single signal.
+        raise ValueError("Level weights: at least one weight must be > 0")
+
+
 def _coerce_attr(key: str, raw: Any) -> Any:
     """
     Validate one raw cfg-attr value (as stored in the DB) against its SPEC.
@@ -416,18 +606,12 @@ def _coerce_attr(key: str, raw: Any) -> Any:
     return _coerce({"key": key, "type": "int", "min": 0, "max": hi}, raw)
 
 
-def validate_time_order(attr_changes: Dict[str, Any],
-                        points: tuple = _TIME_ORDER) -> None:
-    """
-    Cross-field guard: with `attr_changes` applied on top of the current
-    config, the session times in `points` (order matters) must be ordered —
-    the full live chain enforces
-        premarket ≤ market open ≤ scan start < cutoff ≤ session end,
-    while the backtest passes points=("SCAN_START","CUTOFF") since those are
-    the only times a replay uses (comparing against live-only settings would
-    falsely reject valid runs). No-op when attr_changes touches none of the
-    points. Raises ValueError naming the violated pair.
-    """
+def time_attr_keys(chain: tuple) -> List[str]:
+    """The cfg attrs backing one ordered time chain (for targeted self-healing)."""
+    return [f"{p}_{part}" for p in chain for part in ("HOUR", "MIN")]
+
+
+def _validate_chain(attr_changes: Dict[str, Any], points: tuple) -> None:
     if not any(k in attr_changes for p in points
                for k in (f"{p}_HOUR", f"{p}_MIN")):
         return
@@ -437,12 +621,34 @@ def validate_time_order(attr_changes: Dict[str, Any],
 
     minutes = [eff(f"{p}_HOUR") * 60 + eff(f"{p}_MIN") for p in points]
     for i in range(len(points) - 1):
-        strict = points[i] == "SCAN_START"   # zero-width scan window is useless
+        strict = points[i] in _STRICT_BEFORE_NEXT   # zero-width window is useless
         if minutes[i] > minutes[i + 1] or (strict and minutes[i] == minutes[i + 1]):
             raise ValueError(
                 f"session times out of order: {_TIME_LABEL[points[i]]} must be "
                 f"{'before' if strict else 'at or before'} {_TIME_LABEL[points[i + 1]]}"
             )
+
+
+def validate_time_order(attr_changes: Dict[str, Any],
+                        points: Optional[tuple] = None) -> None:
+    """
+    Cross-field guard: with `attr_changes` applied on top of the current config,
+    each ordered time chain must stay ordered.
+
+      • the live session chain enforces
+            premarket ≤ market open ≤ scan start < cutoff ≤ session end
+      • the scalper chain enforces
+            warm-up ≤ morning ≤ midday ≤ afternoon < square-off
+
+    `points=None` (the default, used by save / startup-load / reset) validates
+    EVERY chain; passing an explicit chain validates just that one — the backtest
+    passes points=("SCAN_START","CUTOFF") since those are the only times a replay
+    uses, and comparing against live-only settings would falsely reject valid
+    runs. No-op for a chain none of whose points changed. Raises ValueError
+    naming the violated pair.
+    """
+    for chain in (_TIME_CHAINS if points is None else (points,)):
+        _validate_chain(attr_changes, chain)
 
 
 def _attr_keys(spec: Dict[str, Any]) -> List[str]:
@@ -517,16 +723,25 @@ async def load_and_apply(db) -> None:
 
     # Cross-field self-heal: individually-valid rows can still form an
     # inverted session-time chain (partial manual edit / historical bug).
-    # Fall back to the DEFAULT times rather than brick the trading day.
+    # Fall back to the DEFAULT times rather than brick the trading day. Each
+    # chain heals INDEPENDENTLY — a bad scalper window must not also reset the
+    # live session's timings (or vice versa).
+    for chain in _TIME_CHAINS:
+        try:
+            validate_time_order(valid, chain)
+        except ValueError as e:
+            dropped = [k for k in time_attr_keys(chain) if k in valid]
+            for k in dropped:
+                valid.pop(k, None)
+            print(f"Settings: stored session times invalid ({e}) — "
+                  f"dropped {dropped}, using defaults for that chain")
+
+    # Same self-heal for an unparseable stored weight vector.
     try:
-        validate_time_order(valid)
+        validate_obi_weights(valid)
     except ValueError as e:
-        time_attrs = [k for k in valid
-                      if k.endswith("_HOUR") or k.endswith("_MIN")]
-        for k in time_attrs:
-            valid.pop(k, None)
-        print(f"Settings: stored session times invalid ({e}) — "
-              f"dropped {time_attrs}, using default timings")
+        valid.pop("SCALP_OBI_WEIGHTS", None)
+        print(f"Settings: stored scalp level weights invalid ({e}) — using default")
 
     # Same self-heal for a stored indicator period/lookback combo that would
     # leave an indicator all-NaN. Drop ALL indicator-period overrides back to
@@ -554,6 +769,7 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     attr_changes = expand_changes(changes)
     validate_time_order(attr_changes)
     validate_indicator_periods(attr_changes)
+    validate_obi_weights(attr_changes)
 
     defaults   = cfg.dynamic_defaults()
     store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
@@ -578,6 +794,19 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append("Delivery Risk % has NO effect until Risk basis (delivery) = capital_pct")
     if "DELIVERY_RISK_PER_TRADE" in changes and cfg.DELIVERY_RISK_MODE != "fixed_amount":
         warnings.append("Delivery Risk ₹ has NO effect while Risk basis (delivery) = capital_pct")
+    if "SCALP_RISK_CAPITAL_PERCENT" in changes and cfg.SCALP_RISK_MODE != "capital_pct":
+        warnings.append("Scalp Risk % has NO effect until Scalper Risk basis = capital_pct")
+    if "SCALP_RISK_PER_TRADE" in changes and cfg.SCALP_RISK_MODE != "fixed_amount":
+        warnings.append("Scalp Risk ₹ has NO effect while Scalper Risk basis = capital_pct")
+    # Arming the scalper is the one change here that starts placing orders — say
+    # so plainly in the save confirmation rather than let it pass silently.
+    if ("SCALP_ENABLED" in changes or "SCALP_DRY_RUN" in changes):
+        if cfg.SCALP_ENABLED and not cfg.SCALP_DRY_RUN:
+            warnings.append("Scalper is now ARMED — it will place paper orders "
+                            "on live order-book signals")
+        elif cfg.SCALP_ENABLED:
+            warnings.append("Scalper enabled in DRY RUN — signals are logged, "
+                            "no orders are placed")
 
     out = describe()
     if warnings:
@@ -607,6 +836,7 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
     post_reset = {k: defaults[k] for k in attr_keys}
     validate_time_order(post_reset)
     validate_indicator_periods(post_reset)
+    validate_obi_weights(post_reset)
 
     await db.delete_app_settings(attr_keys)
     cfg.clear_runtime_overrides(attr_keys)

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scalping — NSE Paper Trader</title>
+  <meta name="description" content="Live order-book imbalance and tape scanner for the intraday scalper">
+  <link rel="stylesheet" href="/css/dashboard.css">
+  <script>
+    (function(){
+      var t = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <style>
+    /* ── Arm state banner ────────────────────────────────────────────────────
+       The single most important thing on this page: whether signals are being
+       logged or actually placing orders. Colour-coded so it can't be misread. */
+    .arm-bar {
+      margin: 14px 18px 0;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 10px 14px; border-radius: var(--r);
+      border: 1px solid var(--edge); background: var(--surf);
+    }
+    .arm-bar.is-off    { border-color: var(--edge);      background: var(--surf); }
+    .arm-bar.is-dry    { border-color: var(--warn-edge); background: var(--warn-bg); }
+    .arm-bar.is-armed  { border-color: var(--pos-edge);  background: var(--pos-bg); }
+    .arm-state { font-weight: 700; font-size: 13px; letter-spacing: .02em; }
+    .arm-note  { color: var(--txt-2); font-size: 12px; }
+    .arm-spacer { flex: 1 1 auto; }
+    .arm-btn {
+      border: 1px solid var(--edge); background: var(--surf-raised); color: var(--txt);
+      border-radius: var(--r-sm); padding: 6px 12px; font-size: 12px; cursor: pointer;
+      font-weight: 600;
+    }
+    .arm-btn:hover:not(:disabled) { background: var(--surf-hover); }
+    .arm-btn:disabled { opacity: .5; cursor: not-allowed; }
+    .arm-btn.danger { border-color: var(--neg-edge); color: var(--neg); }
+    .arm-btn.go     { border-color: var(--pos-edge); color: var(--pos); }
+
+    /* ── Session window timeline ───────────────────────────────────────────── */
+    .win-strip { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 18px 0; }
+    .win {
+      flex: 1 1 120px; min-width: 110px; padding: 8px 10px;
+      border: 1px solid var(--edge-soft); border-radius: var(--r-sm);
+      background: var(--surf); opacity: .55;
+    }
+    .win.active { opacity: 1; border-color: var(--prime); box-shadow: var(--ring); }
+    .win .w-name {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--txt-3);
+    }
+    .win .w-time { font-size: 15px; font-variant-numeric: tabular-nums; }
+    .win .w-ratio { font-size: 11px; color: var(--txt-2); }
+
+    /* Explains an all-empty table instead of leaving the user to guess: the
+       scalper being off, or being on but receiving no depth from the feed. */
+    .scan-notice {
+      margin: 10px 14px 0; padding: 9px 12px; border-radius: var(--r-sm);
+      font-size: 12px; line-height: 1.5;
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    }
+    .scan-notice:empty { display: none; }
+    .scan-notice.off  { background: var(--surf-raised); border: 1px solid var(--edge);
+                        color: var(--txt-2); }
+    .scan-notice.warn { background: var(--warn-bg); border: 1px solid var(--warn-edge);
+                        color: var(--txt); }
+    .scan-notice span { flex: 1 1 260px; }
+    .scan-notice code {
+      font-size: 11px; background: var(--surf-high); padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    .scan-wrap { max-height: 62vh; overflow: auto; }
+    table.scalp-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.scalp-tbl th {
+      position: sticky; top: 0; z-index: 1; background: var(--surf-raised);
+      text-align: right; padding: 7px 8px; font-size: 10px; text-transform: uppercase;
+      letter-spacing: .04em; color: var(--txt-3); white-space: nowrap;
+      border-bottom: 1px solid var(--edge);
+    }
+    table.scalp-tbl th:first-child, table.scalp-tbl td:first-child { text-align: left; }
+    table.scalp-tbl th.reason-col, table.scalp-tbl td.reason-col { text-align: left; }
+    table.scalp-tbl td {
+      text-align: right; padding: 6px 8px; white-space: nowrap;
+      font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--edge-soft);
+    }
+    tr.row-pass { background: var(--pos-bg); }
+    tr.row-held { background: var(--accent-2-bg); }
+    .ratio-hit  { color: var(--pos); font-weight: 700; }
+    .ratio-miss { color: var(--txt-2); }
+    .reason-col { color: var(--txt-2); max-width: 260px; overflow: hidden;
+                  text-overflow: ellipsis; }
+    .filter-row {
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      font-size: 12px; color: var(--txt-2);
+    }
+    .filter-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header (same shell as the other pages) ─────────────────────────────── -->
+<header class="app-bar">
+  <div class="brand">
+    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <polyline points="3,17 8,10 12,14 17,7 21,11"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-name">NSE Paper Trader</span>
+      <span class="brand-sub" id="last-bar-time">Scalping</span>
+    </div>
+  </div>
+
+  <div class="status-row">
+    <span id="phase-badge" class="badge gray">—</span>
+    <span id="ws-status"  class="badge gray">Connecting…</span>
+    <span id="scalp-window-badge" class="badge gray">—</span>
+  </div>
+
+  <div class="clock-wrap">
+    <div id="clock" class="clock">—:—:—</div>
+    <div class="clock-sub">IST</div>
+  </div>
+
+  <nav class="nav-seg" aria-label="Pages">
+    <a href="/">Dashboard</a>
+    <a href="/scalping" class="active">Scalping</a>
+    <a href="/backtest">Backtest</a>
+    <a href="/indicators">Indicators</a>
+    <a href="/settings">Settings</a>
+  </nav>
+
+  <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" aria-label="Toggle theme">
+    <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
+</header>
+
+
+  <!-- Arm state + controls -->
+  <div class="arm-bar is-off" id="arm-bar">
+    <span class="arm-state" id="arm-state">SCALPER OFF</span>
+    <span class="arm-note"  id="arm-note">Loading…</span>
+    <span class="arm-spacer"></span>
+    <button class="arm-btn" id="btn-enable"  onclick="toggleEnabled()">Enable</button>
+    <button class="arm-btn" id="btn-arm"     onclick="toggleArmed()">Arm (leave dry run)</button>
+    <a class="arm-btn" href="/settings#scalper" style="text-decoration:none">Tune settings →</a>
+  </div>
+
+  <!-- Session windows -->
+  <div class="win-strip" id="win-strip"></div>
+
+  <!-- Stat cards -->
+  <div class="stat-strip">
+    <div class="stat-card">
+      <span class="stat-label">Scalp P&amp;L</span>
+      <span class="stat-value" id="stat-pnl">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Open Scalps</span>
+      <span class="stat-value" id="stat-open">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Trades Today</span>
+      <span class="stat-value" id="stat-trades">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Signals / Evaluated</span>
+      <span class="stat-value" id="stat-signals">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Fills</span>
+      <span class="stat-value" id="stat-fills">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Books Tracked</span>
+      <span class="stat-value" id="stat-books">—</span>
+    </div>
+  </div>
+
+  <div class="main-grid">
+
+    <!-- LEFT: the live scanner -->
+    <div class="col">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Live Book Scanner</span>
+          <div class="filter-row">
+            <label><input type="checkbox" id="only-pass" onchange="loadScan()"> only passing</label>
+            <span id="scan-count" class="badge gray">0</span>
+          </div>
+        </div>
+        <div class="scan-notice" id="scan-notice"></div>
+        <div class="scan-wrap">
+          <table class="scalp-tbl">
+            <thead><tr>
+              <th>Symbol</th><th>LTP</th><th>W-OBI</th><th>Wtd bid</th><th>Wtd ask</th>
+              <th>Spread %</th><th>Bid ord</th><th>Tape buy</th><th>Buy %</th>
+              <th>Age s</th><th class="reason-col">Status</th>
+            </tr></thead>
+            <tbody id="scan-tbody">
+              <tr><td colspan="11" class="empty-cell">Waiting for order-book data…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: open book, rejections, signal log -->
+    <div class="col">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Open Scalps</span>
+          <span id="open-count" class="badge gray">0</span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th>Symbol</th><th>Qty</th><th>Entry</th><th>SL</th><th>Target</th>
+              <th>LTP</th><th>Held</th><th>P&amp;L ₹</th>
+            </tr></thead>
+            <tbody id="open-tbody">
+              <tr><td colspan="8" class="empty-cell">No open scalps</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Why Signals Are Rejected</span>
+        </div>
+        <div class="panel-body" id="rejects-body">
+          <div class="muted-text">Nothing evaluated yet.</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Signal Log</span>
+        </div>
+        <div class="panel-body" id="log-body">
+          <div class="muted-text">No signals yet.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+<script src="/js/util.js"></script>
+<script src="/js/scalping.js"></script>
+</body>
+</html>

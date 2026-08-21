@@ -12,6 +12,7 @@ Timing orchestrator — drives the trading session through its 5 phases:
 
 import asyncio
 import json
+import time
 from collections import deque as _deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -23,7 +24,7 @@ from app.engine.entry_engine import scan_stock
 from app.engine.position_manager import can_enter
 from app.engine.trend_filter import compute_nifty_gates
 from app.engine.watchlist import fetch_active_watchlist
-from app.models import Position, PositionStatus, TradingPhase
+from app.models import STRATEGY_CORE, STRATEGY_SCALP, Position, PositionStatus, TradingPhase
 from app.services.gemini_filter import analyse_stocks
 from app.services.historical_data import (
     fetch_indicator_history,
@@ -31,6 +32,7 @@ from app.services.historical_data import (
     fetch_today_candles,
 )
 from app.services.paper_trade import check_tick_exit, force_close, place_paper_order
+from app.services.scalp_engine import ScalpEngine
 from app.services.settings import WATCHLIST_OVERRIDES_KEY
 from app.services.snapshot import apply_depth, stub_entry
 from app.state import get_state, spawn
@@ -58,6 +60,20 @@ _FULL_SCAN_POOL = ThreadPoolExecutor(
     max_workers=cfg.SCAN_WORKERS,
     thread_name_prefix="fullscan",
 )
+
+# Bounds how long _scan_in_pool will wait on its gather. Without this, one wedged worker (lock
+# contention, a pathological TA-Lib input, a GC pause) blocks the awaiting gather forever - and
+# since _run_active_phase's while loop awaits _tick_entries -> _scan_in_pool sequentially before
+# its next iteration, that also freezes _tick_exits, silently stopping SL/target monitoring on every
+# open position for the rest of the session. Generous relative to the 100ms tick cadence so it never
+# false-triggers under real load, cheap relative to a frozen day if it ever does.
+_SCAN_TIMEOUT_S = 10.0
+
+# Ticks arrive continuously during market hours (not just once per 5m bar), so a real feed outage
+# is detectable well inside one bar's width. Generous enough to tolerate a brief lull across the
+# whole tracked universe without false-alarming, short enough to catch a stuck feed promptly - see
+# state.last_tick_wallclock / feed_stale_warning.
+_FEED_STALE_THRESHOLD_S = 90.0
 
 
 def _now() -> datetime:
@@ -142,6 +158,13 @@ class SchedulerService:
         # before clearing indicator_snapshot/etc, so a scan worker thread still
         # mid-flight can't write a stale symbol back in right after the reset.
         self._full_scan_task: Optional[asyncio.Task] = None
+        # Order-book scalper (second strategy, same tick loop). It reuses THIS
+        # object's DB retry queues via the two callbacks so there is a single
+        # persistence path for both books — see app/services/scalp_engine.py.
+        self.scalp = ScalpEngine(
+            queue_entry_save = self._save_position_queued,
+            write_exit       = self._write_exit,
+        )
 
     async def start(self) -> None:
         self._tasks = [
@@ -219,7 +242,11 @@ class SchedulerService:
                             # Client-status fetch failed — retry in 60s instead
                             # of entering the active loop watchlist-less, which
                             # would idle the engine for the rest of the day.
-                            st.api_status = "Recovery failed — retrying in 60s"
+                            # Keep the underlying reason (set by fetch_active_watchlist,
+                            # e.g. "Client status error: <exception>") visible instead of
+                            # clobbering it with a generic message — otherwise the
+                            # dashboard can only ever say "failed", never why.
+                            st.api_status = f"Recovery failed ({st.api_status}) — retrying in 60s"
                             await asyncio.sleep(60)
                             continue
 
@@ -271,6 +298,13 @@ class SchedulerService:
         full_watchlist = await fetch_active_watchlist()
         if not full_watchlist:
             print("Client status returned empty list — check server")
+            # fetch_active_watchlist already sets a specific st.api_status on a
+            # transport/shape error (e.g. "Client status error: ..."). But the
+            # HTTP call can also succeed with a genuinely empty or all-filtered
+            # response, in which case it leaves api_status at "API OK" — which
+            # would misleadingly read as "healthy" while recovery still fails.
+            if st.api_status == "API OK":
+                st.api_status = "Client status returned no usable rows"
             return
 
         # Persist the full pre-Gemini list so the indicators page can show all stocks.
@@ -278,35 +312,70 @@ class SchedulerService:
         # token_to_name maps ALL high-volume tokens → names for the tick loop.
         st.token_to_name  = {tok: name for name, tok in full_watchlist.items()}
 
-        # Step 2: grounded Gemini screen — names (not raw tokens) go to the AI,
-        # which returns a clean JSON array of BULLISH symbols. Skippable at
-        # runtime; [] triggers the same capped full-list fallback as a failure.
+        # Step 2: grounded Gemini screen — names (not raw tokens) go to the AI.
+        # GEMINI_MODE decides the POLARITY of what comes back:
+        #   bullish       → a whitelist; only those symbols are tradeable.
+        #   exclude_risky → a blacklist; everything else stays tradeable.
+        # `complete` is False when the screen failed (no key, network, partial
+        # batches) as opposed to succeeding with an empty answer.
+        mode     = cfg.GEMINI_MODE
+        screened: List[str] = []
+        complete = False
         if cfg.GEMINI_ENABLED:
-            print(f"=== PRE-MARKET: Gemini grounded screen of {len(full_watchlist)} stocks ===")
-            bullish = await analyse_stocks(list(full_watchlist.keys()))
+            print(f"=== PRE-MARKET: Gemini {mode} screen of {len(full_watchlist)} stocks ===")
+            screened, complete = await analyse_stocks(list(full_watchlist.keys()), mode)
         else:
             print("=== PRE-MARKET: Gemini screen disabled — capped full-list fallback ===")
-            bullish = []
 
-        if bullish:
-            bullish_set = {s.upper() for s in bullish}
-            filtered = {
-                name: tok
-                for name, tok in full_watchlist.items()
-                if name.upper() in bullish_set
-            }
+        st.gemini_excluded = []
+
+        if mode == "exclude_risky" and complete:
+            # Trade the whole universe EXCEPT what the screen flagged.
+            risky = {s.upper() for s in screened}
+            kept  = {name: tok for name, tok in full_watchlist.items()
+                     if name.upper() not in risky}
+            st.gemini_excluded = sorted(name for name in full_watchlist
+                                        if name.upper() in risky)
+            # The cap still applies: "everything that isn't risky" can be
+            # thousands of symbols, and every TRADEABLE one costs a full TA-Lib
+            # scan per tick cycle plus a 5m AND 1h WS subscription.
+            capped = dict(list(kept.items())[:cfg.GEMINI_MAX_STOCKS])
+            st.active_watchlist = capped
+            dropped = len(kept) - len(capped)
+            print(f"=== PRE-MARKET: excluded {len(st.gemini_excluded)} risky "
+                  f"→ {len(capped)} tradeable"
+                  + (f" ({dropped} more kept out by the {cfg.GEMINI_MAX_STOCKS} cap)"
+                     if dropped else "")
+                  + " ===")
+            if not capped:
+                # Every symbol flagged risky. Trading NOTHING is the correct
+                # reading — falling through to the capped full list below would
+                # trade exactly the names the screen just told us to avoid.
+                print("=== PRE-MARKET: every symbol flagged risky — "
+                      "no tradeable stocks today ===")
         else:
+            if mode == "exclude_risky" and cfg.GEMINI_ENABLED:
+                # Say it loudly: without a successful screen nothing was
+                # excluded, so the fallback list below is UNSCREENED.
+                print("=== PRE-MARKET: risk screen FAILED — falling back to the "
+                      "capped full list with NO risk exclusion applied ===")
             filtered = {}
-
-        if filtered:
-            st.active_watchlist = filtered
-        else:
-            # Gemini unavailable/failed, or none of its names mapped back →
-            # fall back to the CAPPED head of the full list. An uncapped
-            # fallback would subscribe every stock and overflow the WS server's
-            # per-connection buffer (1009 close).
-            items = list(full_watchlist.items())[:cfg.GEMINI_MAX_STOCKS]
-            st.active_watchlist = dict(items)
+            if screened:
+                bullish_set = {s.upper() for s in screened}
+                filtered = {
+                    name: tok
+                    for name, tok in full_watchlist.items()
+                    if name.upper() in bullish_set
+                }
+            if filtered:
+                st.active_watchlist = filtered
+            else:
+                # Gemini unavailable/failed, or none of its names mapped back →
+                # fall back to the CAPPED head of the full list. An uncapped
+                # fallback would subscribe every stock and overflow the WS server's
+                # per-connection buffer (1009 close).
+                items = list(full_watchlist.items())[:cfg.GEMINI_MAX_STOCKS]
+                st.active_watchlist = dict(items)
 
         st.gemini_shortlist = list(st.active_watchlist.keys())
 
@@ -364,8 +433,32 @@ class SchedulerService:
                 else:
                     st.phase = TradingPhase.WAIT_ZONE
 
+                # Whole-feed staleness alarm: ws_status only reflects socket-level connectedness,
+                # not whether ticks are still arriving - a connection can stay "connected" while the
+                # upstream pipeline silently stops producing bars, which would otherwise leave open
+                # positions' SL/target unmonitored with no visible sign anything is wrong.
+                if st.phase in (TradingPhase.ACTIVE, TradingPhase.CUTOFF):
+                    ts = st.last_tick_wallclock
+                    idle = (time.monotonic() - ts) if ts is not None else None
+                    if idle is not None and idle > _FEED_STALE_THRESHOLD_S:
+                        st.feed_stale_warning = (
+                            f"No 5m ticks received in {idle:.0f}s - feed may be stuck")
+                    else:
+                        st.feed_stale_warning = None
+
                 await self._tick_exits()
                 await self._tick_entries(loop)
+
+                # Order-book scalper — after the core strategy's exits (which
+                # already manage EVERY position's SL/target, scalps included) and
+                # after its entries, so the slower TA-Lib-gated signals aren't
+                # starved of capital by a burst of scalps in the same cycle.
+                # Own try/except: a scalper fault must never stop _tick_exits
+                # from running next cycle.
+                try:
+                    await self.scalp.tick()
+                except Exception as e:
+                    print(f"Scalp engine error: {e}")
 
                 # Refresh all stocks periodically (non-Gemini stocks only update here)
                 now_ts = loop.time()
@@ -437,10 +530,22 @@ class SchedulerService:
 
         size   = max(1, (len(items) + cfg.SCAN_WORKERS - 1) // cfg.SCAN_WORKERS)
         chunks = [items[i : i + size] for i in range(0, len(items), size)]
-        results = await asyncio.gather(*[
-            loop.run_in_executor(pool, _scan_chunk, c, nifty_gates, available)
-            for c in chunks
-        ])
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*[
+                    loop.run_in_executor(pool, _scan_chunk, c, nifty_gates, available)
+                    for c in chunks
+                ]),
+                timeout=_SCAN_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            # Give up on THIS cycle's scan rather than block the caller's loop forever - see
+            # _SCAN_TIMEOUT_S. The underlying worker thread(s) may still be stuck occupying a pool
+            # slot (thread work can't be forcibly cancelled), but the event loop is freed either way
+            # so _tick_exits keeps running every cycle regardless.
+            print(f"Scan pool timed out after {_SCAN_TIMEOUT_S}s ({len(chunks)} chunks, "
+                  f"{len(items)} stocks) - skipping this cycle's scan")
+            return []
         return [sig for chunk_res in results for sig in chunk_res]
 
     async def _write_exit(self, closed: Position) -> None:
@@ -466,6 +571,22 @@ class SchedulerService:
         except Exception as e:
             self._pending_exit_writes.append(kw)
             print(f"Exit DB write failed ({closed.symbol}) — queued for retry: {e}")
+
+    async def _save_position_queued(self, pos: Position) -> None:
+        """
+        Persist a fill, queueing it for retry on failure.
+
+        Must not be dropped: without the row, the exit UPDATE matches nothing and
+        a mid-day restart forgets the trade entirely — re-entering the symbol and
+        understating daily P&L / the loss limit. Shared by both engines so there
+        is exactly one persistence path (the scalper calls it through the
+        queue_entry_save callback).
+        """
+        try:
+            await self._db.save_position(pos)
+        except Exception as e:
+            self._pending_entry_saves.append(pos)
+            print(f"DB save_position failed ({pos.symbol}) — queued for retry: {e}")
 
     async def _flush_db_retries(self) -> None:
         """
@@ -604,14 +725,7 @@ class SchedulerService:
             )
             pos.indicators = sig.indicators
             pos.trend      = sig.trend
-            try:
-                await self._db.save_position(pos)
-            except Exception as e:
-                # Must not be dropped: without the row, the exit UPDATE matches
-                # nothing and a mid-day restart forgets the trade entirely —
-                # re-entering the symbol and understating daily P&L/loss limit.
-                self._pending_entry_saves.append(pos)
-                print(f"DB save_position failed ({sig.symbol}) — queued for retry: {e}")
+            await self._save_position_queued(pos)
 
     async def _restore_positions_from_db(self) -> None:
         """
@@ -639,11 +753,15 @@ class SchedulerService:
         def _f(v) -> float:   # asyncpg returns NUMERIC as Decimal — never mix
             return float(v) if v is not None else 0.0   # Decimal into float math
 
+        scalp_restored = 0
         for r in rows:
             symbol = r["symbol"]
             token  = str(r["token"])
             status = (PositionStatus(r["status"])
                       if r.get("status") in ("OPEN", "CLOSED") else PositionStatus.OPEN)
+            # Rows written before the column existed (or by an older build) have
+            # NULL/absent strategy — those are all core trades.
+            strategy = str(r.get("strategy") or STRATEGY_CORE)
             pos = Position(
                 symbol        = symbol,
                 token         = token,
@@ -659,8 +777,22 @@ class SchedulerService:
                 exit_price    = float(r["exit_price"]) if r.get("exit_price") is not None else None,
                 exit_time     = r.get("exit_time"),
                 pnl           = _f(r.get("pnl")),
+                strategy      = strategy,
+                # opened_at stays None: monotonic timestamps are meaningless
+                # across processes, so a restored scalp has no honest age. Its
+                # max-hold time stop is therefore skipped (documented in
+                # ScalpEngine._manage_open); SL, target and the 14:45
+                # square-off still manage it.
             )
             st.traded_today.add(symbol)
+            # Rebuild the scalper's churn caps and its own realized P&L from the
+            # same rows — without this, a restart hands the scalper a fresh
+            # trade budget and a zeroed loss limit for symbols it already traded.
+            if strategy == STRATEGY_SCALP:
+                scalp_restored += 1
+                st.scalp_trades_today[symbol] = st.scalp_trades_today.get(symbol, 0) + 1
+                if status == PositionStatus.CLOSED:
+                    st.scalp_pnl += pos.pnl
             if status == PositionStatus.CLOSED:
                 st.closed_positions.append(pos)
                 st.daily_pnl += pos.pnl
@@ -676,7 +808,10 @@ class SchedulerService:
         print(
             f"=== RECOVERY: restored {len(st.positions)} open / "
             f"{len(st.closed_positions)} closed positions | "
-            f"daily P&L ₹{st.daily_pnl:+.2f} ==="
+            f"daily P&L ₹{st.daily_pnl:+.2f}"
+            + (f" | {scalp_restored} scalp trade(s), scalp P&L ₹{st.scalp_pnl:+.2f}"
+               if scalp_restored else "")
+            + " ==="
         )
 
     # ── Runtime watchlist control (dashboard add/remove) ─────────────────────
@@ -765,6 +900,13 @@ class SchedulerService:
         tok = st.full_watchlist[match]
         st.active_watchlist[match] = tok
         st.token_to_name.setdefault(tok, match)
+        # Adding a symbol by hand is an explicit override of the AI risk screen.
+        # Dropping it from the excluded list keeps the rule coherent (the
+        # scalper's entry guard reads that list) and stops the dashboard from
+        # showing a symbol as both tradeable and excluded.
+        if match in st.gemini_excluded:
+            st.gemini_excluded.remove(match)
+            print(f"Watchlist: {match} was AI-excluded — manual add overrides it")
         await self._persist_watchlist_change(add=(match, tok))
         await self._mkt.restart()
         print(f"Watchlist: manually added {match}")
@@ -908,6 +1050,8 @@ class SchedulerService:
         st.gemini_shortlist.clear()   # stats are written; a stale list must not
                                       # trigger tomorrow's write guard or linger
                                       # on the overnight dashboard
+        st.gemini_excluded.clear()    # yesterday's risk verdicts must not be
+                                      # shown against tomorrow's universe
         st.daily_pnl = 0.0
         st.ltp.clear()
         # Yesterday's NIFTY close must not survive the reset: if tomorrow's
@@ -926,6 +1070,14 @@ class SchedulerService:
         st.active_watchlist.clear()
         st.clear_scan_results()
         st.last_5m_bar_time = None
+        st.last_tick_wallclock = None
+        st.feed_stale_warning = None
+        # Scalper: books, tape, trade counts, cooldowns and counters. All of it
+        # must go — the staleness guard measures MONOTONIC time, which does not
+        # reset with the trading day, so a surviving book would read as fresh
+        # tomorrow morning.
+        st.reset_scalp_state()
+        self.scalp.reset_daily()
 
     # ── Historical data loader ────────────────────────────────────────────────
 
@@ -1047,8 +1199,12 @@ class SchedulerService:
             "phase":       st.phase.value,
             "wsStatus":    st.ws_status,
             "apiStatus":   st.api_status,
+            "feedStaleWarning": st.feed_stale_warning,
             "watchlist":   list(st.active_watchlist.keys()),
             "geminiList":  st.gemini_shortlist,
+            # Only non-empty in exclude_risky mode: what the AI screen removed.
+            "geminiExcluded": st.gemini_excluded,
+            "geminiMode":  cfg.GEMINI_MODE,
             "niftyLtp":    st.nifty_ltp,
             "dailyPnl":    round(st.daily_pnl, 2),
             "positions":   positions_out,
@@ -1057,6 +1213,10 @@ class SchedulerService:
                 for sym, res in st.scan_snapshot()[-20:]
             ],
             "lastBarTime": st.last_5m_bar_time,
+            # Order-book scalper block: window/ratio in force, its own P&L and
+            # open book, plus the aggregated rejection reasons — "no signals" is
+            # ambiguous, "W-OBI below threshold on 34 symbols" is actionable.
+            "scalp":       self.scalp.snapshot(),
         }
         if include_snapshot:
             payload["indicatorSnapshot"] = self._build_indicator_snapshot(st)

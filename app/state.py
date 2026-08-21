@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
-from typing import Deque, Dict, List, Optional, Set
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 import app.config as cfg
-from app.models import Candle, Position, TradingPhase
+from app.models import Candle, OrderBook, Position, TapeEvent, TradingPhase
 
 # Strong references to fire-and-forget tasks. The event loop keeps only WEAK
 # refs to tasks, so an unreferenced create_task() result can be garbage-
@@ -48,7 +48,14 @@ class AppState:
 
         # ── Universe & Watchlist ──────────────────────────────────────────────
         # Gemini AI shortlist: list of trading symbols e.g. ["RELIANCE", "TCS"]
+        # In BOTH screen modes this is the list that ended up TRADEABLE (the
+        # dashboard's AI marker), so daily_stats keeps the same meaning.
         self.gemini_shortlist: List[str]      = []
+        # Symbols the AI flagged as RISKY and that were therefore removed from
+        # the tradeable list — only populated when GEMINI_MODE is exclude_risky.
+        # Kept separate from the shortlist so the dashboard can show WHAT was
+        # excluded rather than only what survived.
+        self.gemini_excluded:  List[str]      = []
         # Active watchlist (Gemini AI-selected): {symbol: token} — trading subset
         self.active_watchlist: Dict[str, str] = {}
         # Full pre-Gemini watchlist: {symbol: token} — all high-volume stocks
@@ -88,6 +95,47 @@ class AppState:
         # GIL-protected dict ops (same pattern as ltp) make this safe in CPython.
         self.depth: Dict[str, dict] = {}        # symbol → {bid,ask,spread,buy_qty,sell_qty,ratio}
 
+        # ── Scalper: full order book + tape (symbol-keyed) ────────────────────
+        # Populated ONLY for tradeable symbols while SCALP_ENABLED is on — the
+        # 5-level parse is more regex work than the legacy L1 `depth` parse
+        # above, and the universe can be ~10,000 symbols. `depth` is left
+        # completely untouched by the scalper so the existing depth_bullish
+        # condition and the indicators page can't regress.
+        # Written by the WS thread, read by the event loop; both use whole-object
+        # atomic swaps (new OrderBook / new tape tuple per update), the same
+        # GIL-safe pattern as ltp/depth — see OrderBook and orderbook.append_tape.
+        self.book: Dict[str, OrderBook]           = {}   # symbol → parsed 5-level book
+        self.tape: Dict[str, Tuple[TapeEvent, ...]] = {}  # symbol → recent prints
+        # symbol → (bar start_time, that bar's cumulative volume) as of the
+        # previous tick. The PAIR matters: the tape's traded-quantity source is
+        # the volume delta within one bar, so the reader must know which bar the
+        # baseline belongs to (see market_data._process_tick).
+        self.last_bar_volume: Dict[str, Tuple[str, float]] = {}
+
+        # Tokens that ticked since the scalp engine's last cycle. A THIRD dirty
+        # set (alongside dirty_ticks / dirty_ticks_push) because each consumer
+        # swaps-and-clears its own: sharing one would mean whichever loop ran
+        # first stole the other's ticks.
+        self.dirty_ticks_scalp: Set[str] = set()
+
+        # Scalp book state. Realized scalp-only P&L (its own loss limit),
+        # per-symbol and total trade counts (churn caps), and monotonic exit
+        # timestamps (re-entry cooldown). Mutated on the event loop only.
+        self.scalp_pnl:            float            = 0.0
+        self.scalp_trades_today:   Dict[str, int]   = {}
+        self.scalp_last_exit:      Dict[str, float] = {}   # symbol → time.monotonic()
+        # Rolling diagnostics for /api/scalp + the dashboard: the most recent
+        # decisions (fired, dry-run, and rejected-with-reason). Bounded deque —
+        # this is a debugging aid, not a trade log (the DB holds those).
+        self.scalp_log:            Deque[dict]      = deque(maxlen=60)
+        # Latest resolved ScalpSession (window/execute/required ratio) so the API
+        # and dashboard report exactly what the engine is acting on. Typed loosely
+        # to keep app.state free of a dependency on the scalper's own module.
+        self.scalp_session:        Optional[object] = None
+        # Date ("YYYY-MM-DD") whose scalp square-off already ran, so the
+        # per-cycle check flattens once instead of every 100ms after 14:45.
+        self.scalp_squareoff_date: Optional[str]    = None
+
         # ── Positions ─────────────────────────────────────────────────────────
         # `positions` holds ONLY currently-open trades, so len() is a true
         # concurrent count. Closed trades move to `closed_positions` for the
@@ -104,6 +152,15 @@ class AppState:
         self.last_scan_results: Dict[str, dict] = {}
         self._scan_results_lock: threading.Lock = threading.Lock()
         self.last_5m_bar_time:  Optional[str]   = None   # "HH:MM" of last scanned bar
+        # Wall-clock (time.monotonic()) of the last accepted stock 5m WS tick, regardless of its
+        # bar content - distinct from last_5m_bar_time (which only advances forward and describes
+        # the DATA, not receipt time). Lets the tick loop detect a feed that's gone silent even
+        # though the WS socket itself still reports "connected" (see feed_stale_warning below).
+        self.last_tick_wallclock: Optional[float] = None
+        # Set/cleared by the ACTIVE-phase tick loop; None while the feed is healthy. Surfaced on the
+        # dashboard alongside ws_status, which only reflects socket-level health, not whether ticks
+        # are actually arriving.
+        self.feed_stale_warning: Optional[str] = None
 
         # Per-symbol indicator snapshot — written by scan workers on every tick,
         # read by the event loop for the WebSocket broadcast. GIL-protected dict
@@ -155,6 +212,28 @@ class AppState:
             self.last_scan_results.clear()
             self.indicator_snapshot.clear()
             self.depth.clear()
+
+    def reset_scalp_state(self) -> None:
+        """
+        Daily reset of every scalper-owned structure (called from EOD).
+
+        Kept separate from clear_scan_results so it is obvious what belongs to
+        the scalper. All of it MUST be cleared: a surviving `book`/`tape` would
+        let tomorrow's first cycle evaluate yesterday's liquidity (the staleness
+        guard uses monotonic time, which does NOT reset with the trading day),
+        and surviving trade counts / cooldowns would silently ration tomorrow's
+        entries.
+        """
+        self.book.clear()
+        self.tape.clear()
+        self.last_bar_volume.clear()
+        self.dirty_ticks_scalp.clear()
+        self.scalp_pnl = 0.0
+        self.scalp_trades_today.clear()
+        self.scalp_last_exit.clear()
+        self.scalp_log.clear()
+        self.scalp_session        = None
+        self.scalp_squareoff_date = None
 
 
 def get_state() -> AppState:

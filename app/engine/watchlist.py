@@ -45,8 +45,13 @@ async def fetch_active_watchlist() -> Dict[str, str]:
         data = await asyncio.to_thread(resp.json)
         st.api_status = "API OK"
     except Exception as e:
-        st.api_status = f"Client status error: {e}"
-        print(f"Client status fetch failed: {e}")
+        # str(e) is empty for some httpx/anyio connect-level errors (e.g. a bare
+        # ConnectTimeout/ConnectError with no message attached to the OSError it
+        # wraps) — prefix the exception type so the dashboard never shows a
+        # blank reason after "Client status error: ".
+        detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        st.api_status = f"Client status error: {detail}"
+        print(f"Client status fetch failed: {detail}")
         return {}
 
     # A JSON error object ({"detail": ...}) would iterate its KEYS here, fail

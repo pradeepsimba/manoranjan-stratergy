@@ -44,6 +44,7 @@ def status() -> Dict[str, Any]:
         "phase":     st.phase.value,
         "wsStatus":  st.ws_status,
         "apiStatus": st.api_status,
+        "feedStaleWarning": st.feed_stale_warning,
         "watchlist": len(st.active_watchlist),
         "dailyPnl":  round(st.daily_pnl, 2),
     }
@@ -125,12 +126,23 @@ async def watchlist_full() -> List[Dict[str, Any]]:
     # Restored open positions can be active without being in today's universe.
     for sym, tok in st.active_watchlist.items():
         universe.setdefault(sym, tok)
+    # set() once instead of a per-row list scan: at a ~10,000-symbol universe
+    # `sym in st.gemini_shortlist` for every row would be O(rows x list). (This
+    # endpoint is async, so it runs ON the event loop and needs no snapshot for
+    # thread safety — unlike the sync scalp endpoints below.)
+    shortlist = set(st.gemini_shortlist)
+    excluded  = set(st.gemini_excluded)
     return [{
         "symbol": sym,
         "token":  tok,
         "active": sym in st.active_watchlist,
         "open":   sym in st.positions,
-        "ai":     sym in st.gemini_shortlist,
+        "ai":     sym in shortlist,
+        # True only in exclude_risky mode: the AI screen flagged this symbol as
+        # risky today. Surfaced so the add-symbol picker can warn instead of
+        # letting it be re-added blind (adding it anyway is a deliberate
+        # override — see scheduler.watchlist_add).
+        "risky":  sym in excluded,
     } for sym, tok in sorted(universe.items())]
 
 
@@ -185,6 +197,154 @@ def get_scans() -> Dict[str, Any]:
 
 
 # ── Live prices ───────────────────────────────────────────────────────────────
+
+# ── Order-book scalper ────────────────────────────────────────────────────────
+
+@router.get("/api/scalp")
+def scalp_status() -> Dict[str, Any]:
+    """Live scalper state: window in force, counters, open scalp book, and the
+    aggregated rejection reasons (the fastest way to see WHY nothing is firing)."""
+    if _sched is None:
+        raise HTTPException(503, "scheduler not ready")
+    from app.engine.scalper import describe_windows
+    out = _sched.scalp.snapshot()
+    out["windows"] = describe_windows()
+    return out
+
+
+@router.get("/api/scalp/scan")
+def scalp_scan(only_passing: bool = False) -> Dict[str, Any]:
+    """
+    Per-symbol scalper scanner — every tradeable symbol's live W-OBI, book and
+    tape metrics with the decision the engine would reach right now. Powers the
+    /scalping page's table.
+
+    Cheap enough to poll every second: it re-runs `evaluate` over books that were
+    ALREADY parsed on the tick path (no regex, no TA-Lib), and `evaluate` is pure,
+    so this endpoint can never perturb what the engine is doing.
+
+    With the scalper disabled there are no books to read (the tick path skips
+    parsing entirely), so every row reads "no order book" — `enabled` in the
+    response is what the page uses to explain that rather than look broken.
+    """
+    from app.engine.scalper import evaluate, session_profile
+
+    st       = get_state()
+    prof     = session_profile(datetime.now(IST))
+    now_mono = time.monotonic()
+
+    rows: List[Dict[str, Any]] = []
+    # list() FIRST: this endpoint is a sync def, so FastAPI runs it in a
+    # threadpool — a plain `for sym in st.active_watchlist` would iterate a dict
+    # the event loop can mutate underneath it (watchlist add/remove) and raise
+    # "dictionary changed size during iteration", turning a 1 Hz poll into
+    # intermittent 500s. list(dict) is a single C-level copy, so it can't tear.
+    for sym in list(st.active_watchlist):
+        dec = evaluate(st.book.get(sym), st.tape.get(sym, ()), now_mono,
+                       prof.required_ratio, st.ltp.get(sym, 0.0))
+        if only_passing and not dec.ok:
+            continue
+        pos = st.positions.get(sym)
+        rows.append({
+            "symbol":  sym,
+            "ltp":     st.ltp.get(sym),
+            "ok":      dec.ok,
+            "reason":  dec.reason,
+            "held":    pos.strategy if pos is not None else None,
+            "metrics": dec.metrics,
+        })
+
+    # Strongest imbalance first — the same ordering the engine fills in, so the
+    # top of the table is genuinely "what would trade next". None sorts last.
+    rows.sort(key=lambda r: (-(r["metrics"].get("obiRatio") or -1.0), r["symbol"]))
+    return {
+        "enabled":       bool(cfg.SCALP_ENABLED),
+        "dryRun":        bool(cfg.SCALP_DRY_RUN),
+        "window":        prof.window,
+        "execute":       prof.execute,
+        "requiredRatio": prof.required_ratio,
+        "note":          prof.note,
+        "tradeable":     len(st.active_watchlist),
+        "rows":          rows,
+    }
+
+
+@router.get("/api/scalp/snap")
+def scalp_snap(symbol: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Pre-flight parser check: the RAW `snap` blob for one symbol next to exactly
+    what app/engine/orderbook.parse_snap makes of it.
+
+    This exists because the snap's text layout is set by the market-data server,
+    not by this repo — in particular whether it publishes a per-level ORDER COUNT
+    at all, which the anti-spoofing and min-order-count filters are built on. Run
+    this against a live feed BEFORE arming the scalper and check `ordersSeen`,
+    the level count and the prices/quantities against the raw text.
+
+    Works with SCALP_ENABLED off (the raw blob is cached by the WS client for
+    every symbol regardless), but `tape` is only populated while the scalper is
+    enabled — the tape is built on the tick path, not reconstructed here.
+    """
+    if _sched is None:
+        raise HTTPException(503, "scheduler not ready")
+    from app.engine.orderbook import obi, parse_snap, parse_weights, tape_stats
+    from app.engine.scalper import evaluate, session_profile
+
+    st      = get_state()
+    raw_map = getattr(_sched._mkt, "_last_snap", {}) or {}
+    if symbol is None:
+        # Default to any tradeable symbol that has actually received a snap.
+        # list() for the same threadpool-vs-event-loop reason as scalp_scan above.
+        symbol = next((s for s in list(st.active_watchlist) if s in raw_map),
+                      next(iter(list(raw_map)), None))
+    if symbol is None:
+        raise HTTPException(404, "no snap data received yet")
+    raw = raw_map.get(symbol)
+    if raw is None:
+        raise HTTPException(404, f"no snap cached for {symbol!r}")
+
+    now_mono = time.monotonic()
+    book     = parse_snap(raw, ts=now_mono)
+    weights  = parse_weights(cfg.SCALP_OBI_WEIGHTS)
+    wb, wa, ratio = obi(book, weights)
+    prof = session_profile(datetime.now(IST))
+    tape = st.tape.get(symbol, ())
+
+    return {
+        "symbol":      symbol,
+        "raw":         raw,
+        "parsed": {
+            "bids": [{"price": l.price, "qty": l.qty, "orders": l.orders}
+                     for l in book.bids],
+            "asks": [{"price": l.price, "qty": l.qty, "orders": l.orders}
+                     for l in book.asks],
+            "ltp": book.ltp, "ltq": book.ltq,
+            "buyQty": book.buy_qty, "sellQty": book.sell_qty,
+            "ordersSeen": book.orders_seen,
+            "spread": book.spread(),
+        },
+        "weights":       list(weights),
+        "weightedBids":  round(wb, 1),
+        "weightedAsks":  round(wa, 1),
+        "obiRatio":      round(ratio, 3) if ratio is not None else None,
+        "requiredRatio": prof.required_ratio,
+        "window":        prof.window,
+        "tapePrints":    len(tape),
+        "tape":          tape_stats(tape, now_mono, float(cfg.SCALP_TAPE_WINDOW_S)),
+        # Evaluated against a book timestamped NOW, so the answer reflects the
+        # filters rather than the age of this cached blob.
+        "decision":      _decision_dict(evaluate(book, tape, now_mono,
+                                                 prof.required_ratio,
+                                                 st.ltp.get(symbol, 0.0))),
+        "symbolsWithSnap": sorted(raw_map)[:200],
+        "hint": ("tape is only recorded while SCALP_ENABLED is on"
+                 if not cfg.SCALP_ENABLED else ""),
+    }
+
+
+def _decision_dict(dec) -> Dict[str, Any]:
+    return {"ok": dec.ok, "reason": dec.reason, "metrics": dec.metrics}
+
 
 @router.get("/api/prices")
 def get_prices() -> Dict[str, float]:

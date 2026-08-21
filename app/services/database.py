@@ -108,6 +108,11 @@ ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS adx            NUMERIC(6,2)
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS candle_pattern VARCHAR(50);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS macd           NUMERIC(12,4);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS support_level  NUMERIC(12,2);
+-- Which engine opened the trade: 'core' (the 8-condition indicator strategy) or
+-- 'scalp' (the order-book scalper). Pre-existing rows are all core, hence the
+-- DEFAULT — restart recovery reads NULL/absent as core too, so an older row can
+-- never be handed to the scalper's caps and square-off.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS strategy VARCHAR(16) DEFAULT 'core';
 """
 
 
@@ -177,9 +182,9 @@ class DatabaseService:
                      stop_loss, target, sl_offset, target_offset, order_id,
                      status, rsi, macd_line, adx, plus_di, minus_di,
                      vwap, candle_pattern, daily_green, hourly_green,
-                     exit_price, exit_time, pnl)
+                     exit_price, exit_time, pnl, strategy)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                        $16,$17,$18,$19,$20,$21,$22,$23)
+                        $16,$17,$18,$19,$20,$21,$22,$23,$24)
                 {conflict}
                 """,
                 pos.symbol, pos.token,
@@ -191,7 +196,7 @@ class DatabaseService:
                 ind.plus_di, ind.minus_di, ind.vwap,
                 ind.candle_pattern,
                 gate.daily_green, gate.hourly_green,
-                pos.exit_price, pos.exit_time, pos.pnl,
+                pos.exit_price, pos.exit_time, pos.pnl, pos.strategy,
             )
 
     async def update_position_exit(self, symbol: str, exit_price: float,

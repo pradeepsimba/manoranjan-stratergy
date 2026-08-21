@@ -12,13 +12,14 @@ fills would systematically flatter live paper P&L relative to the backtest
 """
 
 import itertools
+import time
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import app.config as cfg
 from app.backtest.fills import round_trip_costs
-from app.models import Position, PositionStatus
+from app.models import STRATEGY_CORE, STRATEGY_SCALP, Position, PositionStatus
 from app.state import get_state
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -43,10 +44,16 @@ def place_paper_order(
     entry_price:   float,
     sl_offset:     float,
     target_offset: float,
+    strategy:      str = STRATEGY_CORE,
 ) -> Position:
     """
     Simulate a BUY bracket order at entry_price.
     Returns the new Position object (already added to AppState).
+
+    `strategy` tags which engine owns the trade (see models.STRATEGY_*). Both
+    books live in the same AppState.positions dict so exits, persistence and the
+    dashboard stay unforked; the tag is what lets each engine apply its own
+    caps, square-off time and loss limit to only its own trades.
     """
     now      = datetime.now(IST)
     # Date-scoped id: the sequence resets on every restart, so a time-only id
@@ -71,6 +78,10 @@ def place_paper_order(
         target_offset = target_offset,
         order_id      = order_id,
         status        = PositionStatus.OPEN,
+        strategy      = strategy,
+        # Monotonic clock so the scalper's max-hold time stop can't be warped by
+        # a wall-clock adjustment. Not persisted (see Position.opened_at).
+        opened_at     = time.monotonic(),
     )
 
     st = get_state()
@@ -78,7 +89,8 @@ def place_paper_order(
     st.traded_today.add(symbol)
 
     print(
-        f"[PAPER] BUY {symbol} × {quantity} @ {fill:.2f} | "
+        f"[{'SCALP' if strategy == STRATEGY_SCALP else 'PAPER'}] "
+        f"BUY {symbol} × {quantity} @ {fill:.2f} | "
         f"SL={pos.stop_loss:.2f}  TGT={pos.target:.2f}  id={order_id}"
     )
     return pos
@@ -107,13 +119,25 @@ def _finalize(pos: Position, exit_price: float, label: str,
 
     st.daily_pnl += pnl
 
+    # Scalp book accounting, kept HERE rather than in the scalp engine because a
+    # scalp position can be closed from four places (tick SL/target, the time
+    # stop, the 14:45 square-off, the 15:30 EOD flat) and every one of them funds
+    # the scalper's own loss limit and re-entry cooldown. Anywhere else, one of
+    # those paths would silently skip the accounting.
+    if pos.strategy == STRATEGY_SCALP:
+        st.scalp_pnl += pnl
+        st.scalp_last_exit[pos.symbol] = time.monotonic()
+
     # Move out of the open book so `positions` stays a true concurrent set.
     # `traded_today` still blocks same-day re-entry.
     st.positions.pop(pos.symbol, None)
     st.closed_positions.append(pos)
 
+    # Prefix by owning strategy so a session's scalp activity is greppable as one
+    # stream ([SCALP] entries AND exits) rather than split across two tags.
     print(
-        f"[PAPER] {label} {pos.symbol} @ {exit_price:.2f} | "
+        f"[{'SCALP' if pos.strategy == STRATEGY_SCALP else 'PAPER'}] "
+        f"{label} {pos.symbol} @ {exit_price:.2f} | "
         f"gross ₹{gross:+.2f}  costs ₹{costs:.2f}  net ₹{pnl:+.2f}  (daily ₹{st.daily_pnl:+.2f})"
     )
     return pos
@@ -138,13 +162,14 @@ def check_tick_exit(symbol: str, ltp: float) -> Optional[Position]:
     return None
 
 
-def force_close(symbol: str, exit_price: float,
-                synthetic: bool = False) -> Optional[Position]:
+def force_close(symbol: str, exit_price: float, synthetic: bool = False,
+                label: str = "EOD SQUARE-OFF") -> Optional[Position]:
     """Square off an open position at a given price (used for the 15:30 EOD
     flat). synthetic=True when exit_price is a FALLBACK (entry price, no
     market price ever observed) — skips the sell-side slippage so the fake
-    price doesn't also book a fake slippage loss."""
+    price doesn't also book a fake slippage loss. `label` names the reason in
+    the log (the scalper passes its own: time stop, 14:45 square-off)."""
     pos = get_state().positions.get(symbol)
     if pos is None or pos.status != PositionStatus.OPEN:
         return None
-    return _finalize(pos, exit_price, "EOD SQUARE-OFF", slip=not synthetic)
+    return _finalize(pos, exit_price, label, slip=not synthetic)

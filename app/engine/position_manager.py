@@ -109,6 +109,64 @@ def calc_quantity(
     return qty, sl_offset, target_offset
 
 
+def can_enter_scalp(
+    symbol:        str,
+    open_symbols:  Container[str],
+    scalp_open:    int,
+    trades_symbol: int,
+    trades_today:  int,
+    last_exit_ago: Optional[float],
+    daily_pnl:     float,
+    scalp_pnl:     float,
+) -> tuple[bool, str]:
+    """
+    Circuit breakers for a SCALP entry — the scalper's counterpart to can_enter,
+    with state injected the same way so it is testable without AppState.
+
+    Deliberately different from the core rules in three ways:
+
+      * Re-entry IS allowed. The core strategy takes one shot per symbol per day
+        (`traded_today`); a scalper that could not re-enter a symbol it just made
+        ₹40 on would be crippled. Churn is bounded instead by a per-symbol trade
+        cap, a per-day cap, and a cooldown after each exit.
+      * Concurrency is counted over SCALP-tagged positions only
+        (SCALP_MAX_CONCURRENT_POSITIONS), so the two strategies can't starve each
+        other. Total open positions are therefore bounded by the SUM of the two
+        caps — set them with that in mind.
+      * Two loss limits apply: the scalper's own realized-P&L limit AND the
+        account-wide DAILY_LOSS_LIMIT, because an account-level breaker must stop
+        every engine, not just the one that tripped it.
+
+    `last_exit_ago` is seconds since this symbol's last scalp exit (None = never
+    traded today). Returns (allowed, rejection_reason).
+    """
+    if symbol in open_symbols:
+        return False, f"{symbol} already has an open position"
+
+    if scalp_open >= cfg.SCALP_MAX_CONCURRENT_POSITIONS:
+        return False, f"Max {cfg.SCALP_MAX_CONCURRENT_POSITIONS} concurrent scalps reached"
+
+    if trades_symbol >= cfg.SCALP_MAX_TRADES_PER_SYMBOL:
+        return False, (f"{symbol} hit its {cfg.SCALP_MAX_TRADES_PER_SYMBOL}-trade "
+                       f"daily cap")
+
+    if trades_today >= cfg.SCALP_MAX_TRADES_PER_DAY:
+        return False, f"Daily scalp trade cap ({cfg.SCALP_MAX_TRADES_PER_DAY}) reached"
+
+    cooldown = cfg.SCALP_REENTRY_COOLDOWN_S
+    if last_exit_ago is not None and last_exit_ago < cooldown:
+        return False, (f"{symbol} in re-entry cooldown "
+                       f"({cooldown - last_exit_ago:.0f}s left)")
+
+    if scalp_pnl <= -cfg.SCALP_DAILY_LOSS_LIMIT:
+        return False, f"Scalp daily loss limit ₹{cfg.SCALP_DAILY_LOSS_LIMIT} hit"
+
+    if daily_pnl <= -cfg.DAILY_LOSS_LIMIT:
+        return False, f"Account daily loss limit ₹{cfg.DAILY_LOSS_LIMIT} hit"
+
+    return True, ""
+
+
 def can_enter(
     symbol:       str,
     open_symbols: Container[str],

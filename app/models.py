@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import NamedTuple, Optional, Tuple
 
 
 # ── Enumerations ──────────────────────────────────────────────────────────────
@@ -18,6 +18,16 @@ class TradingPhase(Enum):
 class PositionStatus(Enum):
     OPEN   = "OPEN"
     CLOSED = "CLOSED"
+
+
+# Which strategy opened a position. "core" = the 8-condition indicator strategy;
+# "scalp" = the order-book/tape scalper (app/engine/scalper.py). Both books live
+# in the SAME AppState.positions dict (so exits, DB persistence, the dashboard,
+# EOD square-off and restart recovery are shared, unforked machinery) — this tag
+# is what lets the scalper apply its own concurrency cap, loss limit, re-entry
+# rule and square-off time to only its own trades.
+STRATEGY_CORE  = "core"
+STRATEGY_SCALP = "scalp"
 
 
 # ── Market Data ───────────────────────────────────────────────────────────────
@@ -91,6 +101,91 @@ class TrendGate:
     # conjunction here; it would silently re-enable disabled gates.
 
 
+# ── Order book / tape (scalper) ────────────────────────────────────────────────
+
+class BookLevel(NamedTuple):
+    """One order-book level. `orders` is None when the feed doesn't carry a
+    per-level order COUNT (the anti-spoofing filter then can't run — see
+    OrderBook.orders_seen)."""
+    price:  float
+    qty:    int
+    orders: Optional[int] = None
+
+
+class TapeEvent(NamedTuple):
+    """
+    One traded-volume observation, appended per WS tick by market_data.
+
+    `qty` is the traded quantity since the previous tick, taken from the FORMING
+    candle's volume delta — always available whatever the snap format, and it
+    aggregates every print in the interval where the feed's LTQ field (used as
+    the fallback when there is no delta) describes only the most recent one.
+    `bid`/`ask` are the book at that instant, so the classifier can tell an
+    ask-hitting (aggressive buy) print from a bid-hitting one; 0.0 when unknown.
+    """
+    ts:    float   # time.monotonic()
+    price: float
+    qty:   float
+    bid:   float
+    ask:   float
+
+
+@dataclass(slots=True)
+class OrderBook:
+    """
+    Parsed 5-level book for one symbol (see app/engine/orderbook.py).
+
+    Written by the WS thread, read lock-free by the scalp engine on the event
+    loop: readers always take a whole-object reference out of AppState.book, and
+    the writer publishes a NEW instance per change (atomic dict swap, the same
+    GIL-safe pattern as AppState.ltp/depth). `ts` is the one field mutated in
+    place — a lone float write, refreshed when an unchanged snap re-confirms the
+    book so the staleness guard doesn't reject a quiet-but-live book.
+    """
+    bids:        Tuple[BookLevel, ...] = ()
+    asks:        Tuple[BookLevel, ...] = ()
+    ltp:         float                 = 0.0   # LTP carried in the snap itself
+    ltq:         Optional[int]         = None  # last traded qty, when published
+    buy_qty:     Optional[int]         = None  # exchange total buy quantity
+    sell_qty:    Optional[int]         = None  # exchange total sell quantity
+    orders_seen: bool                  = False # any per-level order count parsed
+    ts:          float                 = 0.0   # time.monotonic() of last confirm
+
+    def best_bid(self) -> float:
+        return self.bids[0].price if self.bids else 0.0
+
+    def best_ask(self) -> float:
+        return self.asks[0].price if self.asks else 0.0
+
+    def spread(self) -> Optional[float]:
+        if not self.bids or not self.asks:
+            return None
+        return round(self.asks[0].price - self.bids[0].price, 4)
+
+
+@dataclass(slots=True)
+class ScalpDecision:
+    """
+    Outcome of one order-book/tape evaluation. `ok=False` carries the FIRST
+    failing filter in `reason` (checks run cheapest-first), and `metrics` is
+    always populated with whatever was computed before the veto so the dashboard
+    can show why a symbol keeps getting rejected.
+    """
+    ok:      bool
+    reason:  str  = ""
+    metrics: dict = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ScalpSession:
+    """Which time-of-day window the exchange clock is in, and the imbalance
+    threshold that window demands (see scalper.session_profile)."""
+    window:         str    # closed | warmup | morning | midday | afternoon | squareoff
+    execute:        bool   # False = scan/diagnose only, never place an order
+    required_ratio: float  # weighted bid ÷ ask ratio an entry must clear
+    note:           str = ""
+
+
 # ── Trading ───────────────────────────────────────────────────────────────────
 
 @dataclass(slots=True)
@@ -106,6 +201,10 @@ class EntrySignal:
     indicators:     IndicatorResult = field(default_factory=IndicatorResult)
     trend:          TrendGate       = field(default_factory=TrendGate)
     bar_time:       str             = ""   # "HH:MM" of the triggering 5m bar
+    strategy:       str             = STRATEGY_CORE
+    # Scalper-only diagnostics (W-OBI ratio, tape volume, spread …) — empty for
+    # core signals. Carried so the fill log / dashboard can show WHY it fired.
+    scalp:          dict            = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -126,3 +225,10 @@ class Position:
     pnl:           float           = 0.0
     indicators:    Optional[IndicatorResult] = None
     trend:         Optional[TrendGate]       = None
+    # STRATEGY_CORE | STRATEGY_SCALP — persisted (positions.strategy) so a
+    # mid-session restart restores each book to the engine that owns it.
+    strategy:      str             = STRATEGY_CORE
+    # time.monotonic() of the fill, for the scalper's max-hold time stop. NOT
+    # persisted: monotonic values are meaningless across processes, so a restored
+    # scalp position falls back to the session square-off / SL / target only.
+    opened_at:     Optional[float] = None

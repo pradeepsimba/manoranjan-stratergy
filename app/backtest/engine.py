@@ -169,7 +169,7 @@ def _simulate_day(
     capital:      Optional[float] = None,
     overrides:    Optional[Dict]  = None,
     tf_minutes:   int             = 5,
-) -> List:
+) -> Tuple[List, bool]:
     """
     Simulate ONE trading day with its own fresh portfolio. Days are fully
     independent (INTRADAY strategy, EOD square-off, daily reset), which is what
@@ -197,7 +197,7 @@ def _simulate_day_impl(
     slippage_bps: float,
     capital:      Optional[float],
     tf_minutes:   int,
-) -> List:
+) -> Tuple[List, bool]:
     # Dynamic settings hoisted ONCE per day — we are inside the run's
     # thread-override scope, so these cannot change mid-day, and re-resolving
     # them per bar/per symbol costs millions of dynamic cfg lookups on a long
@@ -222,7 +222,8 @@ def _simulate_day_impl(
         port.close_position(sym, last.start_time,
                             square_off_fill(last.close, slippage_bps), "EOD")
 
-    return port.trades
+    # (trades, did the daily loss stop block entries on this day)
+    return port.trades, port.loss_limit_hit
 
 
 def _replay_day(
@@ -324,6 +325,12 @@ def _replay_day(
         #    limit is hit) the whole 500-symbol scan is skipped until a slot frees.
         if scan_start <= tm <= last_entry:
             open_syms, traded, dpnl = port.snapshot()
+            # Diagnostic only (one comparison on an already-computed snapshot):
+            # distinguishes "the loss stop halted entries" from "no more setups
+            # matched" once the run is over. In positional/delivery mode
+            # daily_pnl never resets, so this latches for the REST of the run.
+            if dpnl <= -loss_limit:
+                port.loss_limit_hit = True
             if len(open_syms) < max_pos and dpnl > -loss_limit:
                 # Concurrent positions SHARE the account: size new entries from
                 # what open positions haven't already committed (value ÷ lev).
@@ -462,7 +469,7 @@ def _simulate_range_intraday(
     capital:      Optional[float],
     overrides:    Optional[Dict],
     tf_minutes:   int = 5,
-) -> Tuple[List, int]:
+) -> Tuple[List, int, bool]:
     """
     DELIVERY (positional) replay on an INTRADAY timeframe: ONE portfolio across
     the whole range, stepped chronologically day by day (same per-bar engine as
@@ -481,7 +488,7 @@ def _simulate_range_intraday(
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
         days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
         if not days:
-            return [], 0
+            return [], 0, False
 
         scan_start = f"{cfg.SCAN_START_HOUR:02d}:{cfg.SCAN_START_MIN:02d}"
         last_entry = _last_entry_start(tf_minutes)
@@ -494,7 +501,7 @@ def _simulate_range_intraday(
                         scan_start, last_entry, max_pos, loss_limit)
 
         _square_off_range_end(port, symbols, lo_s, hi_s, slippage_bps)
-        return port.trades, len(days)
+        return port.trades, len(days), port.loss_limit_hit
 
 
 def _simulate_range_daily(
@@ -505,7 +512,7 @@ def _simulate_range_daily(
     slippage_bps: float,
     capital:      Optional[float],
     overrides:    Optional[Dict],
-) -> Tuple[List, int]:
+) -> Tuple[List, int, bool]:
     """
     POSITIONAL replay for the 1d timeframe: ONE portfolio across the whole
     range, stepped chronologically (bars are days, so sequential is cheap).
@@ -526,7 +533,7 @@ def _simulate_range_daily(
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
         days = sorted(d for d in nifty.by_day if lo_s <= d <= hi_s)
         if not days:
-            return [], 0
+            return [], 0, False
 
         max_pos    = cfg.MAX_CONCURRENT_POSITIONS
         loss_limit = cfg.DAILY_LOSS_LIMIT
@@ -575,7 +582,7 @@ def _simulate_range_daily(
 
         # 3) Square off survivors at each symbol's last in-range bar.
         _square_off_range_end(port, symbols, lo_s, hi_s, slippage_bps)
-        return port.trades, len(days)
+        return port.trades, len(days), port.loss_limit_hit
 
 
 def simulate(
@@ -588,6 +595,7 @@ def simulate(
     overrides:    Optional[Dict]  = None,
     timeframe:    Optional[str]   = None,
     mode:         Optional[str]   = None,
+    stats:        Optional[Dict]  = None,
 ) -> Tuple[List, List, int]:
     """
     Run the full replay.
@@ -599,15 +607,21 @@ def simulate(
     (_simulate_range_intraday); parallelism is not possible there.
     1d: positional by construction (bars ARE days) — _simulate_range_daily
     regardless of mode.
+
+    `stats` is an optional out-dict for diagnostics that are NOT metrics (today:
+    loss_limit_hit). It is an out-param rather than a 4th return value so the
+    existing 3-tuple contract — and every caller and test that unpacks it —
+    stays unchanged.
     """
     tf = timeframe or cfg.BACKTEST_TIMEFRAME
     md = mode or cfg.BACKTEST_MODE
     tf_min = cfg.TIMEFRAME_MINUTES.get(tf, 5)
+    limit_hit = False
     if tf == "1d":
-        trades, ndays = _simulate_range_daily(
+        trades, ndays, limit_hit = _simulate_range_daily(
             symbols, nifty, from_d, to_d, slippage_bps, capital, overrides)
     elif md == "delivery":
-        trades, ndays = _simulate_range_intraday(
+        trades, ndays, limit_hit = _simulate_range_intraday(
             symbols, nifty, from_d, to_d, slippage_bps, capital, overrides, tf_min)
     else:
         lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
@@ -623,8 +637,12 @@ def simulate(
                 days,
             ))
         trades = []
-        for day_trades in per_day:
+        for day_trades, day_limit_hit in per_day:
             trades.extend(day_trades)
+            # ANY day whose entries were stopped by the daily loss limit counts:
+            # in intraday mode the limit is per-day, so this means "at least one
+            # day ended early", not "the whole run stopped".
+            limit_hit = limit_hit or day_limit_hit
         ndays = len(days)
 
     # Square-offs are appended in ENTRY order and a symbol whose data ends early
@@ -641,6 +659,8 @@ def simulate(
         cum += t.net_pnl
         equity_curve.append((t.exit_time, round(cum, 2)))
 
+    if stats is not None:
+        stats["loss_limit_hit"] = limit_hit
     return trades, equity_curve, ndays
 
 
@@ -686,11 +706,36 @@ async def run_backtest(
                         f"batches likely failed; retry the run.")
             return
 
+        bt_stats: Dict[str, Any] = {}
         trades, equity, days = await asyncio.to_thread(
-            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital, overrides, tf, md
+            simulate, symbols, nifty, from_d, to_d, slippage_bps, capital,
+            overrides, tf, md, bt_stats
         )
 
         summary = compute_metrics(trades, equity, days)
+        # WHY a run ended where it did. Without this, a replay halted by the loss
+        # stop looks identical to one that ran the whole range and found nothing
+        # — the most common "why are trades missing?" question. In delivery/1d
+        # (positional) mode the limit is RUN-level and never resets, so hitting
+        # it stops every remaining entry in the range; in intraday mode it is
+        # per-day and only truncates the days that breached it.
+        summary["loss_limit_hit"] = bool(bt_stats.get("loss_limit_hit"))
+        # Resolve the limit the RUN actually used, mirroring how the engine
+        # resolves it. Reading cfg alone was wrong: both DAILY_LOSS_LIMIT and
+        # DELIVERY_DAILY_LOSS_LIMIT are per-run overridable (bt=True), and this
+        # runs OUTSIDE the worker threads' override scope — so an overridden run
+        # would have reported the global value, misstating the very number that
+        # explains why it stopped. Positional mode shadows DELIVERY_* onto the
+        # plain key UNLESS the request overrode the plain key explicitly, which
+        # is exactly what _delivery_overrides' shadow.pop() loop does.
+        ovr        = overrides or {}
+        positional = (md == "delivery" or tf == "1d")
+        if positional and "DAILY_LOSS_LIMIT" not in ovr:
+            limit = ovr.get("DELIVERY_DAILY_LOSS_LIMIT", cfg.DELIVERY_DAILY_LOSS_LIMIT)
+        else:
+            limit = ovr.get("DAILY_LOSS_LIMIT", cfg.DAILY_LOSS_LIMIT)
+        summary["loss_limit"]       = float(limit)
+        summary["loss_limit_scope"] = "run" if positional else "day"
         summary["universe_size"] = len(symbols)
         # The ACTUAL replayed span: if the data server holds less history than
         # requested, the replay silently begins at the real start of the data

@@ -65,6 +65,12 @@ class Portfolio:
     traded_today: Set[str]              = field(default_factory=set)
     daily_pnl:    float                 = 0.0
     trades:       List[BTTrade]         = field(default_factory=list)
+    # Set once the loss stop has blocked entries at least once during this
+    # portfolio's life. Purely diagnostic — the gate itself still reads
+    # daily_pnl — but without it a run truncated by the loss limit is
+    # indistinguishable from one that simply found no more setups, which is the
+    # single most confusing way for a backtest to end early.
+    loss_limit_hit: bool                = False
     # NOTE: no equity curve here — simulate() rebuilds it from the merged,
     # exit-time-sorted trade stream (per-close accumulation would be in the
     # wrong order once square-offs/parallel days merge).

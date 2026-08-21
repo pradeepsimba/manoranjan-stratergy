@@ -31,13 +31,15 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
 # ── Static: custom market data server ────────────────────────────────────────
-API_HOST          = "35.234.219.141"
+API_HOST          = "algo.vaangamart.com"
 API_URL_TEMPLATE  = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
 WS_URL            = f"ws://{API_HOST}:8083/historical-data"
 CLIENT_STATUS_URL = f"https://{API_HOST}:8000/api/clientstatus/"
 
 # ── Static: credentials / DSN ─────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# Placeholder only, matching docker-compose.yml's own default - never put a real credential in a
+# source-code default (see .env.example / CLAUDE.md's "Secrets" note). Set POSTGRES_DSN via env.
 POSTGRES_DSN   = os.getenv(
     "POSTGRES_DSN",
     "postgresql://postgres:ab45cd12@localhost/trading_db",
@@ -90,6 +92,16 @@ BACKTEST_MODES = ["intraday", "delivery"]
 # Per-trade risk basis choices (see RISK_MODE in _DEFAULTS).
 RISK_MODES = ["fixed_amount", "capital_pct"]
 
+# How the pre-market Gemini screen decides the tradeable list (see GEMINI_MODE):
+#   "bullish"       — WHITELIST: Gemini returns the symbols likely to show
+#                     intraday bullish momentum, and ONLY those are tradeable.
+#   "exclude_risky" — BLACKLIST: Gemini returns the symbols that look RISKY
+#                     today (bad news, results shock, regulatory action …) and
+#                     everything else in the universe stays tradeable.
+# Both are still bounded by GEMINI_MAX_STOCKS — that cap is the WS/tick-budget
+# ceiling, not part of the screening policy.
+GEMINI_MODES = ["bullish", "exclude_risky"]
+
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
 # Must stay <= backend_server_algo's MAX_STOCKS_PER_REQUEST (currently 100, see app/views.py) -
 # historical_data.py's _fetch() POSTs one batch as a single request, and the server rejects the
@@ -113,7 +125,8 @@ _DEFAULTS: Dict[str, Any] = {
     # AI pre-market screen
     "GEMINI_ENABLED":    True,
     "GEMINI_MODEL":      "gemini-2.5-flash",
-    "GEMINI_MAX_STOCKS": 40,     # cap on the bullish shortlist / fallback list
+    "GEMINI_MODE":       "bullish",   # bullish (whitelist) | exclude_risky (blacklist)
+    "GEMINI_MAX_STOCKS": 40,     # cap on the tradeable list, whichever mode is used
 
     # Timing (IST)
     "PREMARKET_HOUR":   9,  "PREMARKET_MIN":   0,    # Gemini filter runs here
@@ -193,6 +206,78 @@ _DEFAULTS: Dict[str, Any] = {
     # Tick-wise engine
     "TICK_EVAL_INTERVAL_MS": 100,   # cadence of the ACTIVE evaluation loop
     "FULL_SCAN_INTERVAL_S":  300,   # full-watchlist indicator refresh cadence
+
+    # ── Order-book scalper (app/engine/scalper.py) ────────────────────────────
+    # A SECOND strategy that runs alongside the core 8-condition one, on the
+    # same tick loop, sharing the same account and position book (positions are
+    # tagged strategy="scalp"). OFF by default, and DRY-RUN by default even once
+    # enabled, so switching it on can't place an order until you say so twice.
+    "SCALP_ENABLED":  False,   # master switch
+    "SCALP_DRY_RUN":  True,    # log signals, place nothing (forward-test mode)
+
+    # Session windows (IST). Warm-up scans without executing; midday demands a
+    # stricter ratio (or pauses entirely); everything is flattened at square-off.
+    "SCALP_WARMUP_HOUR":    9,  "SCALP_WARMUP_MIN":    15,
+    "SCALP_MORNING_HOUR":   9,  "SCALP_MORNING_MIN":   45,
+    "SCALP_MIDDAY_HOUR":    11, "SCALP_MIDDAY_MIN":    30,
+    "SCALP_AFTERNOON_HOUR": 13, "SCALP_AFTERNOON_MIN": 30,
+    "SCALP_SQUAREOFF_HOUR": 14, "SCALP_SQUAREOFF_MIN": 45,
+    "SCALP_MIDDAY_ENABLED": True,   # False = pause the scanner through the chop
+
+    # Required weighted bid ÷ ask ratio per window (the time-of-day adaptive
+    # filter). Midday is deliberately much stricter than the trending windows.
+    "SCALP_RATIO_MORNING":   3.0,
+    "SCALP_RATIO_MIDDAY":    5.0,
+    "SCALP_RATIO_AFTERNOON": 3.0,
+
+    # W-OBI: decaying per-level weights, nearest touch first. Parsed by
+    # orderbook.parse_weights; fewer entries = a shallower book is considered.
+    "SCALP_OBI_WEIGHTS": "1.0,0.8,0.6,0.4,0.2",
+    "SCALP_MIN_LEVELS":  3,      # levels required on BOTH sides to evaluate at all
+
+    # Anti-spoofing / order-count filter. Both need per-level order counts; when
+    # the feed doesn't publish them, SCALP_REQUIRE_ORDER_DATA decides whether
+    # that blocks trading (True) or the filters are skipped (False — the default,
+    # matching depth_bullish's "absent data auto-passes" convention).
+    "SCALP_MIN_ORDER_COUNT":     50,     # aggregate bid-side orders required
+    "SCALP_ORDER_COUNT_DEPTH":   5,      # levels summed for that count
+    "SCALP_SPOOF_DEPTH":         2,      # check levels 1..N for a single-ticket wall
+    "SCALP_SPOOF_MIN_SHARE":     0.5,    # …holding ≥50% of displayed bid qty = reject
+    "SCALP_REQUIRE_ORDER_DATA":  False,
+
+    # Tape / traded-volume confirmation over a rolling window.
+    "SCALP_TAPE_WINDOW_S":       5.0,    # look-back for the tape statistics
+    "SCALP_TAPE_MAXLEN":         40,     # prints retained per symbol
+    "SCALP_MIN_TAPE_TRADES":     3,      # prints needed before the tape counts
+    "SCALP_MIN_TAPE_QTY":        500.0,  # aggressive BUY shares in the window
+    "SCALP_MIN_TAPE_BUY_RATIO":  0.6,    # buy ÷ (buy+sell) of directional volume
+    "SCALP_REQUIRE_ASK_HIT":     True,   # a recent print must trade AT the ask
+    "SCALP_ASK_HIT_WINDOW_S":    2.0,
+
+    # Microstructure guards.
+    "SCALP_MAX_BOOK_AGE_S":   2.0,    # older book = don't trade it
+    "SCALP_MAX_SPREAD_PCT":   0.10,   # % of price; the round trip pays it twice
+    "SCALP_MAX_SLIPPAGE_PCT": 0.10,   # tolerated gap between LTP and projected fill
+    "SCALP_ENTRY_AT_ASK":     True,   # market buy crosses the spread (realistic)
+
+    # Sizing, brackets and cost buffer.
+    "SCALP_ALLOC_PCT":              30.0,  # % of account equity of OWN funds per trade
+    "SCALP_RISK_MODE":              "fixed_amount",   # fixed_amount | capital_pct
+    "SCALP_RISK_PER_TRADE":         200.0, # ₹ risked per stop-out
+    "SCALP_RISK_CAPITAL_PERCENT":   0.5,   # 0.5 = a stop-out loses 0.5% of equity
+    "SCALP_SL_PCT":                 0.25,  # stop = 0.25% below the fill
+    "SCALP_MIN_SL_OFFSET":          0.10,  # ₹ floor, so a cheap stock can't get a
+                                           # sub-tick stop the first print takes out
+    "SCALP_RR_RATIO":               1.5,   # target = stop × this (1:1.5 R:R)
+    "SCALP_COST_BUFFER_MULT":       1.5,   # target must clear round-trip costs × this
+
+    # Risk guards (scalp book only — the account-wide DAILY_LOSS_LIMIT also applies)
+    "SCALP_MAX_CONCURRENT_POSITIONS": 3,
+    "SCALP_MAX_TRADES_PER_SYMBOL":    3,      # re-entries allowed per symbol per day
+    "SCALP_MAX_TRADES_PER_DAY":       20,
+    "SCALP_REENTRY_COOLDOWN_S":       60.0,   # after an exit, before re-entering it
+    "SCALP_DAILY_LOSS_LIMIT":         1_000.0,
+    "SCALP_MAX_HOLD_S":               300.0,  # time stop: flat if it hasn't worked
 
     # Backtest
     "BACKTEST_TIMEFRAME":   "5m",   # bar interval the replay steps through

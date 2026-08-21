@@ -1,3 +1,20 @@
+import sys
+
+# Force UTF-8 on stdout/stderr BEFORE anything can log. The app's log lines
+# carry Rs, arrows and em-dashes, and a Windows console defaults to cp1252,
+# where printing any of them raises UnicodeEncodeError. That is not cosmetic:
+# such a crash inside _run_premarket happens AFTER the Gemini call but BEFORE
+# _premarket_date is set, so the phase driver's retry loop would re-run the
+# (paid) AI screen every 5 seconds all day and never start trading. Docker is
+# already UTF-8; this protects `run.bat` / a local console run.
+# errors="replace" so a console that genuinely cannot render a glyph prints "?"
+# instead of taking the process down.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -60,6 +77,11 @@ app.mount("/js",  StaticFiles(directory="static/js"),  name="js")
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse("static/index.html")
+
+
+@app.get("/scalping")
+def scalping_page() -> FileResponse:
+    return FileResponse("static/scalping.html")
 
 
 @app.get("/backtest")
