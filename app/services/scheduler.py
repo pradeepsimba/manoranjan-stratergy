@@ -786,6 +786,21 @@ class SchedulerService:
             for name, c in live_recent.items()
         ]
 
+    @staticmethod
+    def _build_live_leader_rows_nf(st) -> list:
+        """NF mirror of _build_live_leader_rows — same per-second live snapshot, NF's 12 leaders."""
+        live_recent = {}
+        for name, token in cfg.NF_LEADER_STOCKS.items():
+            with st.candle_lock(token):
+                candles = list(st.candles_5m.get(token, []))
+            live_recent[name] = candles[-1:] if candles else []
+        surge = _nf_leader_qty_surge(live_recent)
+        return [
+            {"stock": name, "open": c[0].open if c else None, "close": c[0].close if c else None,
+             "volume": c[0].volume if c else None, "surged": surge.get(name, False)}
+            for name, c in live_recent.items()
+        ]
+
     def _build_payload(self) -> dict:
         st = get_state()
         clock = _now().strftime("%H:%M:%S")
@@ -862,6 +877,7 @@ class SchedulerService:
             token_to_name.get(tok, tok): [
                 {"startTime": c.start_time, "open": c.open, "close": c.close,
                  "high": c.high, "low": c.low, "volume": c.volume, "lastQty": c.last_qty,
+                 "buyQty": c.buy_qty, "sellQty": c.sell_qty,
                  "surged": (c.volume >= _stock_qty_threshold(token_to_name.get(tok, tok)))
                            if token_to_name.get(tok, tok) in cfg.BN_LEADER_STOCKS else False}
                 for c in candles[-_STOCK_TABLE_BARS:]
@@ -894,6 +910,7 @@ class SchedulerService:
             token_to_name_nf.get(tok, tok): [
                 {"startTime": c.start_time, "open": c.open, "close": c.close,
                  "high": c.high, "low": c.low, "volume": c.volume, "lastQty": c.last_qty,
+                 "buyQty": c.buy_qty, "sellQty": c.sell_qty,
                  "surged": (c.volume >= _nf_stock_qty_threshold(token_to_name_nf.get(tok, tok)))
                            if token_to_name_nf.get(tok, tok) in cfg.NF_LEADER_STOCKS else False}
                 for c in candles[-_STOCK_TABLE_BARS:]
@@ -927,6 +944,7 @@ class SchedulerService:
             "closedTradesNf": [_trade_dict(t) for t in st.closed_trades_nf],
             "entryLoopNf":    diag_nf,
             "liveLeaderRows": self._build_live_leader_rows(st),
+            "liveLeaderRowsNf": self._build_live_leader_rows_nf(st),
             "stockCandles": stock_candles,
             "globalSignal": global_signal,
             "breakout":     breakout,

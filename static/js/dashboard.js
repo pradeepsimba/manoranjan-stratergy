@@ -142,7 +142,7 @@ function render(d) {
   renderTrade(d.activeTradeNf, TRADE_IDS_NF);
   renderClosedTrades(d.closedTrades || [], d.closedTradesNf || []);
   renderEntryLoop(d.entryLoop, d.liveLeaderRows, ENTRY_IDS_BN);
-  renderEntryLoop(d.entryLoopNf, null, ENTRY_IDS_NF);
+  renderEntryLoop(d.entryLoopNf, d.liveLeaderRowsNf, ENTRY_IDS_NF);
 
   if (d.bnLtp) window._lastBnLtp = d.bnLtp;
   if (typeof renderGlobalSignal === 'function') {
@@ -219,10 +219,19 @@ function renderTrade(t, ids) {
 }
 
 // ── Closed trades ──────────────────────────────────────────────────────────────
+// Cached so setInstrumentFilter can re-filter immediately on toggle, without
+// waiting for the next STATE_UPDATE tick.
+let _lastClosedBn = [];
+let _lastClosedNf = [];
 
 function renderClosedTrades(bnTrades, nfTrades) {
-  const merged = bnTrades.map(t => ({ ...t, _instr: 'BN' }))
-    .concat((nfTrades || []).map(t => ({ ...t, _instr: 'NF' })))
+  _lastClosedBn = bnTrades;
+  _lastClosedNf = nfTrades || [];
+
+  const instrFilter = window._instrFilter || 'both';
+  const merged = _lastClosedBn.map(t => ({ ...t, _instr: 'BN' }))
+    .concat(_lastClosedNf.map(t => ({ ...t, _instr: 'NF' })))
+    .filter(t => instrFilter === 'both' || t._instr.toLowerCase() === instrFilter)
     .sort((a, b) => (a.exitTime || '').localeCompare(b.exitTime || ''));
 
   document.getElementById('closed-count').textContent = merged.length;
@@ -385,6 +394,7 @@ function renderEntryLoop(d, liveLeaderRows, ids) {
 // [data-instr] stat cards and panels. Persisted like the theme choice.
 
 function setInstrumentFilter(which) {
+  window._instrFilter = which;
   localStorage.setItem('instrFilter', which);
   document.querySelectorAll('[data-instr]').forEach(el => {
     el.style.display = (which === 'both' || el.dataset.instr === which) ? '' : 'none';
@@ -393,6 +403,10 @@ function setInstrumentFilter(which) {
     const btn = document.getElementById('instr-btn-' + w);
     if (btn) btn.classList.toggle('active', w === which);
   });
+  // "Today's Trades" isn't a [data-instr] panel (it stays visible in every
+  // view) — its ROWS filter by instrument instead, so re-apply immediately
+  // from the cached data rather than waiting for the next STATE_UPDATE tick.
+  renderClosedTrades(_lastClosedBn, _lastClosedNf);
 }
 
 setInstrumentFilter(localStorage.getItem('instrFilter') || 'both');
@@ -409,6 +423,35 @@ function toggleTableExpand(btn, wrapIds) {
   wraps.forEach(w => w.classList.toggle('expanded', expand));
   btn.textContent = expand ? 'Show fewer rows' : 'Show all rows';
 }
+
+// Pops a panel out of its half-width grid column to cover the page (see
+// .panel.fullview in dashboard.css) — real horizontal room for a wide table
+// instead of just a scrollbar. Esc, or clicking the button again, closes it.
+let _fullviewPanel = null;
+
+function toggleFullView(btn) {
+  const panel = btn.closest('.panel');
+  if (!panel) return;
+  const opening = panel !== _fullviewPanel;
+  if (_fullviewPanel) {
+    _fullviewPanel.classList.remove('fullview');
+    document.body.classList.remove('fullview-active');
+    _fullviewPanel = null;
+  }
+  if (opening) {
+    panel.classList.add('fullview');
+    document.body.classList.add('fullview-active');
+    _fullviewPanel = panel;
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && _fullviewPanel) {
+    _fullviewPanel.classList.remove('fullview');
+    document.body.classList.remove('fullview-active');
+    _fullviewPanel = null;
+  }
+});
 
 // ── Collapsible sections (c.html's toggleSection) ─────────────────────────────
 

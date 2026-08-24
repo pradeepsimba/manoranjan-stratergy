@@ -16,7 +16,9 @@ import asyncio
 import json
 import re
 from collections import deque as _deque
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import websockets
 import websockets.exceptions
@@ -25,8 +27,12 @@ import app.config as cfg
 from app.models import Candle, TradingPhase
 from app.state import get_state
 
+IST = ZoneInfo("Asia/Kolkata")
+
 _LTP_PAT = re.compile(r"LTP\s*([\d.]+)")
 _QTY_PAT = re.compile(r"qty\s+(\d+)", re.IGNORECASE)
+_BUY_QTY_PAT = re.compile(r"BuyQty\s+(\d+)")
+_SELL_QTY_PAT = re.compile(r"SellQty\s+(\d+)")
 
 _MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
@@ -74,12 +80,13 @@ class MarketDataService:
     async def _connect_loop(self) -> None:
         while self._running:
             try:
+                print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS connecting…")
                 await self._run_ws(self._build_filters())
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self.state.ws_status = f"WS Error: {e}"
-                print(f"WS error: {e}")
+                print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS error: {e}")
             if self._running:
                 await asyncio.sleep(5)
 
@@ -92,6 +99,7 @@ class MarketDataService:
             max_size=_WS_MAX_SIZE,
         ) as ws:
             self.state.ws_status = "WS Connected"
+            print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS connected")
 
             await ws.send(json.dumps({
                 "type":       "LIVE_FEED_INIT",
@@ -112,6 +120,8 @@ class MarketDataService:
                     print(f"Tick parse error: {e}")
 
         self.state.ws_status = "WS Disconnected"
+        print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS disconnected "
+              f"(loop ended — either the server closed the connection or shutdown was requested)")
 
     # ── Subscription filter builder ────────────────────────────────────────────
 
@@ -159,6 +169,27 @@ class MarketDataService:
                 except ValueError:
                     pass
 
+        # Cumulative pending buy/sell order quantity, embedded in the feed's
+        # `snap` text field (e.g. "...BuyQty 1111915 SellQty 1944411...") —
+        # confirmed present on the live server, same WS-only availability as
+        # last_qty above (historical REST bars never carry it).
+        buy_qty = sell_qty = 0.0
+        snap_raw = n.get("snap")
+        if snap_raw:
+            snap_str = str(snap_raw)
+            mb = _BUY_QTY_PAT.search(snap_str)
+            ms = _SELL_QTY_PAT.search(snap_str)
+            if mb:
+                try:
+                    buy_qty = float(mb.group(1))
+                except ValueError:
+                    pass
+            if ms:
+                try:
+                    sell_qty = float(ms.group(1))
+                except ValueError:
+                    pass
+
         candle = Candle(
             start_time=n.get("start_time", ""),
             open=float(n.get("open",   0)),
@@ -167,6 +198,8 @@ class MarketDataService:
             low=float(n.get("low",     0)),
             volume=float(n.get("volume", 0)),
             last_qty=last_qty,
+            buy_qty=buy_qty,
+            sell_qty=sell_qty,
         )
 
         # Parse LTP
@@ -252,6 +285,8 @@ class MarketDataService:
             idx_candles = self.state.bn_index_candles_5m
             prev = idx_candles[-1] if idx_candles else None
             is_new_bar = prev is None or prev.start_time != latest_time
+            if is_new_bar and prev is not None:
+                self._warn_if_gap("BankNifty", prev.start_time, latest_time)
 
             # Anchor the new bar's open to the PREVIOUS bar's close — only at
             # the moment it actually rolls over, so weighted_pct (a full-bar %
@@ -296,6 +331,8 @@ class MarketDataService:
             idx_candles = self.state.nf_index_candles_5m
             prev = idx_candles[-1] if idx_candles else None
             is_new_bar = prev is None or prev.start_time != latest_time
+            if is_new_bar and prev is not None:
+                self._warn_if_gap("Nifty 50", prev.start_time, latest_time)
 
             if is_new_bar and prev is not None:
                 self.state.nf_synthetic_anchor = prev.close
@@ -310,6 +347,26 @@ class MarketDataService:
             self._upsert_list(idx_candles, synthetic)
 
         self.state.nf_index_ltp = close_
+
+    @staticmethod
+    def _warn_if_gap(label: str, prev_start: str, new_start: str) -> None:
+        """
+        Diagnostic only — the synthetic index (BN or NF) advances reactively
+        off whichever constituent tick has the latest timestamp; it has no
+        backfill, so any WS interruption longer than one 5m bar leaves a
+        silent gap (the next real tick just picks up wherever "now" is).
+        Logs it so a gap is diagnosable from server logs rather than only
+        noticeable as an odd-looking jump in the Stock Candles table.
+        """
+        try:
+            prev_dt = datetime.fromisoformat(prev_start)
+            new_dt = datetime.fromisoformat(new_start)
+        except ValueError:
+            return
+        gap_minutes = (new_dt - prev_dt).total_seconds() / 60.0
+        if gap_minutes > 10:   # more than one missed 5m bar
+            print(f"Synthetic {label} index gap: {prev_start} -> {new_start} "
+                  f"({gap_minutes:.0f} min) — likely a WS interruption in between")
 
     # ── Candle upsert helpers ─────────────────────────────────────────────────
 

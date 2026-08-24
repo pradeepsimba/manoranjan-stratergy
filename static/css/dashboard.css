@@ -298,6 +298,19 @@ body {
   box-shadow: 0 1px 6px rgba(0,0,0,.4);
 }
 
+/* "Full view" toggle (Stock Candles panels) — pops the panel out of its
+   half-width grid column to cover the page, so a wide table (15 bars ×
+   32 stocks) gets real horizontal room instead of only a scrollbar. */
+.panel.fullview {
+  position: fixed;
+  inset: 12px;
+  z-index: 200;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,.6);
+}
+.panel.fullview .tbl-wrap { max-height: none; }
+body.fullview-active { overflow: hidden; }
+
 .panel-header {
   display: flex;
   align-items: center;
@@ -412,6 +425,10 @@ tbody tr:hover td      { background: var(--surf-hover); }
 }
 
 .muted-text { color: var(--txt-3); font-size: 12px; }
+
+/* Stock Candles table header — per-column green/red tally under the bar time */
+.tally-g { color: var(--pos); font-size: 11px; font-weight: 700; }
+.tally-r { color: var(--neg); font-size: 11px; font-weight: 700; }
 
 .stock-chip {
   display: inline-flex;
@@ -986,12 +1003,19 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 }
 .breakout-banner b { color: var(--txt); }
 .candle-cell {
-  display: inline-block; min-width: 56px; padding: 3px 6px; border-radius: 4px;
-  font-size: 11px; text-align: center; font-weight: 600; white-space: nowrap;
+  display: inline-block; min-width: 68px; padding: 5px 9px; border-radius: 4px;
+  font-size: 13px; text-align: center; font-weight: 600; white-space: nowrap;
 }
 .candle-cell.positive { background: var(--pos); color: #04130a; }
 .candle-cell.negative { background: var(--neg); color: #1a0505; }
 .candle-cell.neutral  { background: var(--surf-high); color: var(--txt-2); }
+.candle-oc { font-size: 9px; font-weight: 400; opacity: .85; white-space: nowrap; }
+
+.oc-toggle-label {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: var(--txt-2); cursor: pointer; user-select: none;
+}
+.oc-toggle-label input { cursor: pointer; }
 .sr-table td, .sr-table th { font-size: 11px; white-space: nowrap; }
 
 /* ── Trade Dashboard: funds bar + Kite manual-order form (decorative) ─────── */

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Settings · Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Runtime strategy, risk and session settings">
-  <link rel="stylesheet" href="/css/dashboard.css?v=12">
+  <link rel="stylesheet" href="/css/dashboard.css?v=26">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -161,6 +161,11 @@
     <input class="field-input set-search" id="set-search" type="text"
            placeholder="Filter settings…" oninput="filterSettings(this.value)">
     <button class="btn-mini" onclick="resetAll()" title="Reset every setting to its default">Reset all</button>
+    <div class="nav-seg" id="settings-instr-filter" aria-label="Instrument settings">
+      <button id="settings-instr-btn-both" onclick="setSettingsInstrFilter('both')">Both</button>
+      <button id="settings-instr-btn-bn" onclick="setSettingsInstrFilter('bn')">BankNifty</button>
+      <button id="settings-instr-btn-nf" onclick="setSettingsInstrFilter('nf')">Nifty 50</button>
+    </div>
     <nav class="nav-seg" aria-label="Pages">
       <a href="/">Dashboard</a>
       <a href="/settings" class="active">Settings</a>
@@ -197,7 +202,7 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="/js/util.js"></script>
-<script src="/js/settings.js"></script>
+<script src="/js/util.js?v=26"></script>
+<script src="/js/settings.js?v=26"></script>
 </body>
 </html>

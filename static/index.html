@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
-  <link rel="stylesheet" href="/css/dashboard.css?v=18">
+  <link rel="stylesheet" href="/css/dashboard.css?v=28">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -389,8 +389,20 @@
       <div class="panel-header">
         <span class="panel-title">Stock Candles</span>
         <div>
+          <select class="field-input" id="stock-bars-select" style="width:auto;display:inline-block"
+            onchange="setStockBarsCount(this.value)" title="Bars shown per stock">
+            <option value="4">Last 4 bars</option>
+            <option value="6">Last 6 bars</option>
+            <option value="8">Last 8 bars</option>
+            <option value="10">Last 10 bars</option>
+            <option value="15">Last 15 bars</option>
+          </select>
+          <label class="oc-toggle-label" title="Print each cell's raw open/close values for verification">
+            <input type="checkbox" id="show-oc-toggle" onchange="setShowOC(this.checked)"> O/C
+          </label>
           <button class="btn-mini" id="stock-candles-expand-btn"
             onclick="toggleTableExpand(this, ['stock-table-wrap', 'sr-table-wrap'])">Show all rows</button>
+          <button class="btn-mini" onclick="toggleFullView(this)" title="Expand this panel to the full page width">⛶ Full view</button>
           <button class="dash-toggle" data-target="stock-candles-body" onclick="toggleSection(this)">▼</button>
         </div>
       </div>
@@ -423,8 +435,20 @@
       <div class="panel-header">
         <span class="panel-title">Nifty 50 Stock Candles</span>
         <div>
+          <select class="field-input" id="stock-bars-select-nf" style="width:auto;display:inline-block"
+            onchange="setStockBarsCount(this.value)" title="Bars shown per stock">
+            <option value="4">Last 4 bars</option>
+            <option value="6">Last 6 bars</option>
+            <option value="8">Last 8 bars</option>
+            <option value="10">Last 10 bars</option>
+            <option value="15">Last 15 bars</option>
+          </select>
+          <label class="oc-toggle-label" title="Print each cell's raw open/close values for verification">
+            <input type="checkbox" id="show-oc-toggle-nf" onchange="setShowOC(this.checked)"> O/C
+          </label>
           <button class="btn-mini" id="stock-candles-nf-expand-btn"
             onclick="toggleTableExpand(this, ['stock-table-nf-wrap', 'sr-table-nf-wrap'])">Show all rows</button>
+          <button class="btn-mini" onclick="toggleFullView(this)" title="Expand this panel to the full page width">⛶ Full view</button>
           <button class="dash-toggle" data-target="stock-candles-nf-body" onclick="toggleSection(this)">▼</button>
         </div>
       </div>
@@ -540,10 +564,10 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="/js/util.js?v=18"></script>
-<script src="/js/breakout.js?v=18"></script>
-<script src="/js/qtyAudit.js?v=18"></script>
-<script src="/js/kiteForm.js?v=18"></script>
-<script src="/js/dashboard.js?v=18"></script>
+<script src="/js/util.js?v=28"></script>
+<script src="/js/breakout.js?v=28"></script>
+<script src="/js/qtyAudit.js?v=28"></script>
+<script src="/js/kiteForm.js?v=28"></script>
+<script src="/js/dashboard.js?v=28"></script>
 </body>
 </html>

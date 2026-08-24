@@ -96,6 +96,11 @@ function render() {
     const overridden = rendered.filter(s => s.overridden).length;
     const panel = document.createElement('div');
     panel.className = 'panel';
+    // BN Strategy/BN Qty Surge/BN Risk/BN Options Pricing/BN Options Costs →
+    // "bn"; the NF mirrors → "nf"; Session Timings/Engine/Backtest are
+    // shared (no tag — always shown regardless of the instrument filter).
+    if (g.name.startsWith('BN ')) panel.dataset.instr = 'bn';
+    else if (g.name.startsWith('NF ')) panel.dataset.instr = 'nf';
     const rows = own.map(s => {
       let html = rowHtml(s, false);
       // A condition toggle with linked values: render them indented below it.
@@ -135,10 +140,27 @@ let _filter = '';
 
 function filterSettings(q) { _filter = (q || '').trim().toLowerCase(); applyFilter(); }
 
+// Which instrument's groups to show — independent of the dashboard's own
+// Both/BankNifty/Nifty 50 toggle (separate localStorage key), and defaults
+// to Nifty 50 here rather than Both.
+let _settingsInstrFilter = localStorage.getItem('settingsInstrFilter') || 'nf';
+
+function setSettingsInstrFilter(which) {
+  _settingsInstrFilter = which;
+  localStorage.setItem('settingsInstrFilter', which);
+  ['both', 'bn', 'nf'].forEach(w => {
+    const btn = document.getElementById('settings-instr-btn-' + w);
+    if (btn) btn.classList.toggle('active', w === which);
+  });
+  applyFilter();
+}
+
 function applyFilter() {
   const q = _filter;
   let anyVisible = false;
   wrap.querySelectorAll('.panel').forEach(panel => {
+    const instrOk = _settingsInstrFilter === 'both'
+      || !panel.dataset.instr || panel.dataset.instr === _settingsInstrFilter;
     let shown = 0;
     panel.querySelectorAll('.set-row').forEach(row => {
       const hay = (row.textContent + ' ' + (row.getAttribute('data-row') || '')).toLowerCase();
@@ -146,8 +168,9 @@ function applyFilter() {
       row.classList.toggle('filtered-out', !hit);
       if (hit) shown++;
     });
-    panel.classList.toggle('filtered-out', shown === 0);
-    if (shown > 0) anyVisible = true;
+    const visible = instrOk && shown > 0;
+    panel.classList.toggle('filtered-out', !visible);
+    if (visible) anyVisible = true;
   });
   let nr = document.getElementById('no-results');
   if (q && !anyVisible) {
@@ -264,4 +287,8 @@ function toast(msg, ok) {
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 
+['both', 'bn', 'nf'].forEach(w => {
+  const btn = document.getElementById('settings-instr-btn-' + w);
+  if (btn) btn.classList.toggle('active', w === _settingsInstrFilter);
+});
 loadSettings();

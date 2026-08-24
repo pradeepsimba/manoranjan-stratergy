@@ -36,6 +36,12 @@ class Candle:            # cuts per-instance memory ~40% and speeds attribute ac
     # parsed from the feed's `quote` text (e.g. "...qty 91..."). Historical
     # REST bars never carry this (only live WS ticks do) — defaults to 0.
     last_qty:   float = 0.0
+    # Cumulative pending buy/sell order quantity at the moment of this tick,
+    # parsed from the feed's `snap` text (e.g. "...BuyQty 1111915 SellQty
+    # 1944411..."). Same live-WS-only availability as last_qty above —
+    # historical REST bars never carry this, defaults to 0.
+    buy_qty:    float = 0.0
+    sell_qty:   float = 0.0
 
     def is_bullish(self) -> bool: return self.close > self.open
     def is_bearish(self) -> bool: return self.close < self.open
