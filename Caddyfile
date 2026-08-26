@@ -1,0 +1,20 @@
+:8443 {
+	# Caddy's own internal CA (not a real cert) — self-signed, persisted in
+	# the caddy_data volume so it's stable across container restarts (a new
+	# CA each restart would mean re-clicking through the browser warning
+	# every time). Purely to satisfy browsers' "secure context" requirement
+	# for the Notification API — see static/js/alerts.js's LAN-access note.
+	tls internal
+
+	# Same app, same single process — this is a TLS-terminating proxy only,
+	# never a second copy of it (the scheduler/WebSocket feed/AppState are
+	# an in-process singleton; running a second `main:app` process would
+	# duplicate the live trading engine — see CLAUDE.md).
+	#
+	# {$UPSTREAM} lets this ONE Caddyfile serve both setups: the Docker
+	# Compose "caddy" service sets UPSTREAM=app:8080 (Docker's internal DNS
+	# name for the app container); running Caddy natively on the host (no
+	# Docker) needs no env var at all — `python main.py` listens on
+	# localhost:8080 directly.
+	reverse_proxy {$UPSTREAM:localhost:8080}
+}

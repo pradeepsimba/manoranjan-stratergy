@@ -113,9 +113,14 @@ function _candleCellHtml(bar, showOC) {
   const cls = diff > 0 ? 'positive' : diff < 0 ? 'negative' : 'neutral';
   const content = _floorToTwo(Math.abs(diff));
   const time = bar.startTime ? bar.startTime.substring(11, 16) : '';
-  const title = `${time} Open:${bar.open.toFixed(2)} Close:${bar.close.toFixed(2)}`;
+  // The number shown/here is a raw POINT difference, not a %, and the
+  // per-stock alert thresholds (Settings → BN/NF Alerts) are set in % —
+  // spell out the % here so it's not mistaken for one at a glance (see
+  // static/js/alerts.js's checkPriceAlerts, which uses this same % move).
+  const movePct = Math.abs(diff) / bar.open * 100;
+  const title = `${time} Open:${bar.open.toFixed(2)} Close:${bar.close.toFixed(2)} (${movePct.toFixed(3)}% move)`;
   const ocLine = showOC
-    ? `<br><span class="candle-oc">O:${bar.open.toFixed(2)} C:${bar.close.toFixed(2)}</span>`
+    ? `<br><span class="candle-oc">O:${bar.open.toFixed(2)} C:${bar.close.toFixed(2)} (${movePct.toFixed(2)}%)</span>`
     : '';
   return `<span class="candle-cell ${cls}" title="${title}">${content}${ocLine}</span>`;
 }

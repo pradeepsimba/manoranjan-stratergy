@@ -23,7 +23,7 @@ pip install -r requirements.txt
 python main.py                # serves http://0.0.0.0:8080
 ```
 
-- Dashboard: `http://localhost:8080` (live status, active trade, entry-loop diagnostics, backtest runner).
+- Dashboard: `http://localhost:8080` when run locally via `python main.py`; via Docker Compose it's host port **8001** (mapped to the container's 8080 — see `docker-compose.yml`), i.e. `http://localhost:8001`. An optional `caddy` sidecar (same compose file) also fronts the app with a self-signed HTTPS cert on `:8443`, purely so the dashboard's browser-notification alerts (which require a secure context) work over the LAN — see `static/js/alerts.js`.
 - `TA-Lib` (the Python pkg) needs the **native C library** present at build time — the Dockerfile compiles it; for a local venv install it on the host first (`brew install ta-lib`, or build from source).
 - There is **no test suite**. Validate changes with `python -m compileall -q app main.py` and by reading the flow.
 

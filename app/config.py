@@ -97,6 +97,21 @@ BN_QTY_THRESHOLD_ATTR: Dict[str, str] = {
     "INDUSIND BANK":        "BN_QTY_THRESHOLD_INDUSIND",
 }
 
+# Per-stock dashboard price-move alert threshold wiring (client-side only —
+# see static/js/alerts.js) — same "which stock uses which settings key" shape
+# as BN_QTY_THRESHOLD_ATTR above, not itself a tunable. Values are in raw
+# index/stock POINTS (matching the Stock Candles table's own cell numbers
+# directly), not a % — an explicit user decision, since % obscures the
+# relationship to what's actually displayed on screen.
+BN_PRICE_ALERT_ATTR: Dict[str, str] = {
+    "HDFC BANK":            "BN_PRICE_ALERT_PTS_HDFC",
+    "ICICI BANK":           "BN_PRICE_ALERT_PTS_ICICI",
+    "STATE BANK OF INDIA":  "BN_PRICE_ALERT_PTS_SBI",
+    "AXIS BANK":            "BN_PRICE_ALERT_PTS_AXIS",
+    "KOTAK BANK":           "BN_PRICE_ALERT_PTS_KOTAK",
+    "INDUSIND BANK":        "BN_PRICE_ALERT_PTS_INDUSIND",
+}
+
 # All 11 stocks fetched/displayed (matches c.html's own universe, 12 tokens
 # total together with the index) — the 6
 # beyond the leaders never feed the entry decision but are kept for display /
@@ -177,6 +192,22 @@ NF_QTY_THRESHOLD_ATTR: Dict[str, str] = {
     "AXIS BANK":                "NF_QTY_THRESHOLD_AXIS",
     "STATE BANK OF INDIA":      "NF_QTY_THRESHOLD_SBI",
     "HINDUSTAN UNILEVER":       "NF_QTY_THRESHOLD_HUL",
+}
+
+# NF mirror of BN_PRICE_ALERT_ATTR above — also raw points, not %.
+NF_PRICE_ALERT_ATTR: Dict[str, str] = {
+    "HDFC BANK":                "NF_PRICE_ALERT_PTS_HDFC",
+    "RELIANCE INDUSTRIES":      "NF_PRICE_ALERT_PTS_RELIANCE",
+    "ICICI BANK":               "NF_PRICE_ALERT_PTS_ICICI",
+    "INFOSYS":                  "NF_PRICE_ALERT_PTS_INFY",
+    "BHARTI AIRTEL":            "NF_PRICE_ALERT_PTS_BHARTIARTL",
+    "ITC":                      "NF_PRICE_ALERT_PTS_ITC",
+    "HCL TECHNOLOGIES":         "NF_PRICE_ALERT_PTS_HCLTECH",
+    "LARSEN & TOUBRO":          "NF_PRICE_ALERT_PTS_LT",
+    "KOTAK BANK":               "NF_PRICE_ALERT_PTS_KOTAK",
+    "AXIS BANK":                "NF_PRICE_ALERT_PTS_AXIS",
+    "STATE BANK OF INDIA":      "NF_PRICE_ALERT_PTS_SBI",
+    "HINDUSTAN UNILEVER":       "NF_PRICE_ALERT_PTS_HUL",
 }
 
 # All 32 stocks fetched/displayed — the 20 beyond the leaders never feed the
@@ -381,6 +412,45 @@ _DEFAULTS: Dict[str, Any] = {
     "NF_COST_TXN_PCT":        0.0005,
     "NF_COST_GST_PCT":        0.18,
     "NF_COST_SEBI_PCT":       0.000001,
+
+    # ── Dashboard price-move alerts (browser Notification API, client-side
+    # only — not read anywhere in the trading engine) — per-leader-stock,
+    # fires when THAT stock's latest bar |close-open| move exceeds its own
+    # threshold, in raw POINTS (see BN_PRICE_ALERT_ATTR/NF_PRICE_ALERT_ATTR
+    # above — matches the Stock Candles table's own cell numbers directly,
+    # an explicit user decision over %, which obscures that relationship).
+    # Defaults are ballparked per stock's own price level (roughly what a
+    # 0.5% move would have been), not one flat number — a flat points value
+    # would be trivially crossed on an expensive stock (e.g. LT ~4000) and
+    # nearly unreachable on a cheap one (e.g. KOTAK ~400). Recalibrate from
+    # observed live bars, same caveat as the qty-surge thresholds.
+    "BN_PRICE_ALERT_PTS_HDFC":     3.5,   # ~725
+    "BN_PRICE_ALERT_PTS_ICICI":    7.0,   # ~1413
+    "BN_PRICE_ALERT_PTS_SBI":      5.0,   # ~1035
+    "BN_PRICE_ALERT_PTS_AXIS":     6.0,   # ~1237
+    "BN_PRICE_ALERT_PTS_KOTAK":    2.0,   # ~398
+    "BN_PRICE_ALERT_PTS_INDUSIND": 5.0,   # ~1015
+
+    "NF_PRICE_ALERT_PTS_HDFC":       3.5,   # ~725
+    "NF_PRICE_ALERT_PTS_RELIANCE":   6.5,   # ~1300
+    "NF_PRICE_ALERT_PTS_ICICI":      7.0,   # ~1413
+    "NF_PRICE_ALERT_PTS_INFY":       5.5,   # ~1130
+    "NF_PRICE_ALERT_PTS_BHARTIARTL": 9.5,   # ~1945
+    "NF_PRICE_ALERT_PTS_ITC":        1.5,   # ~270
+    "NF_PRICE_ALERT_PTS_HCLTECH":    8.0,   # ~1600
+    "NF_PRICE_ALERT_PTS_LT":         20.0,  # ~4077
+    "NF_PRICE_ALERT_PTS_KOTAK":      2.0,   # ~398
+    "NF_PRICE_ALERT_PTS_AXIS":       6.0,   # ~1237
+    "NF_PRICE_ALERT_PTS_SBI":        5.0,   # ~1035
+    "NF_PRICE_ALERT_PTS_HUL":        10.0,  # ~2043
+
+    # "Leader consensus" alert — fires when at least this many leaders have
+    # BOTH crossed their own BN_PRICE_ALERT_PTS_*/NF_PRICE_ALERT_PTS_*
+    # threshold AND are moving the same direction (all up or all down) on
+    # the same tick. Separate from (and in addition to) the per-stock alert
+    # above. Client-side only, see static/js/alerts.js.
+    "BN_ALERT_CONSENSUS_REQUIRED": 4,   # of 6 leaders
+    "NF_ALERT_CONSENSUS_REQUIRED": 8,   # of 12 leaders
 }
 
 _runtime_overrides: Dict[str, Any] = {}

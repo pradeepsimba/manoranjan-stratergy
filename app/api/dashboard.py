@@ -14,6 +14,7 @@ from pydantic import BaseModel
 import app.config as cfg
 import app.services.settings as settings
 from app.backtest.engine import run_backtest
+from app.backtest.signal_study import run_bn_leader_consensus_study
 from app.state import get_state
 from app.ws.dashboard_ws import ws_manager
 
@@ -104,6 +105,18 @@ def get_prices() -> Dict[str, float]:
     prices = {cfg.BN_INDEX_NAME: st.bn_index_ltp, cfg.NF_INDEX_NAME: st.nf_index_ltp}
     prices.update(st.ltp)
     return prices
+
+
+# ── Leader-consensus signal study (NOT the options P&L backtest below) ────────
+# Synchronous — cheap enough (a handful of days x ~75 bars x 6 stocks, no
+# option pricing) to run inline rather than via the run_id/poll pattern the
+# real backtest needs.
+
+@router.post("/api/signal-study/bn")
+async def bn_signal_study() -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    return await run_bn_leader_consensus_study(_db)
 
 
 # ── Backtest ──────────────────────────────────────────────────────────────────

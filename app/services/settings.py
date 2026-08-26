@@ -212,12 +212,69 @@ SPEC: List[Dict[str, Any]] = [
     _s("NF_COST_TXN_PCT", "Exchange txn (fraction)", "float", "NF Options Costs", min_=0, max_=0.01, step=0.00001, bt=False),
     _s("NF_COST_GST_PCT", "GST (fraction)", "float", "NF Options Costs", min_=0, max_=1, step=0.01, bt=False),
     _s("NF_COST_SEBI_PCT", "SEBI fee (fraction)", "float", "NF Options Costs", min_=0, max_=0.001, step=0.000001, bt=False),
+
+    # ── Dashboard price-move alerts — client-side only (browser Notification
+    # API), never read by the trading engine itself; see static/js/alerts.js.
+    # Per leader stock (BN_PRICE_ALERT_ATTR/NF_PRICE_ALERT_ATTR wiring), in
+    # raw POINTS — matches the Stock Candles table's own cell numbers
+    # directly (an explicit user decision over %, which obscures that
+    # relationship and was a recurring source of confusion). Split into
+    # "BN Alerts"/"NF Alerts" (not one "Alerts" group) so the Settings
+    # page's BankNifty/Nifty 50 instrument filter can tell them apart —
+    # that filter keys off the "BN "/"NF " group-name prefix, same as every
+    # other group.
+    _s("BN_PRICE_ALERT_PTS_HDFC", "HDFC BANK move alert (pts)", "float", "BN Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False,
+       help_="Browser notification when this leader's latest bar |close-open| move exceeds this many points."),
+    _s("BN_PRICE_ALERT_PTS_ICICI", "ICICI BANK move alert (pts)", "float", "BN Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("BN_PRICE_ALERT_PTS_SBI", "STATE BANK OF INDIA move alert (pts)", "float", "BN Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("BN_PRICE_ALERT_PTS_AXIS", "AXIS BANK move alert (pts)", "float", "BN Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("BN_PRICE_ALERT_PTS_KOTAK", "KOTAK BANK move alert (pts)", "float", "BN Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("BN_PRICE_ALERT_PTS_INDUSIND", "INDUSIND BANK move alert (pts)", "float", "BN Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("BN_ALERT_CONSENSUS_REQUIRED", "Leaders required for consensus alert", "int", "BN Alerts",
+       min_=1, max_=6, bt=False,
+       help_="Separate alert when at least this many of the 6 leaders cross their own move-alert threshold in the SAME direction."),
+
+    _s("NF_PRICE_ALERT_PTS_HDFC", "HDFC BANK move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False,
+       help_="Browser notification when this leader's latest bar |close-open| move exceeds this many points."),
+    _s("NF_PRICE_ALERT_PTS_RELIANCE", "RELIANCE INDUSTRIES move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_ICICI", "ICICI BANK move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_INFY", "INFOSYS move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_BHARTIARTL", "BHARTI AIRTEL move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_ITC", "ITC move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_HCLTECH", "HCL TECHNOLOGIES move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_LT", "LARSEN & TOUBRO move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_KOTAK", "KOTAK BANK move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_AXIS", "AXIS BANK move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_SBI", "STATE BANK OF INDIA move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_PRICE_ALERT_PTS_HUL", "HINDUSTAN UNILEVER move alert (pts)", "float", "NF Alerts",
+       min_=0.1, max_=500, step=0.1, bt=False),
+    _s("NF_ALERT_CONSENSUS_REQUIRED", "Leaders required for consensus alert", "int", "NF Alerts",
+       min_=1, max_=12, bt=False,
+       help_="Separate alert when at least this many of the 12 leaders cross their own move-alert threshold in the SAME direction."),
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
 GROUP_ORDER = ["Session Timings", "BN Strategy", "BN Qty Surge", "BN Risk", "BN Options Pricing",
-               "BN Options Costs", "Engine", "Backtest",
-               "NF Strategy", "NF Qty Surge", "NF Risk", "NF Options Pricing", "NF Options Costs"]
+               "BN Options Costs", "BN Alerts", "Engine", "Backtest",
+               "NF Strategy", "NF Qty Surge", "NF Risk", "NF Options Pricing", "NF Options Costs",
+               "NF Alerts"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.

@@ -996,6 +996,16 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 }
 .global-signal-badge b { font-weight: 800; }
 .global-signal-badge small { color: var(--txt-2); font-size: 11px; }
+
+/* Live count of leaders currently past their own move-alert threshold (see
+   static/js/alerts.js) — same visual weight as .global-signal-badge, sits
+   right below it. */
+.alert-threshold-badge {
+  padding: 6px 12px; border-radius: var(--r-sm);
+  background: var(--surf-raised); border: 1px solid var(--edge-soft);
+  margin-bottom: 8px; font-size: 12px; color: var(--txt-2);
+}
+.alert-threshold-badge.has-crossed { color: var(--warn); border-color: var(--warn-edge); background: var(--warn-bg); }
 .breakout-banner {
   padding: 8px 12px; border-radius: var(--r-sm);
   background: var(--surf-raised); border: 1px solid var(--edge-soft);
@@ -1016,6 +1026,10 @@ a:focus-visible, button:focus-visible, input:focus-visible,
   font-size: 11px; color: var(--txt-2); cursor: pointer; user-select: none;
 }
 .oc-toggle-label input { cursor: pointer; }
+
+#alerts-btn.active {
+  background: var(--pos-bg); color: var(--pos); border-color: var(--pos-edge);
+}
 .sr-table td, .sr-table th { font-size: 11px; white-space: nowrap; }
 
 /* ── Trade Dashboard: funds bar + Kite manual-order form (decorative) ─────── */

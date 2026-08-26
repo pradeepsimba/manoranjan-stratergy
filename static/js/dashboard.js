@@ -143,6 +143,7 @@ function render(d) {
   renderClosedTrades(d.closedTrades || [], d.closedTradesNf || []);
   renderEntryLoop(d.entryLoop, d.liveLeaderRows, ENTRY_IDS_BN);
   renderEntryLoop(d.entryLoopNf, d.liveLeaderRowsNf, ENTRY_IDS_NF);
+  if (typeof checkAllPriceAlerts === 'function') checkAllPriceAlerts(d.liveLeaderRows, d.liveLeaderRowsNf);
 
   if (d.bnLtp) window._lastBnLtp = d.bnLtp;
   if (typeof renderGlobalSignal === 'function') {
@@ -237,7 +238,7 @@ function renderClosedTrades(bnTrades, nfTrades) {
   document.getElementById('closed-count').textContent = merged.length;
   const tbody = document.getElementById('closed-tbody');
   if (!merged.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-cell">No trades yet today</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="empty-cell">No trades yet today</td></tr>';
     return;
   }
   const html = merged.slice().reverse().map(t => {
@@ -247,6 +248,8 @@ function renderClosedTrades(bnTrades, nfTrades) {
       <td data-label="Instr"><span class="badge ${t._instr === 'NF' ? 'blue' : 'gray'}">${t._instr}</span></td>
       <td data-label="Dir">${escHtml(t.direction)}</td>
       <td data-label="Option">${t.strike} ${escHtml(t.optionType)}</td>
+      <td data-label="Entry Time" class="time-col">${fmtDTS(t.entryTime)}</td>
+      <td data-label="Exit Time" class="time-col">${fmtDTS(t.exitTime)}</td>
       <td data-label="Entry Idx">${fmt2(t.entryIndexPrice)}</td>
       <td data-label="Exit Idx">${fmt2(t.exitIndexPrice)}</td>
       <td data-label="Entry Prem">${fmt2(t.entryPremium)}</td>
@@ -896,6 +899,21 @@ function fmtDT(s) {
   try {
     const d = s.substring(0, 10);
     const t = s.substring(11, 16);
+    const [yy, mm, dd] = d.split('-');
+    return `${parseInt(dd,10)} ${MON[parseInt(mm,10)-1]} ${yy} ${t}`;
+  } catch { return s; }
+}
+
+// Entry/exit on "Today's Trades" can legitimately be seconds apart (the
+// tick-wise exit check runs every ~100ms on live index price, not on 5m bar
+// boundaries) — fmtDT's minute-only granularity makes two distinct moments
+// look identical, so this table specifically needs seconds to verify them.
+function fmtDTS(s) {
+  if (!s) return '—';
+  const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  try {
+    const d = s.substring(0, 10);
+    const t = s.substring(11, 19);
     const [yy, mm, dd] = d.split('-');
     return `${parseInt(dd,10)} ${MON[parseInt(mm,10)-1]} ${yy} ${t}`;
   } catch { return s; }
