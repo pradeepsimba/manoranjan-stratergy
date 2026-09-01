@@ -10,9 +10,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      # Host 8001 -> container 8080 (the actual address in use:
-      # http://192.168.0.114:8001 — CLAUDE.md's documented 8080 was stale).
-      - "8001:8080"
+      # Host 8082 -> container 8080 (the actual address in use:
+      # http://192.168.0.114:8082 — CLAUDE.md's documented 8080 was stale).
+      - "8082:8080"
 
   # TLS-terminating reverse proxy in front of the SAME app container above —
   # not a second copy of it (the scheduler/WebSocket feed/AppState are an
