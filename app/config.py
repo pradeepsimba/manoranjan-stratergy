@@ -38,7 +38,7 @@ WS_URL            = f"ws://{API_HOST}:8083/historical-data"
 # ── Static: credentials / DSN ─────────────────────────────────────────────────
 POSTGRES_DSN = os.getenv(
     "POSTGRES_DSN",
-    "postgresql://postgres:postgres@localhost/trading_db",
+    "postgresql://postgres:postgres@localhost/mano_trading_db",
 )
 
 # ── Static: data intervals ────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import threading
-from typing import Dict, List, Optional
+from collections import deque
+from typing import Deque, Dict, List, Optional
 
+import app.config as cfg
 from app.models import BNDiagnostic, BNTrade, Candle, NFDiagnostic, NFTrade, TradingPhase
 
 
@@ -33,7 +35,10 @@ class AppState:
         # TOKEN. Capped at 300 bars (deque maxlen set on assignment). ─────────
         self.candles_5m: Dict[str, List[Candle]] = {}
         self.tick_version: Dict[str, int] = {}
-        self.bn_index_candles_5m: List[Candle] = []
+        # deque(maxlen=...), not a plain list — MarketDataService._upsert_list
+        # relies on maxlen for O(1) eviction of the oldest bar once the buffer
+        # is full, matching the deque-per-token stores in candles_5m.
+        self.bn_index_candles_5m: Deque[Candle] = deque(maxlen=cfg.MAX_CANDLE_BUFFER)
 
         # ── Live prices (keyed by SYMBOL NAME; BankNifty index kept separately) ─
         self.ltp:          Dict[str, float] = {}
@@ -84,7 +89,7 @@ class AppState:
         # SHARED across both instruments — no separate store needed there.
         # funds/daily_pnl are also SHARED (one paper account, two strategies)
         # — only per-instrument STRATEGY EXECUTION state is separate. ───────
-        self.nf_index_candles_5m: List[Candle] = []
+        self.nf_index_candles_5m: Deque[Candle] = deque(maxlen=cfg.MAX_CANDLE_BUFFER)
         self.nf_index_ltp:        float        = 0.0
         self.nf_index_synthetic:  bool         = True
         self.nf_synthetic_anchor: float        = 0.0

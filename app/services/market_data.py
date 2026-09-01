@@ -385,7 +385,9 @@ class MarketDataService:
         # would break the chronological order every scan relies on; drop it.
 
     @staticmethod
-    def _upsert_list(lst: list, candle: Candle) -> None:
+    def _upsert_list(lst: "_deque[Candle]", candle: Candle) -> None:
+        """lst is a deque(maxlen=...) (state.bn_index_candles_5m/nf_index_candles_5m)
+        — append relies on maxlen for O(1) eviction, matching _upsert above."""
         if not lst:
             lst.append(candle)
             return
@@ -393,6 +395,5 @@ class MarketDataService:
         if last == candle.start_time:
             lst[-1] = candle
         elif candle.start_time > last:
-            lst.append(candle)
-            if len(lst) > _MAX_CANDLES:
-                lst.pop(0)
+            lst.append(candle)   # deque(maxlen) auto-evicts from left — O(1)
+        # else: stale out-of-order bar (e.g. reconnect replay) — drop it.

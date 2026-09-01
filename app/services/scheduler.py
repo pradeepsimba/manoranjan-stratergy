@@ -145,8 +145,6 @@ class SchedulerService:
             with st._bn_index_lock:
                 for c in bars:
                     MarketDataService._upsert_list(st.bn_index_candles_5m, c)
-                if len(st.bn_index_candles_5m) > cfg.MAX_CANDLE_BUFFER:
-                    del st.bn_index_candles_5m[:len(st.bn_index_candles_5m) - cfg.MAX_CANDLE_BUFFER]
             st.bn_synthetic_anchor = bars[-1].close
             print(f"Synthetic BankNifty index: restored {len(st.bn_index_candles_5m)} self-recorded "
                   f"bars from archive, anchor seeded at {st.bn_synthetic_anchor:.2f}")
@@ -164,8 +162,6 @@ class SchedulerService:
             with st._nf_index_lock:
                 for c in nf_bars:
                     MarketDataService._upsert_list(st.nf_index_candles_5m, c)
-                if len(st.nf_index_candles_5m) > cfg.MAX_CANDLE_BUFFER:
-                    del st.nf_index_candles_5m[:len(st.nf_index_candles_5m) - cfg.MAX_CANDLE_BUFFER]
             st.nf_synthetic_anchor = nf_bars[-1].close
             print(f"Synthetic Nifty 50 index: restored {len(st.nf_index_candles_5m)} self-recorded "
                   f"bars from archive, anchor seeded at {st.nf_synthetic_anchor:.2f}")
@@ -292,8 +288,11 @@ class SchedulerService:
             bn_candles = list(st.bn_index_candles_5m)
         if not bn_candles:
             return
-        closes = np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
-        lookback = closes[-cfg.BN_IV_LOOKBACK_BARS:] if closes.size > cfg.BN_IV_LOOKBACK_BARS else closes
+        # Slice the tail BEFORE building the numpy array — estimate_iv only
+        # ever reads the last BN_IV_LOOKBACK_BARS closes, so there's no need
+        # to convert all (up to 300) buffered candles on every 100ms tick.
+        tail = bn_candles[-cfg.BN_IV_LOOKBACK_BARS:] if len(bn_candles) > cfg.BN_IV_LOOKBACK_BARS else bn_candles
+        lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
         try:
             closed = bn_trade.check_tick_exit(_now(), st.bn_index_ltp, lookback)
             if closed:
@@ -369,8 +368,8 @@ class SchedulerService:
             nf_candles = list(st.nf_index_candles_5m)
         if not nf_candles:
             return
-        closes = np.fromiter((c.close for c in nf_candles), np.float64, len(nf_candles))
-        lookback = closes[-cfg.NF_IV_LOOKBACK_BARS:] if closes.size > cfg.NF_IV_LOOKBACK_BARS else closes
+        tail = nf_candles[-cfg.NF_IV_LOOKBACK_BARS:] if len(nf_candles) > cfg.NF_IV_LOOKBACK_BARS else nf_candles
+        lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
         try:
             closed = nf_trade.check_tick_exit(_now(), st.nf_index_ltp, lookback)
             if closed:
@@ -659,8 +658,6 @@ class SchedulerService:
                 # whether it arrives via this REST catch-up or a live WS tick.
                 for c in bn_today:
                     MarketDataService._upsert_list(st.bn_index_candles_5m, c)
-                if len(st.bn_index_candles_5m) > cfg.MAX_CANDLE_BUFFER:
-                    del st.bn_index_candles_5m[:len(st.bn_index_candles_5m) - cfg.MAX_CANDLE_BUFFER]
 
             st.api_status = "API OK"
             print(f"Historical load complete: {len(st.candles_5m)} stocks | "
@@ -689,8 +686,6 @@ class SchedulerService:
             with st._nf_index_lock:
                 for c in nf_idx_bars:
                     MarketDataService._upsert_list(st.nf_index_candles_5m, c)
-                if len(st.nf_index_candles_5m) > cfg.MAX_CANDLE_BUFFER:
-                    del st.nf_index_candles_5m[:len(st.nf_index_candles_5m) - cfg.MAX_CANDLE_BUFFER]
 
             print(f"NF historical load complete: {len(nf_hist)} stocks | "
                   f"Nifty 50 buffer now {len(st.nf_index_candles_5m)} bars")
