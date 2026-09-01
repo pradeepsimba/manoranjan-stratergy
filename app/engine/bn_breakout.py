@@ -174,20 +174,30 @@ def analyze_contributions(breakout_direction: str, breakout_candle: Candle,
 
 
 def compute_breakout_prediction(bn_candles: List[Candle], leader_candles: Dict[str, List[Candle]],
-                                weights: Dict[str, float]) -> Dict:
+                                weights: Dict[str, float],
+                                swings: Optional[Dict[str, List[Dict]]] = None,
+                                sr_levels: Optional[Dict[str, List[float]]] = None) -> Dict:
     """
     Port of c.html's detectBreakouts — tries swing, then S/R, then pivot
     breakouts (first hit wins) on the index candles, and — if one fires —
     validates it against the top-5-weighted-stock contribution check.
     `weights` is cfg.BN_INDEX_WEIGHTS or cfg.NF_INDEX_WEIGHTS depending on
     which instrument's candles are passed in.
+
+    `swings`/`sr_levels` may be passed in precomputed (a caller that also
+    needs the index's own detect_swings/detect_support_resistance result
+    elsewhere — e.g. the dashboard's S-R table — can compute each once and
+    reuse it here instead of this function silently redoing the same O(n)
+    scan a second time); omit either to have this function compute it fresh.
     """
     if len(bn_candles) < 3:
         return {"type": None, "direction": None, "level": None, "contributors": [], "valid": False}
 
     latest = bn_candles[-1]
-    swings = detect_swings(bn_candles, 2)
-    sr_levels = detect_support_resistance(bn_candles)
+    if swings is None:
+        swings = detect_swings(bn_candles, 2)
+    if sr_levels is None:
+        sr_levels = detect_support_resistance(bn_candles)
 
     breakout = detect_swing_breakouts(bn_candles, swings)
     if not breakout["type"]:

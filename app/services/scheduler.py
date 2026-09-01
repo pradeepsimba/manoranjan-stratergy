@@ -12,6 +12,7 @@ Timing orchestrator — drives the Bank Nifty options paper-trading session:
 """
 
 import asyncio
+import copy
 import json
 from collections import deque as _deque
 from datetime import datetime, timedelta
@@ -734,10 +735,44 @@ class SchedulerService:
     # ── Dashboard broadcast ───────────────────────────────────────────────────
 
     async def _push_dashboard_loop(self) -> None:
+        """
+        Every 1s: snapshot state into the full dashboard payload and
+        broadcast it. _build_payload is pure CPU work over lock-protected
+        candle snapshots (breakout/S-R scans across ~45 BN+NF tokens) with no
+        further AppState mutation, so it's run in a worker thread via
+        run_in_executor rather than inline on the event loop — otherwise it
+        directly delays the 100ms trading tick loop (_run_active_phase),
+        which shares this same event loop. The candle locks it takes are
+        real threading.Locks (see state.py), already designed to be safely
+        acquired from a non-event-loop thread (that's how the WS ingest
+        thread uses them too).
+
+        st.active_trade/active_trade_nf are the one piece of state the tick
+        loop mutates FIELD-BY-FIELD in place (current_sl/current_premium/etc,
+        every ~100ms in bn_trade.check_tick_exit) rather than by whole-object
+        reassignment — reading those fields from a second thread while the
+        event loop is mid-mutation would be a genuine torn read that didn't
+        exist when everything ran on one thread. copy.copy() them (and
+        list-copy closed_trades, which is only ever appended/cleared, never
+        field-mutated in place) HERE, synchronously on the event loop, before
+        handing off — the copy call itself can't interleave with another
+        event-loop coroutine's mutation, so it's a consistent snapshot, and
+        the executor thread then only ever touches its own private copies.
+        """
+        loop = asyncio.get_running_loop()
+        st = get_state()
         while True:
             try:
                 if self._ws.count() > 0:
-                    await self._ws.broadcast(json.dumps(self._build_payload(), default=str))
+                    active_snapshot    = copy.copy(st.active_trade) if st.active_trade is not None else None
+                    active_nf_snapshot = copy.copy(st.active_trade_nf) if st.active_trade_nf is not None else None
+                    closed_snapshot    = list(st.closed_trades)
+                    closed_nf_snapshot = list(st.closed_trades_nf)
+                    payload = await loop.run_in_executor(
+                        None, self._build_payload,
+                        active_snapshot, active_nf_snapshot, closed_snapshot, closed_nf_snapshot,
+                    )
+                    await self._ws.broadcast(json.dumps(payload, default=str))
             except Exception as e:
                 print(f"Dashboard push error: {e}")
             await asyncio.sleep(1)
@@ -801,7 +836,15 @@ class SchedulerService:
             for name, c in live_recent.items()
         ]
 
-    def _build_payload(self) -> dict:
+    def _build_payload(self, active_trade, active_trade_nf,
+                       closed_trades: list, closed_trades_nf: list) -> dict:
+        """
+        active_trade/active_trade_nf/closed_trades/closed_trades_nf are
+        snapshots taken by the caller (_push_dashboard_loop), NOT live
+        AppState reads — this runs in a worker thread (see there) while the
+        tick loop keeps mutating st.active_trade's fields in place, so
+        reading it live here would be a torn read across threads.
+        """
         st = get_state()
         clock = _now().strftime("%H:%M:%S")
 
@@ -819,13 +862,13 @@ class SchedulerService:
             }
 
         active = None
-        if st.active_trade is not None:
-            active = _trade_dict(st.active_trade)
+        if active_trade is not None:
+            active = _trade_dict(active_trade)
             active["currentIndexPrice"] = st.bn_index_ltp
 
         active_nf = None
-        if st.active_trade_nf is not None:
-            active_nf = _trade_dict(st.active_trade_nf)
+        if active_trade_nf is not None:
+            active_nf = _trade_dict(active_trade_nf)
             active_nf["currentIndexPrice"] = st.nf_index_ltp
 
         def _diag_dict(d, no_active_trade: bool) -> dict:
@@ -848,8 +891,8 @@ class SchedulerService:
                 "noActiveTrade": no_active_trade,
             }
 
-        diag = _diag_dict(st.bn_diagnostic, st.active_trade is None) if st.bn_diagnostic is not None else None
-        diag_nf = _diag_dict(st.nf_diagnostic, st.active_trade_nf is None) if st.nf_diagnostic is not None else None
+        diag = _diag_dict(st.bn_diagnostic, active_trade is None) if st.bn_diagnostic is not None else None
+        diag_nf = _diag_dict(st.nf_diagnostic, active_trade_nf is None) if st.nf_diagnostic is not None else None
 
         # ── Stock Candles panel data (breakout banner / weighted global signal /
         # S-R table) — a c.html UI-parity port, entirely separate from the BN
@@ -861,7 +904,17 @@ class SchedulerService:
         token_to_name = {cfg.BN_INDEX_TOKEN: cfg.BN_INDEX_NAME,
                         **{tok: name for name, tok in cfg.BN_ALL_STOCKS.items()}}
 
-        breakout = bn_breakout.compute_breakout_prediction(bn_candles, all_candles, cfg.BN_INDEX_WEIGHTS)
+        # detect_support_resistance is O(n) per token and every token's S-R
+        # table entry needs it anyway — compute each token's once here (incl.
+        # the index) and hand the index's result into compute_breakout_prediction
+        # instead of letting it silently redo that same scan a second time.
+        sr_by_token = {tok: bn_breakout.detect_support_resistance(candles)
+                       for tok, candles in all_candles.items()}
+        bn_swings = bn_breakout.detect_swings(bn_candles, 2)
+        breakout = bn_breakout.compute_breakout_prediction(
+            bn_candles, all_candles, cfg.BN_INDEX_WEIGHTS,
+            swings=bn_swings,
+            sr_levels=sr_by_token.get(cfg.BN_INDEX_TOKEN, {"supports": [], "resistances": []}))
 
         column_counts   = bn_breakout.compute_column_counts(all_candles, _NUM_SIGNAL_CANDLES)
         latest_by_token = {tok: c[-1] for tok, c in all_candles.items() if c}
@@ -886,7 +939,7 @@ class SchedulerService:
         }
         sr_levels = {
             token_to_name.get(tok, tok): {
-                "m5":  bn_breakout.detect_support_resistance(candles),
+                "m5":  sr_by_token.get(tok, {"supports": [], "resistances": []}),
                 "m15": st.sr_15m_levels.get(tok, {"supports": [], "resistances": []}),
             }
             for tok, candles in all_candles.items()
@@ -899,7 +952,13 @@ class SchedulerService:
         token_to_name_nf = {cfg.NF_INDEX_TOKEN: cfg.NF_INDEX_NAME,
                            **{tok: name for name, tok in cfg.NF_ALL_STOCKS.items()}}
 
-        breakout_nf = bn_breakout.compute_breakout_prediction(nf_candles, all_candles_nf, cfg.NF_INDEX_WEIGHTS)
+        sr_by_token_nf = {tok: bn_breakout.detect_support_resistance(candles)
+                          for tok, candles in all_candles_nf.items()}
+        nf_swings = bn_breakout.detect_swings(nf_candles, 2)
+        breakout_nf = bn_breakout.compute_breakout_prediction(
+            nf_candles, all_candles_nf, cfg.NF_INDEX_WEIGHTS,
+            swings=nf_swings,
+            sr_levels=sr_by_token_nf.get(cfg.NF_INDEX_TOKEN, {"supports": [], "resistances": []}))
 
         column_counts_nf   = bn_breakout.compute_column_counts(all_candles_nf, _NUM_SIGNAL_CANDLES)
         latest_by_token_nf = {tok: c[-1] for tok, c in all_candles_nf.items() if c}
@@ -919,7 +978,7 @@ class SchedulerService:
         }
         sr_levels_nf = {
             token_to_name_nf.get(tok, tok): {
-                "m5":  bn_breakout.detect_support_resistance(candles),
+                "m5":  sr_by_token_nf.get(tok, {"supports": [], "resistances": []}),
                 "m15": st.sr_15m_levels.get(tok, {"supports": [], "resistances": []}),
             }
             for tok, candles in all_candles_nf.items()
@@ -938,10 +997,10 @@ class SchedulerService:
             "dailyPnl":     round(st.daily_pnl, 2),   # shared account — BN + NF combined
             "funds":        round(st.funds, 2),        # shared account — BN + NF combined
             "activeTrade":  active,
-            "closedTrades": [_trade_dict(t) for t in st.closed_trades],
+            "closedTrades": [_trade_dict(t) for t in closed_trades],
             "entryLoop":    diag,
             "activeTradeNf":  active_nf,
-            "closedTradesNf": [_trade_dict(t) for t in st.closed_trades_nf],
+            "closedTradesNf": [_trade_dict(t) for t in closed_trades_nf],
             "entryLoopNf":    diag_nf,
             "liveLeaderRows": self._build_live_leader_rows(st),
             "liveLeaderRowsNf": self._build_live_leader_rows_nf(st),

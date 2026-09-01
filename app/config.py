@@ -38,7 +38,7 @@ WS_URL            = f"ws://{API_HOST}:8083/historical-data"
 # ── Static: credentials / DSN ─────────────────────────────────────────────────
 POSTGRES_DSN = os.getenv(
     "POSTGRES_DSN",
-    "postgresql://postgres:password@localhost/trading_db",
+    "postgresql://postgres:postgres@localhost/trading_db",
 )
 
 # ── Static: data intervals ────────────────────────────────────────────────────
@@ -260,7 +260,7 @@ MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
 # across days, so positional (delivery / 1d) replay is not built.
 BACKTEST_TIMEFRAMES = ["5m"]
 BACKTEST_MODES      = ["intraday"]
-SCAN_WORKERS        = 4    # per-day backtest parallelism (ThreadPoolExecutor)
+SCAN_WORKERS        = min(8, max(4, os.cpu_count() or 4))   # per-day backtest parallelism (ThreadPoolExecutor)
 
 # ── Dynamic tunables — hard defaults ──────────────────────────────────────────
 _DEFAULTS: Dict[str, Any] = {
@@ -424,12 +424,12 @@ _DEFAULTS: Dict[str, Any] = {
     # would be trivially crossed on an expensive stock (e.g. LT ~4000) and
     # nearly unreachable on a cheap one (e.g. KOTAK ~400). Recalibrate from
     # observed live bars, same caveat as the qty-surge thresholds.
-    "BN_PRICE_ALERT_PTS_HDFC":     3.5,   # ~725
-    "BN_PRICE_ALERT_PTS_ICICI":    7.0,   # ~1413
-    "BN_PRICE_ALERT_PTS_SBI":      5.0,   # ~1035
-    "BN_PRICE_ALERT_PTS_AXIS":     6.0,   # ~1237
-    "BN_PRICE_ALERT_PTS_KOTAK":    2.0,   # ~398
-    "BN_PRICE_ALERT_PTS_INDUSIND": 5.0,   # ~1015
+    "BN_PRICE_ALERT_PTS_HDFC":     1.5,
+    "BN_PRICE_ALERT_PTS_ICICI":    1.5,
+    "BN_PRICE_ALERT_PTS_SBI":      1.5,
+    "BN_PRICE_ALERT_PTS_AXIS":     1.5,
+    "BN_PRICE_ALERT_PTS_KOTAK":    1.5,
+    "BN_PRICE_ALERT_PTS_INDUSIND": 1.5,
 
     "NF_PRICE_ALERT_PTS_HDFC":       3.5,   # ~725
     "NF_PRICE_ALERT_PTS_RELIANCE":   6.5,   # ~1300
