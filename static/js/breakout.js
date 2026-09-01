@@ -107,7 +107,7 @@ function _floorToTwo(num) {
 // "N/A" when data is missing. `showOC` (the "Show O/C" toggle) additionally
 // prints the raw open/close under the diff, for verifying a run of bars
 // against the timestamps without hovering each cell one at a time.
-function _candleCellHtml(bar, showOC) {
+function _candleCellHtml(bar, showOC, alertPts) {
   if (!bar || !bar.close || !bar.open) return '<span class="candle-cell neutral">N/A</span>';
   const diff = bar.close - bar.open;
   const cls = diff > 0 ? 'positive' : diff < 0 ? 'negative' : 'neutral';
@@ -122,7 +122,14 @@ function _candleCellHtml(bar, showOC) {
   const ocLine = showOC
     ? `<br><span class="candle-oc">O:${bar.open.toFixed(2)} C:${bar.close.toFixed(2)} (${movePct.toFixed(2)}%)</span>`
     : '';
-  return `<span class="candle-cell ${cls}" title="${title}">${content}${ocLine}</span>`;
+  // Tick mark: this bar's own |close-open| move has crossed the stock's
+  // configured move-alert threshold (same points figure alerts.js's
+  // checkPriceAlerts uses for the consensus check) — only ever passed in for
+  // the Latest column, so this reads as "the current candle just qualified".
+  const tick = alertPts != null && Math.abs(diff) >= alertPts
+    ? `<span class="alert-tick" title="Crossed its ${alertPts} pt move-alert threshold">✓</span>`
+    : '';
+  return `<span class="candle-cell ${cls}" title="${title}">${tick}${content}${ocLine}</span>`;
 }
 
 // Port of c.html's renderTable header labels: leftmost (newest) column is
@@ -222,10 +229,24 @@ function renderStockCandles(stockCandles, ids) {
     return;
   }
 
+  // Move-alert threshold per stock, keyed off the SAME settings alerts.js
+  // reads (BN_PRICE_ALERT_KEY/NF_PRICE_ALERT_KEY + _alertPtsByKey) — only
+  // defined for the leader stocks the Settings page has a threshold for; a
+  // stock with none configured just never gets a tick mark.
+  const keyByStock = ids === STOCK_IDS_NF
+    ? (typeof NF_PRICE_ALERT_KEY !== 'undefined' ? NF_PRICE_ALERT_KEY : {})
+    : (typeof BN_PRICE_ALERT_KEY !== 'undefined' ? BN_PRICE_ALERT_KEY : {});
+  const alertPtsByKey = typeof _alertPtsByKey !== 'undefined' ? _alertPtsByKey : {};
+
   body.innerHTML = names.map(name => {
     const bars = reversedByName[name];   // newest first, like c.html
+    const alertPts = alertPtsByKey[keyByStock[name]];
     let row = `<tr data-stock="${name}"><td class="card-title">${name}</td>`;
-    for (let i = 0; i < maxBars; i++) row += `<td data-col="${i}">${_candleCellHtml(bars[i], _showOC)}</td>`;
+    for (let i = 0; i < maxBars; i++) {
+      // Tick mark only ever on the Latest (i===0) column — "the current
+      // candle just crossed its threshold", not every historical bar shown.
+      row += `<td data-col="${i}">${_candleCellHtml(bars[i], _showOC, i === 0 ? alertPts : null)}</td>`;
+    }
     // Latest tick's cumulative pending buy/sell qty (parsed server-side from
     // the feed's `snap` text — see market_data.py) — a live per-stock figure,
     // not per-column, so it always reads off bars[0] regardless of maxBars.
@@ -262,6 +283,9 @@ function renderSrLevels(srLevels, ids) {
 // column 0 in the table, since that's always the most recent bar).
 function applyStockTickPrices(prices) {
   if (!prices) return;
+  const alertPtsByKey = typeof _alertPtsByKey !== 'undefined' ? _alertPtsByKey : {};
+  const bnKeyByStock = typeof BN_PRICE_ALERT_KEY !== 'undefined' ? BN_PRICE_ALERT_KEY : {};
+  const nfKeyByStock = typeof NF_PRICE_ALERT_KEY !== 'undefined' ? NF_PRICE_ALERT_KEY : {};
   for (const name of _lastStockOrder) {
     const price = prices[name];
     const open = _lastOpenByStock[name];
@@ -274,7 +298,14 @@ function applyStockTickPrices(prices) {
     rows.forEach(row => {
       const cell = row.querySelector('td[data-col="0"] .candle-cell');
       if (!cell) return;
-      cell.textContent = _floorToTwo(Math.abs(diff));
+      // Which panel this row belongs to decides which threshold applies —
+      // BN and NF can configure a different points value for the same stock.
+      const isNf = !!row.closest(`#${STOCK_IDS_NF.body}`);
+      const alertPts = alertPtsByKey[(isNf ? nfKeyByStock : bnKeyByStock)[name]];
+      const crossed = alertPts != null && Math.abs(diff) >= alertPts;
+      const tick = crossed
+        ? `<span class="alert-tick" title="Crossed its ${alertPts} pt move-alert threshold">✓</span>` : '';
+      cell.innerHTML = tick + _floorToTwo(Math.abs(diff));
       cell.className = 'candle-cell ' + (diff > 0 ? 'positive' : diff < 0 ? 'negative' : 'neutral');
     });
   }

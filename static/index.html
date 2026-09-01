@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
-  <link rel="stylesheet" href="/css/dashboard.css?v=38">
+  <link rel="stylesheet" href="/css/dashboard.css?v=41">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -217,8 +217,10 @@
           <button class="btn-mini" onclick="openConditionModal()">Trade Conditions</button>
         </div>
 
-        <!-- Kite manual order form — DECORATIVE ONLY, exactly like c.html:
-             local UI state only, never calls the real paper-trading engine. -->
+        <!-- Kite-style manual order form — wired to the REAL paper-trading
+             engine (app/api/dashboard.py's /api/manual-order + /api/manual-exit).
+             Places/closes the same st.active_trade the automated strategy
+             uses; see static/js/kiteForm.js. -->
         <div class="kite-toggle-row">
           <div class="kite-toggle active buy" id="kite-buy" onclick="kiteSetType('BUY')">BUY (CE)</div>
           <div class="kite-toggle sell" id="kite-sell" onclick="kiteSetType('SELL')">SELL (PE)</div>
@@ -226,18 +228,18 @@
         <div class="kite-form">
           <div class="field">
             <label class="field-label">Qty</label>
-            <input class="field-input" id="kite-qty" type="number" min="30" step="30" value="30">
+            <input class="field-input" id="kite-qty" type="number" value="30" disabled title="Always exactly 1 lot — this engine has no position-sizing concept.">
           </div>
           <div class="field">
             <label class="field-label">Order Type</label>
-            <select class="field-input" id="kite-ordtype" onchange="kiteSetOrdType(this.value)">
+            <select class="field-input" id="kite-ordtype" onchange="kiteSetOrdType(this.value)" title="Cosmetic only — every fill is a synthetic Black-Scholes mark, there is no real order book.">
               <option value="MARKET">Market</option>
               <option value="LIMIT">Limit</option>
             </select>
           </div>
           <div class="field">
             <label class="field-label">Price</label>
-            <input class="field-input" id="kite-price" type="number" step="0.05" disabled>
+            <input class="field-input" id="kite-price" type="number" step="0.05" disabled title="Not used — the fill premium is computed server-side at submit time.">
           </div>
           <div class="field">
             <label class="field-label">Avail. Funds</label>
@@ -245,10 +247,10 @@
           </div>
         </div>
         <div class="kite-actions">
-          <button class="btn-run" onclick="kiteSubmitOrder()">Submit (simulated)</button>
-          <button class="btn-mini" onclick="manualExit()">Exit (simulated)</button>
+          <button class="btn-run" onclick="kiteSubmitOrder()">Submit</button>
+          <button class="btn-mini" onclick="manualExit()">Exit</button>
         </div>
-        <div class="kite-status" id="kite-status">No simulated position.</div>
+        <div class="kite-status" id="kite-status">No active manual order.</div>
 
         <div id="trade-empty" class="empty-cell">No active trade</div>
         <div id="trade-card" class="trade-card" style="display:none"></div>
@@ -587,11 +589,11 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="/js/util.js?v=38"></script>
-<script src="/js/breakout.js?v=38"></script>
-<script src="/js/qtyAudit.js?v=38"></script>
-<script src="/js/kiteForm.js?v=38"></script>
-<script src="/js/alerts.js?v=38"></script>
-<script src="/js/dashboard.js?v=38"></script>
+<script src="/js/util.js?v=41"></script>
+<script src="/js/breakout.js?v=41"></script>
+<script src="/js/qtyAudit.js?v=41"></script>
+<script src="/js/kiteForm.js?v=41"></script>
+<script src="/js/alerts.js?v=41"></script>
+<script src="/js/dashboard.js?v=41"></script>
 </body>
 </html>

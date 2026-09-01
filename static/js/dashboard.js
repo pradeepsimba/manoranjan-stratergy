@@ -146,6 +146,12 @@ function render(d) {
   if (typeof checkAllPriceAlerts === 'function') checkAllPriceAlerts(d.liveLeaderRows, d.liveLeaderRowsNf);
 
   if (d.bnLtp) window._lastBnLtp = d.bnLtp;
+  // Real server-side funds/active-trade state — read by kiteForm.js so the
+  // manual order form's Submit button and Avail. Funds field reflect the
+  // SAME account the automated engine trades against (the manual form is no
+  // longer a separate decorative simulation, see kiteForm.js).
+  if (d.funds != null) window._lastFunds = d.funds;
+  window._hasActiveTradeBn = !!d.activeTrade;
   if (typeof renderGlobalSignal === 'function') {
     renderGlobalSignal(d.globalSignal);
     renderGlobalSignal(d.globalSignalNf, STOCK_IDS_NF);

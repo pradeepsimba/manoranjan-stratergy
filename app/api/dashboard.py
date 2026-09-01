@@ -4,9 +4,11 @@ import asyncio
 import csv
 import io
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -15,8 +17,12 @@ import app.config as cfg
 import app.services.settings as settings
 from app.backtest.engine import run_backtest
 from app.backtest.signal_study import run_bn_leader_consensus_study
+from app.services import bn_trade
+from app.services.settings import BN_FUNDS_KEY
 from app.state import get_state
 from app.ws.dashboard_ws import ws_manager
+
+IST = ZoneInfo("Asia/Kolkata")
 
 router = APIRouter()
 
@@ -95,6 +101,67 @@ async def get_positions() -> List[Dict[str, Any]]:
 @router.get("/api/positions/all")
 async def get_all_positions() -> List[Dict[str, Any]]:
     return await _db.get_all_positions() if _db else []
+
+
+# ── Manual order (dashboard's Kite-style BankNifty order form) ────────────────
+# Places/closes the SAME single st.active_trade the automated engine uses —
+# a manual trading-desk override, not a second/parallel trade concept. See
+# app/services/bn_trade.py's place_manual_order/force_close for the shared
+# mechanics (open_trade_from_signal/finalize_exit — this is not a fork of
+# the live+backtest strategy core, just a different way of constructing the
+# BNSignal that feeds it).
+
+class ManualOrderRequest(BaseModel):
+    direction: str   # "BUY" (-> long ATM CE) | "SELL" (-> long ATM PE)
+
+
+@router.post("/api/manual-order")
+async def manual_order(req: ManualOrderRequest) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    try:
+        trade = bn_trade.place_manual_order(req.direction.upper(), datetime.now(IST))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    try:
+        await _db.save_position(trade, instrument="BANKNIFTY")
+    except Exception as e:
+        raise HTTPException(500, f"Order placed but DB save failed: {e}")
+    return {
+        "orderId": trade.order_id, "direction": trade.direction,
+        "strike": trade.strike, "optionType": trade.option_type,
+        "entryIndexPrice": trade.entry_index_price, "entryPremium": trade.entry_premium,
+    }
+
+
+@router.post("/api/manual-exit")
+async def manual_exit() -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    st = get_state()
+    if st.active_trade is None:
+        raise HTTPException(400, "No active trade to exit")
+    if st.bn_index_ltp <= 0:
+        raise HTTPException(400, "No live BankNifty price yet")
+
+    with st._bn_index_lock:
+        bn_candles = list(st.bn_index_candles_5m)
+    closes = (np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
+              if bn_candles else np.zeros(0, dtype=np.float64))
+    lookback = closes[-cfg.BN_IV_LOOKBACK_BARS:] if closes.size > cfg.BN_IV_LOOKBACK_BARS else closes
+
+    closed = bn_trade.force_close(datetime.now(IST), st.bn_index_ltp, lookback, label="MANUAL EXIT")
+    if closed is None:
+        raise HTTPException(400, "No active trade to exit")
+    try:
+        await _db.update_position_exit(
+            order_id=closed.order_id, exit_price=closed.exit_index_price,
+            exit_time=closed.exit_time, pnl=closed.pnl, exit_premium=closed.exit_premium,
+        )
+        await _db.set_app_settings({BN_FUNDS_KEY: st.funds})
+    except Exception as e:
+        raise HTTPException(500, f"Exit applied but DB persist failed: {e}")
+    return {"orderId": closed.order_id, "exitPremium": closed.exit_premium, "pnl": closed.pnl}
 
 
 # ── Live prices ───────────────────────────────────────────────────────────────

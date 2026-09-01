@@ -1,20 +1,21 @@
 'use strict';
 
 // ── Leader-stock price-move alerts ────────────────────────────────────────────
-// Client-side only: fires a browser Notification (falling back to the
-// in-page toast if permission isn't granted/supported) when a leader stock's
-// latest bar |close-open| move crosses ITS OWN configured threshold, in raw
-// POINTS — matches the Stock Candles table's own cell numbers directly
-// (Settings page, "BN/NF Alerts" groups; mirrors app/config.py's
-// BN_PRICE_ALERT_ATTR/NF_PRICE_ALERT_ATTR wiring — points, not %, an
-// explicit user decision since % obscured the relationship to what's
-// actually shown on screen). Reads the SAME liveLeaderRows/liveLeaderRowsNf
+// Client-side only: fires a single browser Notification (falling back to the
+// in-page toast if permission isn't granted/supported) only on the CONSENSUS
+// condition — at least BN_ALERT_CONSENSUS_REQUIRED/NF_ALERT_CONSENSUS_REQUIRED
+// leader stocks have EACH crossed their own configured per-stock threshold, in
+// raw POINTS (Settings page, "BN/NF Alerts" groups; mirrors app/config.py's
+// BN_PRICE_ALERT_ATTR/NF_PRICE_ALERT_ATTR wiring — points, not %), AND agree
+// on direction. An individual stock crossing its own threshold alone no
+// longer fires a notification by itself (explicit user decision, 2026-09-01)
+// — it only feeds into the consensus count and the live threshold badge
+// below the Global Signal. Reads the SAME liveLeaderRows/liveLeaderRowsNf
 // fields the Entry Loop Monitor's leader table already renders from — no
 // new server payload needed.
 //
-// Edge-triggered: fires once when a stock's move crosses ABOVE the
-// threshold, not on every tick it stays above (otherwise every ~1s
-// STATE_UPDATE would re-fire while a big move holds).
+// Edge-triggered: fires once when consensus is first reached, not on every
+// tick it holds (otherwise every ~1s STATE_UPDATE would re-fire).
 //
 // Browser note: the Notification API is restricted to secure contexts
 // (https, or http://localhost) in current Chrome/Firefox — opening the
@@ -41,7 +42,6 @@ const NF_PRICE_ALERT_KEY = {
 
 let _alertPtsByKey = {};   // {settings_key: value}, refreshed from /api/settings
 let _consensusRequired = { BankNifty: 4, 'Nifty 50': 8 };
-const _wasAboveThreshold = {};   // {"BN:HDFC BANK": true/false, ...} — per-stock alert edge
 const _wasConsensus = {};        // {"BankNifty:up": true/false, ...} — consensus alert edge
 
 function _refreshAlertThresholds() {
@@ -67,8 +67,9 @@ function _fireAlert(title, body) {
   if (typeof toast === 'function') toast(`${title}: ${body}`, 'warn');
 }
 
-// Returns [{stock, crossed, dir}, ...] for the consensus check below, while
-// also firing the existing per-stock alert (edge-triggered, unchanged).
+// Returns [{stock, crossed, dir}, ...] for the consensus check below. Does
+// NOT fire a notification per stock — only feeds the consensus count/badge;
+// see checkConsensusAlert for the one thing that actually notifies.
 function checkPriceAlerts(leaderRows, instrLabel, keyByStock) {
   const results = [];
   if (!Array.isArray(leaderRows)) return results;
@@ -79,16 +80,7 @@ function checkPriceAlerts(leaderRows, instrLabel, keyByStock) {
     if (pts == null) return;   // thresholds not loaded yet
     const movePts = Math.abs(r.close - r.open);
     const dir = r.close > r.open ? 'up' : r.close < r.open ? 'down' : null;
-    const key = `${instrLabel}:${r.stock}`;
-    const above = movePts >= pts;
-    if (above && !_wasAboveThreshold[key]) {
-      _fireAlert(
-        `${instrLabel}: ${r.stock} moved ${dir} ${movePts.toFixed(2)} pts`,
-        `Open ${r.open.toFixed(2)} → Close ${r.close.toFixed(2)} (threshold ${pts} pts)`
-      );
-    }
-    _wasAboveThreshold[key] = above;
-    results.push({ stock: r.stock, crossed: above, dir });
+    results.push({ stock: r.stock, crossed: movePts >= pts, dir });
   });
   return results;
 }

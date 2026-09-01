@@ -1020,6 +1020,20 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 .candle-cell.negative { background: var(--neg); color: #1a0505; }
 .candle-cell.neutral  { background: var(--surf-high); color: var(--txt-2); }
 .candle-oc { font-size: 9px; font-weight: 400; opacity: .85; white-space: nowrap; }
+/* Tick mark on the Latest-column candle box when that bar's own move has
+   crossed the stock's configured alert threshold (see breakout.js's
+   _candleCellHtml/applyStockTickPrices) — a white circle (so it reads
+   clearly against either the green or red candle-cell fill) with the tick
+   itself colored to match the cell's own up/down trend color. */
+.alert-tick {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; margin-right: 4px; border-radius: 50%;
+  background: #fff; font-size: 10px; font-weight: 900;
+  vertical-align: middle;
+}
+.candle-cell.positive .alert-tick { color: var(--pos); }
+.candle-cell.negative .alert-tick { color: var(--neg); }
+.candle-cell.neutral  .alert-tick { color: var(--txt-2); }
 
 .oc-toggle-label {
   display: inline-flex; align-items: center; gap: 4px;
