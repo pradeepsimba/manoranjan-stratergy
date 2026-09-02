@@ -1,7 +1,12 @@
 services:
   app:
     build: .
-    container_name: mano-app
+    # Overridable per checkout (see .env.example) — container_name is unique
+    # HOST-WIDE, unlike Compose's default <project>-<service>-1 naming, so
+    # running a second branch/checkout of this same repo alongside this one
+    # needs its own .env with a different APP_CONTAINER_NAME/APP_PORT (and
+    # CADDY_CONTAINER_NAME/CADDY_PORT below) or the two deployments collide.
+    container_name: ${APP_CONTAINER_NAME:-mano-app}
     restart: unless-stopped
     environment:
       TZ: Asia/Kolkata
@@ -11,9 +16,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      # Host 8082 -> container 8080 (the actual address in use:
-      # http://192.168.0.114:8082 — CLAUDE.md's documented 8080 was stale).
-      - "8082:8080"
+      # Host ${APP_PORT} -> container 8080 (the actual address in use:
+      # http://192.168.0.114:8082 by default — CLAUDE.md's documented 8080
+      # was stale). A second checkout must set APP_PORT to a free host port.
+      - "${APP_PORT:-8082}:8080"
 
   # TLS-terminating reverse proxy in front of the SAME app container above —
   # not a second copy of it (the scheduler/WebSocket feed/AppState are an
@@ -24,7 +30,7 @@ services:
   # secure contexts, which a plain-HTTP LAN IP never satisfies.
   caddy:
     image: caddy:2-alpine
-    container_name: mano-caddy
+    container_name: ${CADDY_CONTAINER_NAME:-mano-caddy}
     restart: unless-stopped
     depends_on:
       - app
@@ -33,7 +39,7 @@ services:
       # {$UPSTREAM} note (running Caddy natively on the host needs no such var).
       UPSTREAM: app:8080
     ports:
-      - "8443:8443"
+      - "${CADDY_PORT:-8443}:8443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
