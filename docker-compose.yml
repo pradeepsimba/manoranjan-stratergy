@@ -24,6 +24,7 @@ services:
   # secure contexts, which a plain-HTTP LAN IP never satisfies.
   caddy:
     image: caddy:2-alpine
+    container_name: mano-caddy
     restart: unless-stopped
     depends_on:
       - app
