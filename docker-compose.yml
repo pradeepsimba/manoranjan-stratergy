@@ -1,6 +1,7 @@
 services:
   app:
     build: .
+    container_name: mano-app
     restart: unless-stopped
     environment:
       TZ: Asia/Kolkata
