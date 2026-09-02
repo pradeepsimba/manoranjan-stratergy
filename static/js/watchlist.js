@@ -18,7 +18,11 @@ async function loadWatchlist() {
     return;
   }
   renderWatchlist();
-  if (_watchlistData.length && !_selectedToken) selectInstrument(_watchlistData[0].token);
+  if (!_watchlistData.length) return;
+  var wanted = new URLSearchParams(location.search).get('token');
+  var initial = wanted && _watchlistData.some(function (r) { return r.token === wanted; })
+    ? wanted : _watchlistData[0].token;
+  if (!_selectedToken) selectInstrument(initial);
 }
 
 function renderWatchlist() {

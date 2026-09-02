@@ -96,6 +96,11 @@ def console_page() -> FileResponse:
     return FileResponse("static/console.html")
 
 
+@app.get("/scanner")
+def scanner_page() -> FileResponse:
+    return FileResponse("static/scanner.html")
+
+
 @app.get("/settings")
 def settings_page() -> FileResponse:
     return FileResponse("static/settings.html")

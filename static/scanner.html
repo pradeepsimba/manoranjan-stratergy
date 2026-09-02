@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Alto — Orders</title>
-  <meta name="description" content="Order book — pending, executed, cancelled, rejected">
+  <title>Alto — Scanner</title>
+  <meta name="description" content="Candlestick pattern scanners over the live instrument universe">
   <link rel="stylesheet" href="/css/dashboard.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,8 +34,8 @@
       <a href="/">Terminal</a>
       <a href="/holdings">Holdings</a>
       <a href="/positions">Positions</a>
-      <a href="/orders" class="active">Orders</a>
-      <a href="/scanner">Scanner</a>
+      <a href="/orders">Orders</a>
+      <a href="/scanner" class="active">Scanner</a>
       <a href="/console">Console</a>
       <a href="/settings">Settings</a>
     </nav>
@@ -57,30 +57,38 @@
     </div>
   </header>
 
-  <div class="page-head"><div><h1 class="page-title">Orders</h1><p class="page-sub">Complete order book — placements, fills, rejections and cancellations</p></div></div>
+  <div class="console-head">
+    <div>
+      <h1 class="console-title">Scanner</h1>
+      <p class="console-sub">Candlestick pattern screens over the live 5-minute instrument universe</p>
+    </div>
+    <button class="btn-run" style="width:auto;padding:10px 20px" onclick="runScan()" id="scan-btn">▶ Run Scan</button>
+  </div>
 
-  <div class="page-grid">
+  <p class="muted-text" id="scan-meta" style="padding:0 24px 12px"></p>
+
+  <div class="console-grid" style="grid-template-columns:1fr 1fr">
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Order Book</span>
-        <div style="display:flex;align-items:center;gap:10px">
-          <div class="nav-seg" style="padding:2px">
-            <a href="#" class="active" id="filter-all" onclick="setOrderFilter('ALL');return false;">All</a>
-            <a href="#" id="filter-pending" onclick="setOrderFilter('PENDING');return false;">Pending</a>
-            <a href="#" id="filter-complete" onclick="setOrderFilter('COMPLETE');return false;">Executed</a>
-          </div>
-          <div class="nav-seg" style="padding:2px">
-            <a href="#" id="filter-today" onclick="toggleTodayFilter();return false;">Today Only</a>
-          </div>
-        </div>
+        <span class="panel-title">First 3 Red Candles</span>
+        <span class="muted-text" id="count-red"></span>
       </div>
       <div class="tbl-wrap">
         <table class="cardify">
-          <thead>
-            <tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num-col">Qty</th>
-                <th>Type</th><th>Product</th><th class="num-col">Price</th><th>Status</th><th></th></tr>
-          </thead>
-          <tbody id="orders-tbody"><tr><td colspan="9" class="empty-cell">Loading…</td></tr></tbody>
+          <thead><tr><th>Symbol</th><th class="num-col">LTP</th><th>Matched Candle</th></tr></thead>
+          <tbody id="red-tbody"><tr><td colspan="3" class="empty-cell">Click Run Scan to screen the current universe</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">First 3 Green Candles</span>
+        <span class="muted-text" id="count-green"></span>
+      </div>
+      <div class="tbl-wrap">
+        <table class="cardify">
+          <thead><tr><th>Symbol</th><th class="num-col">LTP</th><th>Matched Candle</th></tr></thead>
+          <tbody id="green-tbody"><tr><td colspan="3" class="empty-cell">Click Run Scan to screen the current universe</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -88,6 +96,6 @@
 
   <script src="/js/util.js"></script>
   <script src="/js/app.js"></script>
-  <script src="/js/orders.js"></script>
+  <script src="/js/scanner.js"></script>
 </body>
 </html>

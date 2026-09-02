@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket
 from pydantic import BaseModel
 
 import app.config as cfg
+import app.services.scanner as scanner
 import app.services.settings as settings
 from app.services.auth import user_id_from_session
 from app.state import get_state
@@ -156,6 +157,18 @@ def get_candles(token: str, limit: int = 100) -> List[Dict[str, Any]]:
          "high": c.high, "low": c.low, "volume": c.volume}
         for c in candles
     ]
+
+
+# ── Candlestick scanners (read-only pattern screens, see app/services/scanner.py) ──
+
+@router.get("/api/scanner/run")
+async def scanner_run() -> Dict[str, Any]:
+    if _db is None:
+        return {
+            **{key: [] for key in scanner.SCANNERS},
+            "meta": {"totalInstruments": 0, "scanned": 0, "skippedInsufficientCandles": 0},
+        }
+    return await scanner.run_scan(_db)
 
 
 # ── Public market WebSocket (shared prices/candles/status only) ─────────────
