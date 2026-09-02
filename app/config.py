@@ -53,15 +53,19 @@ INTERVAL_5M = "5m"
 # NOT need to change — confirmed the vendor's stockname-matching accepts our
 # existing ALL-CAPS names fine when paired with the new stock_symbol.
 #
-# BankNifty index itself now returns ZERO data (live or historical) under
-# either the old or new identifier — the vendor appears to have stopped
-# providing it entirely. BN_INDEX_TOKEN is kept pointed at the new symbol
-# anyway so the app auto-recovers if the vendor ever resumes streaming it;
-# in the meantime app/services/market_data.py synthesizes the index candle
-# from these 11 stocks' BN_INDEX_WEIGHTS-weighted % change (see
-# MarketDataService._update_synthetic_index).
+# BankNifty index previously returned ZERO data (live or historical) with
+# BN_INDEX_TOKEN="NIFTY BANK" (an unconfirmed guess made at migration time,
+# not sourced from the vendor's own instrument list) and the pre-migration
+# numeric "26009". A user-supplied instrument reference (exchange_token=
+# 26009, trading_symbol="BANKNIFTY", instrumental_token=26009) shows the
+# correct stock_symbol is the plain trading symbol "BANKNIFTY" — matching
+# the same trading-symbol-string convention BN_ALL_STOCKS already uses post-
+# migration, not "NIFTY BANK". Retrying with this corrected value; if the
+# vendor still returns nothing, app/services/market_data.py's synthetic
+# index (from these 11 stocks' BN_INDEX_WEIGHTS-weighted % change — see
+# MarketDataService._update_synthetic_index) remains the fallback either way.
 BN_INDEX_NAME = "BANKNIFTY"
-BN_INDEX_TOKEN = "NIFTY BANK"   # was "26009" — dead under the new protocol too
+BN_INDEX_TOKEN = "BANKNIFTY"   # was "NIFTY BANK", before that "26009" — both unconfirmed guesses
 
 # The 6 stocks that actually drive the trade decision (leader-vote + BN
 # composite indicator gate).
@@ -159,7 +163,13 @@ BN_LOT_SIZE = 30
 # symbol strings; dict KEYS (stockname text sent to the vendor) are kept as
 # originally supplied, with the same Kotak fix BN_ALL_STOCKS already needed
 # ("KOTAK BANK", not "KOTAK MAHINDRA BANK" — vendor matches by stockname text).
-NF_INDEX_NAME = "NIFTY50"
+#
+# NF_INDEX_NAME was "NIFTY50" (no space) — exactly the same class of bug as
+# the Kotak fix above: a user-supplied instrument reference (name/
+# trading_symbol="NIFTY 50", WITH a space) shows the vendor's exact stockname
+# text needs the space; the previous no-space value would have silently
+# returned zero data the same way "Kotak Mahindra Bank" did for Kotak Bank.
+NF_INDEX_NAME = "NIFTY 50"
 NF_INDEX_TOKEN = "NIFTY 50"
 
 # The 12 highest-weighted of the 32 (by real-world NSE index weight) — drive

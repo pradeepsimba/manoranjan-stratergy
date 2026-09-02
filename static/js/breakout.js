@@ -20,7 +20,7 @@ const STOCK_IDS_BN = { signal: 'global-signal-badge', banner: 'breakout-banner',
                       barsSelect: 'stock-bars-select', ocToggle: 'show-oc-toggle' };
 const STOCK_IDS_NF = { signal: 'global-signal-badge-nf', banner: 'breakout-banner-nf',
                       head: 'stock-table-head-nf', body: 'stock-table-body-nf',
-                      srBody: 'sr-table-body-nf', indexKey: 'NIFTY50',
+                      srBody: 'sr-table-body-nf', indexKey: 'NIFTY 50',
                       barsSelect: 'stock-bars-select-nf', ocToggle: 'show-oc-toggle-nf' };
 
 // Whether each candle cell also prints its raw open/close (see

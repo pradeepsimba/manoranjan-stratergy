@@ -281,6 +281,20 @@ class MarketDataService:
         if total_weight == 0 or latest_time is None:
             return   # no constituent candles yet either
 
+        # weighted_pct so far is Σ pct_i·(weight_i/100) — only a correct
+        # weighted AVERAGE if total_weight sums to exactly 100. It never
+        # does: cfg.BN_INDEX_WEIGHTS' 11 stocks sum to 98.70 even when every
+        # stock has ticked, and total_weight drops further any time a
+        # constituent's latest candle is missing (a stock hasn't ticked yet
+        # this bar, a feed gap, etc — `continue` above excludes it entirely).
+        # Using weighted_pct as-is silently understates the index's move
+        # proportionally to whatever weight is missing — e.g. a single
+        # missing HDFC BANK tick (31.86% weight) would mute the computed
+        # move by roughly a third versus the real index. Rescale by the
+        # weight actually present so this stays a true weighted average of
+        # whichever constituents have data, not a diluted-toward-zero one.
+        weighted_pct = weighted_pct * 100.0 / total_weight
+
         with self.state._bn_index_lock:
             idx_candles = self.state.bn_index_candles_5m
             prev = idx_candles[-1] if idx_candles else None
@@ -326,6 +340,12 @@ class MarketDataService:
 
         if total_weight == 0 or latest_time is None:
             return
+
+        # Same rescale as _update_synthetic_index above — NF_INDEX_WEIGHTS is
+        # an equal-weight approximation (see config.py) but total_weight
+        # still drops below 100 whenever a constituent's latest candle is
+        # missing, which would otherwise mute the computed move.
+        weighted_pct = weighted_pct * 100.0 / total_weight
 
         with self.state._nf_index_lock:
             idx_candles = self.state.nf_index_candles_5m
