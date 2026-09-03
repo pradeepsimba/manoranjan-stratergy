@@ -4,6 +4,28 @@
 var _watchlistData = [];   // [{token, name, ltp, change, changePct, dayOpen}]
 var _selectedToken = null;
 
+// Reached via a Scanner click-through (?token=...) - see static/js/scanner.js. The
+// Scanner is a read-only screening surface; landing on a live order form right after
+// clicking a match would let looking at a result turn into a trade with no separate
+// step. Detected purely from the URL param so a normal visit to "/" keeps the full
+// trading ticket.
+var _readOnly = !!new URLSearchParams(location.search).get('token');
+
+function _applyReadOnlyMode() {
+  if (!_readOnly) return;
+  var form = document.getElementById('order-form');
+  if (!form) return;
+  form.style.display = 'none';
+  if (!document.getElementById('order-ticket-readonly-note')) {
+    var note = document.createElement('p');
+    note.id = 'order-ticket-readonly-note';
+    note.className = 'muted-text';
+    note.style.cssText = 'padding:24px 4px;text-align:center;line-height:1.7';
+    note.innerHTML = 'Read-only view from the Scanner.<br><a href="/">Open the Terminal</a> to place an order.';
+    form.parentElement.appendChild(note);
+  }
+}
+
 async function loadWatchlist() {
   try {
     _watchlistData = await apiGet('/api/instruments');
@@ -223,4 +245,7 @@ window.addEventListener('market:depth', function (evt) {
   });
 });
 
-document.addEventListener('DOMContentLoaded', loadWatchlist);
+document.addEventListener('DOMContentLoaded', function () {
+  _applyReadOnlyMode();
+  loadWatchlist();
+});
