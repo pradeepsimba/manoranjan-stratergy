@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
-  <link rel="stylesheet" href="/css/dashboard.css?v=41">
+  <link rel="stylesheet" href="/css/dashboard.css?v=44">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -402,6 +402,8 @@
             <option value="8">Last 8 bars</option>
             <option value="10">Last 10 bars</option>
             <option value="15">Last 15 bars</option>
+            <option value="25">Last 25 bars</option>
+            <option value="50">Last 50 bars</option>
           </select>
           <label class="oc-toggle-label" title="Print each cell's raw open/close values for verification">
             <input type="checkbox" id="show-oc-toggle" onchange="setShowOC(this.checked)"> O/C
@@ -414,6 +416,7 @@
       </div>
       <div class="panel-body dash-body" id="stock-candles-body">
         <div class="global-signal-badge" id="global-signal-badge">GLOBAL SIGNAL: —</div>
+        <div class="global-signal-badge" id="weighted-red-green" hidden></div>
         <div class="alert-threshold-badge" id="alert-threshold-badge">0/6 leaders crossed their alert threshold</div>
         <div class="breakout-banner" id="breakout-banner">No breakout detected.</div>
         <div class="tbl-wrap" id="stock-table-wrap">
@@ -449,6 +452,8 @@
             <option value="8">Last 8 bars</option>
             <option value="10">Last 10 bars</option>
             <option value="15">Last 15 bars</option>
+            <option value="25">Last 25 bars</option>
+            <option value="50">Last 50 bars</option>
           </select>
           <label class="oc-toggle-label" title="Print each cell's raw open/close values for verification">
             <input type="checkbox" id="show-oc-toggle-nf" onchange="setShowOC(this.checked)"> O/C
@@ -461,6 +466,7 @@
       </div>
       <div class="panel-body dash-body" id="stock-candles-nf-body">
         <div class="global-signal-badge" id="global-signal-badge-nf">GLOBAL SIGNAL: —</div>
+        <div class="global-signal-badge" id="weighted-red-green-nf" hidden></div>
         <div class="alert-threshold-badge" id="alert-threshold-badge-nf">0/12 leaders crossed their alert threshold</div>
         <div class="breakout-banner" id="breakout-banner-nf">No breakout detected.</div>
         <div class="tbl-wrap" id="stock-table-nf-wrap">
@@ -492,11 +498,30 @@
       </div>
       <div class="panel-body">
         <div class="muted-text" style="margin-bottom:8px">
-          Tests whether N-of-6 BankNifty leaders crossing their OWN alert threshold
-          (same direction, same bar) predicts BankNifty index's NEXT 5m candle —
-          uses the exact thresholds set in Settings → BN Alerts. Not the same as
-          the options P&amp;L backtest below; this only checks index direction/move,
-          no trade simulation.
+          Tests whether N-of-6 BankNifty leaders agreeing on direction on one 5m
+          bar predicts BankNifty index's NEXT 5m candle. "Simple direction" only
+          needs the leader's bar to close red/green (plain close-vs-open, no
+          magnitude) — "Threshold" additionally requires it to cross its OWN
+          alert threshold from Settings → BN Alerts (a stricter, rarer signal).
+          Not the same as the options P&amp;L backtest below; this only checks
+          index direction/move, no trade simulation.
+        </div>
+        <div class="kite-form" style="margin-bottom:8px">
+          <div class="field">
+            <label class="field-label">Mode</label>
+            <select class="field-input" id="signal-study-mode">
+              <option value="direction" selected>Simple direction</option>
+              <option value="threshold">Threshold (alert pts)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label">Days back</label>
+            <input class="field-input" id="signal-study-days" type="number" min="1" value="30">
+          </div>
+          <div class="field">
+            <label class="field-label">Leaders required</label>
+            <input class="field-input" id="signal-study-required" type="number" min="1" max="6" placeholder="default">
+          </div>
         </div>
         <div id="signal-study-result"></div>
       </div>
@@ -589,11 +614,11 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="/js/util.js?v=41"></script>
-<script src="/js/breakout.js?v=41"></script>
-<script src="/js/qtyAudit.js?v=41"></script>
-<script src="/js/kiteForm.js?v=41"></script>
-<script src="/js/alerts.js?v=41"></script>
-<script src="/js/dashboard.js?v=41"></script>
+<script src="/js/util.js?v=44"></script>
+<script src="/js/breakout.js?v=44"></script>
+<script src="/js/qtyAudit.js?v=44"></script>
+<script src="/js/kiteForm.js?v=44"></script>
+<script src="/js/alerts.js?v=44"></script>
+<script src="/js/dashboard.js?v=44"></script>
 </body>
 </html>

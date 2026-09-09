@@ -173,9 +173,19 @@ function runBnSignalStudy() {
   if (btn) btn.disabled = true;
   resultEl.innerHTML = '<div class="muted-text">Running…</div>';
 
-  fetch('/api/signal-study/bn', { method: 'POST' })
-    .then(r => r.json())
-    .then(renderBnSignalStudy)
+  const mode = document.getElementById('signal-study-mode')?.value || 'direction';
+  const days = document.getElementById('signal-study-days')?.value;
+  const required = document.getElementById('signal-study-required')?.value;
+  const params = new URLSearchParams({ mode });
+  if (days) params.set('days', days);
+  if (required) params.set('required', required);
+
+  fetch(`/api/signal-study/bn?${params.toString()}`, { method: 'POST' })
+    .then(r => r.json().then(body => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok) { resultEl.innerHTML = `<div class="muted-text pnl-neg">Error: ${escHtml(body.detail || 'request failed')}</div>`; return; }
+      renderBnSignalStudy(body);
+    })
     .catch(e => { resultEl.innerHTML = `<div class="muted-text pnl-neg">Error: ${escHtml(e.message)}</div>`; })
     .finally(() => { if (btn) btn.disabled = false; });
 }
@@ -183,6 +193,7 @@ function runBnSignalStudy() {
 function renderBnSignalStudy(d) {
   const el = document.getElementById('signal-study-result');
   if (!el) return;
+  const modeLabel = d.mode === 'threshold' ? 'Threshold (alert pts)' : 'Simple direction';
   if (!d.total_signals) {
     el.innerHTML = `<div class="muted-text">${escHtml(d.note || 'No consensus signals found in the available history.')}</div>`;
     return;
@@ -190,7 +201,7 @@ function renderBnSignalStudy(d) {
   const pct = v => v != null ? (v * 100).toFixed(1) + '%' : '—';
   const pts = v => v != null ? v.toFixed(2) + ' pts' : '—';
   el.innerHTML = `
-    <div class="muted-text">Range: ${escHtml(d.from_date)} to ${escHtml(d.to_date)} |
+    <div class="muted-text">Mode: ${escHtml(modeLabel)} | Range: ${escHtml(d.from_date)} to ${escHtml(d.to_date)} |
       Consensus required: ${d.consensus_required} of 6 | Total signals: ${d.total_signals}</div>
     <div class="bt-grid" style="margin-top:8px">
       <div class="bt-cell"><div class="bt-cell-label">Up signals</div><div class="bt-cell-val">${d.signals_up}</div></div>

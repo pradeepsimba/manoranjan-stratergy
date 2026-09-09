@@ -284,3 +284,33 @@ def compute_global_signal(counts: List[Dict[str, int]], latest_by_token: Dict[st
         "countSignal": count_signal, "countColor": count_color,
         "weightedPct": round(weighted_pct, 3), "points": points,
     }
+
+
+# ── Weighted red/green split (confirmed-weight stocks only) ─────────────────
+
+def compute_weighted_red_green(latest_by_token: Dict[str, Candle], weights: Dict[str, float],
+                               confirmed_tokens: set) -> Dict:
+    """
+    For the LATEST bar only: sum cfg.BN_INDEX_WEIGHTS/NF_INDEX_WEIGHTS weight
+    into a red or green bucket by that stock's own close-vs-open color,
+    restricted to `confirmed_tokens` (cfg.BN_INDEX_WEIGHTS_CONFIRMED/
+    NF_INDEX_WEIGHTS_CONFIRMED) — an explicit user decision to total weight
+    only for stocks with a real, user-verified weight, not the full
+    instrument list (some of which still carry older/placeholder weights).
+    A neutral/unchanged/missing-data bar contributes to neither side, but
+    its weight still counts toward `total` (the denominator is fixed —
+    "how much of the weight I trust is currently red/green", not "of
+    whatever happened to have data this bar").
+    """
+    red = green = total = 0.0
+    for token in confirmed_tokens:
+        w = weights.get(token, 0.0)
+        total += w
+        candle = latest_by_token.get(token)
+        if not candle or not candle.open or not candle.close:
+            continue
+        if candle.close > candle.open:
+            green += w
+        elif candle.close < candle.open:
+            red += w
+    return {"red": round(red, 2), "green": round(green, 2), "total": round(total, 2)}

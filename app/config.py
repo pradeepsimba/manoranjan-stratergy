@@ -129,26 +129,60 @@ BN_ALL_STOCKS: Dict[str, str] = {
     "CANARA BANK":           "CANBK",       # was "10794"
 }
 
-# Exact c.html INDEX_WEIGHTS table (Nifty Bank per-stock weight, % as of
-# the source's "Oct 30, 2025" snapshot) — keyed by the same trading-symbol
-# strings as BN_ALL_STOCKS' values (c.html keys this by `stock_symbol` too;
-# this repo's candles_5m is likewise stock_symbol-keyed — see CLAUDE.md's
-# "candles_5m is keyed by TOKEN" convention, now token = trading symbol).
-# Same 11 stocks as BN_ALL_STOCKS, no new universe needed. Used for the
-# weighted global-signal/contribution-analysis port (app/engine/bn_breakout.py)
-# and the synthetic BankNifty index candle (app/services/market_data.py).
+# Nifty Bank per-stock weight, % — keyed by the same trading-symbol strings
+# as BN_ALL_STOCKS' values (this repo's candles_5m is likewise stock_symbol-
+# keyed — see CLAUDE.md's "candles_5m is keyed by TOKEN" convention, now
+# token = trading symbol). Used for the weighted global-signal/contribution-
+# analysis port (app/engine/bn_breakout.py) and the synthetic BankNifty
+# index candle (app/services/market_data.py).
+#
+# Updated 2026-09-07 from a user-supplied current weightage snapshot for 9 of
+# these 11 (HDFCBANK/ICICIBANK/SBIN/KOTAKBANK/AXISBANK/INDUSINDBK/AUBANK/
+# IDFCFIRSTB/FEDERALBNK), replacing the older "Oct 30, 2025" c.html figures.
+# PNB/CANBK were NOT in that new snapshot (a "Bank of Baroda" entry appeared
+# in their place — not currently a tracked BN_ALL_STOCKS instrument) — their
+# weights are left at the prior snapshot's values rather than guessed.
 BN_INDEX_WEIGHTS: Dict[str, float] = {
-    "HDFCBANK":   31.86,   # HDFC BANK
-    "ICICIBANK":  20.14,   # ICICI BANK
-    "SBIN":       17.83,   # STATE BANK OF INDIA
-    "KOTAKBANK":  8.79,    # KOTAK BANK
-    "AXISBANK":   7.96,    # AXIS BANK
-    "INDUSINDBK": 2.92,    # INDUSIND BANK
-    "PNB":        2.86,    # PUNJAB NATIONAL BANK
-    "CANBK":      2.40,    # CANARA BANK
-    "IDFCFIRSTB": 1.40,    # IDFC FIRST BANK
-    "AUBANK":     1.35,    # AU SMALL FINANCE BANK
-    "FEDERALBNK": 1.19,    # FEDERAL BANK
+    "HDFCBANK":   17.02,   # HDFC BANK
+    "ICICIBANK":  14.86,   # ICICI BANK
+    "SBIN":       10.27,   # STATE BANK OF INDIA
+    "KOTAKBANK":  9.88,    # KOTAK BANK
+    "AXISBANK":   9.20,    # AXIS BANK
+    "FEDERALBNK": 7.15,    # FEDERAL BANK
+    "INDUSINDBK": 5.45,    # INDUSIND BANK
+    "AUBANK":     4.82,    # AU SMALL FINANCE BANK
+    "IDFCFIRSTB": 4.68,    # IDFC FIRST BANK
+    "PNB":        2.86,    # PUNJAB NATIONAL BANK — unchanged, not in the new snapshot
+    "CANBK":      2.40,    # CANARA BANK — unchanged, not in the new snapshot
+}
+
+# "Bank of Baroda" — the 10th stock in the user's 2026-09-07 weightage
+# snapshot. Deliberately NOT merged into BN_INDEX_WEIGHTS above: that dict
+# also drives compute_global_signal and the synthetic BankNifty index (see
+# market_data.py), and adding a "phantom" stock with no real candle data
+# would quietly dilute THOSE weighted averages (each would treat it as an
+# always-flat 3.48%-weight constituent). It's also NOT in BN_ALL_STOCKS/
+# BN_LEADER_STOCKS — no WS subscription, no confirmed vendor stock_symbol
+# (guessing "BANKBARODA" risks the exact silent-zero-data mismatch that bit
+# BankNifty/Nifty 50's own index tokens earlier). This exists ONLY so the
+# weighted red/green split's TOTAL can include it, per explicit user request
+# ("totally i given 10 stocks now") — it will always read as no-data/
+# unchanged there. If it's ever wired up as a real instrument, confirm its
+# actual stock_symbol first, then fold it into BN_ALL_STOCKS/BN_INDEX_WEIGHTS
+# properly instead of this side-channel.
+BN_UNTRACKED_WEIGHTS: Dict[str, float] = {
+    "BANKBARODA": 3.48,   # BANK OF BARODA
+}
+
+# The exact 10 stocks in the user's 2026-09-07 weightage snapshot — the
+# weighted red/green split's TOTAL is computed over this set (from
+# BN_INDEX_WEIGHTS ∪ BN_UNTRACKED_WEIGHTS). PNB/CANBK are deliberately
+# excluded — the user did not re-supply weights for those two. Used by the
+# Stock Candles panel's per-bar weighted red/green split
+# (app.engine.bn_breakout.compute_weighted_red_green).
+BN_INDEX_WEIGHTS_CONFIRMED = {
+    "HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK",
+    "FEDERALBNK", "INDUSINDBK", "AUBANK", "IDFCFIRSTB", "BANKBARODA",
 }
 
 # BankNifty exchange lot size — a contract-spec fact, not a user tunable.
@@ -251,13 +285,40 @@ NF_ALL_STOCKS: Dict[str, str] = {
     "HDFC LIFE INSURANCE":      "HDFCLIFE",
 }
 
-# Equal weight across all 32 (100/32) — no real per-stock Nifty 50 weights
-# were supplied (unlike BN_INDEX_WEIGHTS' real Oct-2025 snapshot), per an
+# Equal weight across all 32 (100/32) as the base — no real per-stock Nifty
+# 50 weights were originally supplied (unlike BN_INDEX_WEIGHTS), per an
 # explicit user decision. Keyed by stock_symbol, same convention as
-# BN_INDEX_WEIGHTS. Used only for the synthetic-index fallback.
+# BN_INDEX_WEIGHTS. Used for the weighted global-signal/contribution-analysis
+# port (app/engine/bn_breakout.py) and the synthetic Nifty 50 index candle
+# (app/services/market_data.py).
 NF_INDEX_WEIGHTS: Dict[str, float] = {
     token: 100.0 / len(NF_ALL_STOCKS) for token in NF_ALL_STOCKS.values()
 }
+# Overlay real Nifty 50 index weights (2026-09-07 user-supplied snapshot) for
+# the 10 constituents we now have actual numbers for — the other 22
+# NF_ALL_STOCKS entries stay at the equal-weight placeholder above until real
+# weights for them are supplied too. Still a real accuracy improvement even
+# partial: HDFC Bank's true ~10% influence was previously indistinguishable
+# from a sub-1%-weight constituent under the flat equal-weight scheme.
+_NF_INDEX_WEIGHTS_CONFIRMED_VALUES = {
+    "HDFCBANK":   9.97,    # HDFC BANK
+    "ICICIBANK":  9.32,    # ICICI BANK
+    "RELIANCE":   8.17,    # RELIANCE INDUSTRIES
+    "BHARTIARTL": 5.12,    # BHARTI AIRTEL
+    "LT":         4.24,    # LARSEN & TOUBRO
+    "SBIN":       3.84,    # STATE BANK OF INDIA
+    "INFY":       3.62,    # INFOSYS
+    "AXISBANK":   3.34,    # AXIS BANK
+    "KOTAKBANK":  2.86,    # KOTAK BANK
+    "BAJFINANCE": 2.60,    # BAJAJ FINANCE
+}
+NF_INDEX_WEIGHTS.update(_NF_INDEX_WEIGHTS_CONFIRMED_VALUES)
+
+# NF mirror of BN_INDEX_WEIGHTS_CONFIRMED above — the 10 NF_INDEX_WEIGHTS
+# keys with a real, user-supplied weight, as opposed to the other 22 still
+# on the equal-weight placeholder. Derived from the overlay dict itself so
+# the two can never drift apart.
+NF_INDEX_WEIGHTS_CONFIRMED = set(_NF_INDEX_WEIGHTS_CONFIRMED_VALUES.keys())
 
 # Nifty 50 exchange lot size — a contract-spec fact, not a user tunable.
 NF_LOT_SIZE = 65

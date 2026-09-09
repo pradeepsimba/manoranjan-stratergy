@@ -71,7 +71,9 @@ async def _sleep_toward(hour: int, minute: int) -> None:
 _LEADER_HISTORY_BARS = 25   # covers both pattern (last 3) and qty-avg (last 20) window
 
 # ── Stock Candles panel (c.html port, unrelated to the BN trading strategy) ──
-_STOCK_TABLE_BARS   = 15   # bars per stock sent for the live candle table
+_STOCK_TABLE_BARS   = 50   # bars per stock sent for the live candle table (client "Last N bars" selector trims further) —
+                           # kept well under MAX_CANDLE_BUFFER=300; pushed every 1s to every connected browser, so this
+                           # is a real bandwidth/CPU tradeoff, not free — don't raise it much further without reason.
 _NUM_SIGNAL_CANDLES = 3    # c.html's default `numCandles` for updateGlobalSignal
 _SR_15M_REFRESH_S   = 300  # c.html's own findSupportResistance runs infrequently too
 
@@ -915,6 +917,9 @@ class SchedulerService:
         latest_by_token = {tok: c[-1] for tok, c in all_candles.items() if c}
         global_signal   = bn_breakout.compute_global_signal(column_counts, latest_by_token,
                                                              cfg.BN_INDEX_TOKEN, cfg.BN_INDEX_WEIGHTS)
+        weighted_red_green = bn_breakout.compute_weighted_red_green(
+            latest_by_token, {**cfg.BN_INDEX_WEIGHTS, **cfg.BN_UNTRACKED_WEIGHTS},
+            cfg.BN_INDEX_WEIGHTS_CONFIRMED)
 
         # "surged" is only meaningful for the 6 leader stocks (the ones the
         # Big Trades panel shows) — computed per-bar with the exact same
@@ -959,6 +964,8 @@ class SchedulerService:
         latest_by_token_nf = {tok: c[-1] for tok, c in all_candles_nf.items() if c}
         global_signal_nf   = bn_breakout.compute_global_signal(column_counts_nf, latest_by_token_nf,
                                                                 cfg.NF_INDEX_TOKEN, cfg.NF_INDEX_WEIGHTS)
+        weighted_red_green_nf = bn_breakout.compute_weighted_red_green(
+            latest_by_token_nf, cfg.NF_INDEX_WEIGHTS, cfg.NF_INDEX_WEIGHTS_CONFIRMED)
 
         stock_candles_nf = {
             token_to_name_nf.get(tok, tok): [
@@ -1001,10 +1008,12 @@ class SchedulerService:
             "liveLeaderRowsNf": self._build_live_leader_rows_nf(st),
             "stockCandles": stock_candles,
             "globalSignal": global_signal,
+            "weightedRedGreen": weighted_red_green,
             "breakout":     breakout,
             "srLevels":     sr_levels,
             "stockCandlesNf": stock_candles_nf,
             "globalSignalNf": global_signal_nf,
+            "weightedRedGreenNf": weighted_red_green_nf,
             "breakoutNf":     breakout_nf,
             "srLevelsNf":     sr_levels_nf,
         }

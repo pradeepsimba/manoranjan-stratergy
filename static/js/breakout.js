@@ -17,11 +17,13 @@ let _lastOpenByStock = {};   // {name: open price of the newest/forming bar} —
 const STOCK_IDS_BN = { signal: 'global-signal-badge', banner: 'breakout-banner',
                       head: 'stock-table-head', body: 'stock-table-body',
                       srBody: 'sr-table-body', indexKey: 'BANKNIFTY',
-                      barsSelect: 'stock-bars-select', ocToggle: 'show-oc-toggle' };
+                      barsSelect: 'stock-bars-select', ocToggle: 'show-oc-toggle',
+                      weightedRG: 'weighted-red-green' };
 const STOCK_IDS_NF = { signal: 'global-signal-badge-nf', banner: 'breakout-banner-nf',
                       head: 'stock-table-head-nf', body: 'stock-table-body-nf',
                       srBody: 'sr-table-body-nf', indexKey: 'NIFTY 50',
-                      barsSelect: 'stock-bars-select-nf', ocToggle: 'show-oc-toggle-nf' };
+                      barsSelect: 'stock-bars-select-nf', ocToggle: 'show-oc-toggle-nf',
+                      weightedRG: 'weighted-red-green-nf' };
 
 // Whether each candle cell also prints its raw open/close (see
 // _candleCellHtml) — off by default, shared across both panels like
@@ -40,7 +42,7 @@ function setShowOC(checked) {
 }
 
 // How many of each stock's most-recent bars to actually render as columns
-// (the server sends up to 15 — see scheduler.py's _STOCK_TABLE_BARS — this
+// (the server sends up to 50 — see scheduler.py's _STOCK_TABLE_BARS — this
 // just trims the client-side view). Shared across both panels, persisted
 // like the theme/instrument-filter choices; the "Show all rows" button
 // (toggleTableExpand) is a separate, orthogonal control — that one clamps
@@ -50,7 +52,7 @@ let _lastStockCandlesBn = null;
 let _lastStockCandlesNf = null;
 
 function setStockBarsCount(val) {
-  const n = Math.max(1, Math.min(15, parseInt(val, 10) || 4));
+  const n = Math.max(1, Math.min(50, parseInt(val, 10) || 4));
   _stockBarsCount = n;
   localStorage.setItem('stockCandleBars', String(n));
   [STOCK_IDS_BN.barsSelect, STOCK_IDS_NF.barsSelect].forEach(id => {
@@ -72,6 +74,28 @@ function renderGlobalSignal(gs, ids) {
     GLOBAL SIGNAL: <b style="color:${gs.color}">${gs.signal}</b>
     <small>Count: <span style="color:${gs.countColor}">${gs.countSignal}</span> |
     Weighted: ${gs.weightedPct > 0 ? '+' : ''}${gs.weightedPct}%${pts}</small>
+  `;
+}
+
+// User-supplied weightage badge: on the LATEST bar, how much of the index
+// weight (restricted to stocks with a confirmed, user-verified weight — see
+// cfg.BN_INDEX_WEIGHTS_CONFIRMED/NF_INDEX_WEIGHTS_CONFIRMED) is currently
+// red vs green. `total` is the sum of ONLY those confirmed stocks' weights
+// (not the full instrument list, and not normalized to 100) — an explicit
+// user decision so this reads as "how much of the weight I trust is red
+// right now", not a % of the whole index.
+function renderWeightedRedGreen(wrg, ids) {
+  ids = ids || STOCK_IDS_BN;
+  const box = document.getElementById(ids.weightedRG);
+  if (!box) return;
+  if (!wrg || !wrg.total) { box.hidden = true; return; }
+  box.hidden = false;
+  const neutral = Math.max(0, wrg.total - wrg.red - wrg.green);
+  const neutralText = neutral > 0.005 ? ` <span class="muted-text">(${neutral.toFixed(2)} unchanged)</span>` : '';
+  box.innerHTML = `
+    <span class="muted-text">Weightage (confirmed stocks):</span>
+    <span class="pnl-neg">🔴 ${wrg.red.toFixed(2)}/${wrg.total.toFixed(2)}</span>
+    <span class="pnl-pos">🟢 ${wrg.green.toFixed(2)}/${wrg.total.toFixed(2)}</span>${neutralText}
   `;
 }
 

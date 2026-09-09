@@ -20,8 +20,8 @@ for the 6 leader stocks over that same span (fully archived on the vendor
 side, unlike the index).
 """
 
-from datetime import datetime
-from typing import Any, Dict, List
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import app.config as cfg
@@ -32,7 +32,8 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 def _leader_signal(bar_by_token: Dict[str, Candle]) -> List[Dict[str, Any]]:
-    """Python mirror of static/js/alerts.js's checkPriceAlerts crossed/direction check."""
+    """Python mirror of static/js/alerts.js's checkPriceAlerts crossed/direction check —
+    used by mode="threshold" (a leader must ALSO cross its own move-alert points)."""
     results = []
     for name, token in cfg.BN_LEADER_STOCKS.items():
         bar = bar_by_token.get(token)
@@ -48,10 +49,47 @@ def _leader_signal(bar_by_token: Dict[str, Candle]) -> List[Dict[str, Any]]:
     return results
 
 
-async def run_bn_leader_consensus_study(db) -> Dict[str, Any]:
-    # 1. The full self-recorded BankNifty index archive — no date range
-    # filtering needed, this repo's only source of BankNifty index history.
-    index_bars = await db.get_bn_index_bars("2000-01-01T00:00:00", "2100-01-01T00:00:00")
+def _leader_direction(bar_by_token: Dict[str, Candle]) -> List[Dict[str, Any]]:
+    """Plain green/red vote — mirrors bn_signals.leaders_momentum's direction
+    check (close vs open), no move-alert threshold/magnitude involved. Used
+    by mode="direction": "N of 6 leaders simply closed the same color"."""
+    results = []
+    for name, token in cfg.BN_LEADER_STOCKS.items():
+        bar = bar_by_token.get(token)
+        if bar is None or not bar.open or not bar.close:
+            continue
+        direction = "up" if bar.close > bar.open else ("down" if bar.close < bar.open else None)
+        results.append({"name": name, "dir": direction})
+    return results
+
+
+async def run_bn_leader_consensus_study(
+    db, mode: str = "threshold", days_back: Optional[int] = None,
+    required: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    mode="threshold" (default, original behavior): a leader only counts if it
+    BOTH closed red/green AND crossed its own BN_PRICE_ALERT_PTS_* threshold
+    — the exact condition static/js/alerts.js's checkConsensusAlert fires on.
+    mode="direction": a leader counts on plain close-vs-open color alone, no
+    magnitude requirement — mirrors bn_signals.leaders_momentum's leader-vote
+    gate (BN_SAME_DIRECTION_REQUIRED), just evaluated standalone over history
+    instead of as one gate among several in the live entry decision.
+
+    days_back=None (default) scans the full self-recorded bn_index_bars
+    archive (this repo's only source of BankNifty index history — see
+    CLAUDE.md); a number restricts to the most recent N days of it.
+
+    required=None uses the mode's own matching cfg default
+    (BN_ALERT_CONSENSUS_REQUIRED for threshold, BN_SAME_DIRECTION_REQUIRED
+    for direction) so this stays in sync with whatever the Settings page
+    currently has configured, rather than hardcoding a number here.
+    """
+    if days_back is not None:
+        from_iso = (datetime.now(IST) - timedelta(days=days_back)).isoformat()
+    else:
+        from_iso = "2000-01-01T00:00:00"
+    index_bars = await db.get_bn_index_bars(from_iso, "2100-01-01T00:00:00")
     if len(index_bars) < 2:
         return {
             "total_signals": 0,
@@ -70,7 +108,8 @@ async def run_bn_leader_consensus_study(db) -> Dict[str, Any]:
         for b in bars:
             leader_by_time.setdefault(b.start_time, {})[token] = b
 
-    required = cfg.BN_ALERT_CONSENSUS_REQUIRED
+    if required is None:
+        required = cfg.BN_SAME_DIRECTION_REQUIRED if mode == "direction" else cfg.BN_ALERT_CONSENSUS_REQUIRED
     signals_up = signals_down = 0
     hits_up = hits_down = 0
     move_points_up: List[float] = []
@@ -98,9 +137,14 @@ async def run_bn_leader_consensus_study(db) -> Dict[str, Any]:
             continue
         bars_with_leader_data += 1
 
-        results = _leader_signal(leaders_now)
-        up_count = sum(1 for r in results if r["crossed"] and r["dir"] == "up")
-        down_count = sum(1 for r in results if r["crossed"] and r["dir"] == "down")
+        if mode == "direction":
+            results = _leader_direction(leaders_now)
+            up_count = sum(1 for r in results if r["dir"] == "up")
+            down_count = sum(1 for r in results if r["dir"] == "down")
+        else:
+            results = _leader_signal(leaders_now)
+            up_count = sum(1 for r in results if r["crossed"] and r["dir"] == "up")
+            down_count = sum(1 for r in results if r["crossed"] and r["dir"] == "down")
         max_up_count = max(max_up_count, up_count)
         max_down_count = max(max_down_count, down_count)
 
@@ -118,6 +162,7 @@ async def run_bn_leader_consensus_study(db) -> Dict[str, Any]:
                 hits_down += 1
 
     result = {
+        "mode": mode,
         "from_date": str(from_date), "to_date": str(to_date),
         "total_signals": signals_up + signals_down,
         "consensus_required": required,
@@ -133,11 +178,12 @@ async def run_bn_leader_consensus_study(db) -> Dict[str, Any]:
         "max_down_count": max_down_count,
     }
     if result["total_signals"] == 0:
+        setting_hint = ("BN_SAME_DIRECTION_REQUIRED" if mode == "direction"
+                        else "BN_ALERT_CONSENSUS_REQUIRED or the per-stock point thresholds in Settings → BN Alerts")
         result["note"] = (
             f"Scanned {bars_scanned} bars ({bars_with_leader_data} had matching leader data). "
             f"Closest it ever got: {max(max_up_count, max_down_count)} of 6 leaders agreed "
             f"(need {required}) — the condition never fired, not a data problem. "
-            f"Try lowering BN_ALERT_CONSENSUS_REQUIRED or the per-stock point thresholds in "
-            f"Settings → BN Alerts to see how much data it would take to hit."
+            f"Try lowering {setting_hint} to see how much data it would take to hit."
         )
     return result

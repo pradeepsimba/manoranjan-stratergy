@@ -180,10 +180,18 @@ def get_prices() -> Dict[str, float]:
 # real backtest needs.
 
 @router.post("/api/signal-study/bn")
-async def bn_signal_study() -> Dict[str, Any]:
+async def bn_signal_study(
+    mode: str = "threshold", days: Optional[int] = None, required: Optional[int] = None,
+) -> Dict[str, Any]:
     if _db is None:
         raise HTTPException(503, "Database not ready")
-    return await run_bn_leader_consensus_study(_db)
+    if mode not in ("threshold", "direction"):
+        raise HTTPException(400, "mode must be 'threshold' or 'direction'")
+    if days is not None and days <= 0:
+        raise HTTPException(400, "days must be > 0")
+    if required is not None and not (1 <= required <= 6):
+        raise HTTPException(400, "required must be between 1 and 6")
+    return await run_bn_leader_consensus_study(_db, mode=mode, days_back=days, required=required)
 
 
 # ── Backtest ──────────────────────────────────────────────────────────────────

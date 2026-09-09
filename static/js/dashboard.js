@@ -156,6 +156,10 @@ function render(d) {
     renderGlobalSignal(d.globalSignal);
     renderGlobalSignal(d.globalSignalNf, STOCK_IDS_NF);
   }
+  if (typeof renderWeightedRedGreen === 'function') {
+    renderWeightedRedGreen(d.weightedRedGreen);
+    renderWeightedRedGreen(d.weightedRedGreenNf, STOCK_IDS_NF);
+  }
   if (typeof renderBreakoutBanner === 'function') {
     renderBreakoutBanner(d.breakout);
     renderBreakoutBanner(d.breakoutNf, STOCK_IDS_NF);
