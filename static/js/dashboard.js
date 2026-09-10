@@ -947,25 +947,15 @@ function deleteRun(runId) {
     .catch(e => console.error('Delete failed:', e));
 }
 
-// On page load: check for a running backtest (resume polling if found), then
-// load the most recent done run so results survive a refresh — no localStorage.
-fetch('/api/backtests')
-  .then(r => r.json())
-  .then(runs => {
-    renderBtHistory(runs);
-    const active = Array.isArray(runs) && runs.find(r => r.status === 'running');
-    if (active) {
-      setBtStatus('running…', 'yellow');
-      setRunBtn(true);
-      document.getElementById('bt-trades').innerHTML =
-        '<tr><td colspan="11" class="empty-cell">Running…</td></tr>';
-      startPolling(active.run_id);
-      return;
-    }
-    const latest = Array.isArray(runs) && runs.find(r => r.status === 'done');
-    if (latest) loadRun(latest.run_id);
-  })
-  .catch(() => { /* server not ready yet — form stays visible */ });
+// The Backtest panel's HTML was removed from index.html (dashboard
+// simplification), so the page-load "resume a running backtest / load the
+// last result" fetch that used to live here was deleted too — it called
+// renderBtHistory/setBtStatus/etc., which unconditionally touch bt-history/
+// bt-status/bt-trades and would throw a TypeError on every page load now
+// that those elements don't exist. The /api/backtest* endpoints and
+// runBacktest()/pollBacktest()/loadRun() etc. below are all still there and
+// still work if ever called directly — there's just no button left to call
+// them from.
 
 initTradesDB();
 connect();

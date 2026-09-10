@@ -69,13 +69,33 @@ function _fireAlert(title, body) {
   if (typeof toast === 'function') toast(`${title}: ${body}`, 'warn');
 }
 
+// Updates the persistent on-page banner (next to the Global Signal box) with
+// the last-fired alert for one instrument — unlike the Notification/toast
+// (which disappears on its own), this stays visible until the next alert for
+// that same instrument replaces it. Purely a display of what _fireAlert
+// already fired; never re-evaluates the condition itself.
+function _renderAlertBanner(elId, title, body) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const dir = /moved up together/.test(title) ? 'up' : /moved down together/.test(title) ? 'down' : null;
+  const time = new Date().toLocaleTimeString('en-IN', { hour12: false });
+  el.textContent = `[${time}] ${title}${body ? ' — ' + body : ''}`;
+  el.classList.remove('up', 'down');
+  if (dir) el.classList.add(dir);
+}
+
 // Handles a server-pushed {type: "ALERT", title, body} WebSocket message
 // (see dashboard.js's ws.onmessage) — the server already did the consensus
 // check and edge-triggering in app/services/price_alerts.py; this just
-// displays it, the same way a client-fired alert used to.
+// displays it, the same way a client-fired alert used to. title always
+// starts with the instr_label price_alerts.py was called with ("BankNifty"
+// or "Nifty 50" — see scheduler.py's _tick_alerts), which is how the banner
+// picks the right panel.
 function handleServerAlert(d) {
   if (!d || !d.title) return;
   _fireAlert(d.title, d.body || '');
+  const elId = d.title.startsWith('Nifty 50:') ? 'alert-banner-nf' : 'alert-banner-bn';
+  _renderAlertBanner(elId, d.title, d.body || '');
 }
 
 // Returns [{stock, crossed, dir}, ...] — feeds ONLY the live threshold badge

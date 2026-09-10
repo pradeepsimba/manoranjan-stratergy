@@ -277,7 +277,7 @@ body {
 /* ── Layout ────────────────────────────────────────────────────────────────── */
 .main-grid {
   display: grid;
-  grid-template-columns: 1.5fr 1fr;
+  grid-template-columns: 1fr;
   gap: 12px;
   padding: 12px 18px;
   align-items: start;
@@ -1006,6 +1006,19 @@ a:focus-visible, button:focus-visible, input:focus-visible,
   margin-bottom: 8px; font-size: 12px; color: var(--txt-2);
 }
 .alert-threshold-badge.has-crossed { color: var(--warn); border-color: var(--warn-edge); background: var(--warn-bg); }
+
+/* Persistent readout of the last server-fired leader-consensus alert (see
+   app/services/price_alerts.py + static/js/alerts.js's handleServerAlert) —
+   stays on the page after the browser Notification/toast has disappeared,
+   updated in place the next time an alert fires. Neutral until the first
+   alert of the day; colored green/red for the direction of the last one. */
+.alert-banner {
+  padding: 6px 12px; border-radius: var(--r-sm);
+  background: var(--surf-raised); border: 1px solid var(--edge-soft);
+  margin-bottom: 8px; font-size: 12px; color: var(--txt-2);
+}
+.alert-banner.up   { color: var(--pos); border-color: var(--pos-edge); background: var(--pos-bg); }
+.alert-banner.down { color: var(--neg); border-color: var(--neg-edge); background: var(--neg-bg); }
 .breakout-banner {
   padding: 8px 12px; border-radius: var(--r-sm);
   background: var(--surf-raised); border: 1px solid var(--edge-soft);

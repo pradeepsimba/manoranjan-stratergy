@@ -18,7 +18,7 @@ Purely informational, exactly like the client-side version it replaces —
 never touches evaluate_entry/evaluate_exit, never feeds a trading decision.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import app.config as cfg
 from app.state import AppState
