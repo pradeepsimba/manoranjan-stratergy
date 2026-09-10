@@ -96,9 +96,9 @@ function render() {
     const overridden = rendered.filter(s => s.overridden).length;
     const panel = document.createElement('div');
     panel.className = 'panel';
-    // BN Strategy/BN Qty Surge/BN Risk/BN Options Pricing/BN Options Costs →
-    // "bn"; the NF mirrors → "nf"; Session Timings/Engine/Backtest are
-    // shared (no tag — always shown regardless of the instrument filter).
+    // Any group named "BN ..." → "bn"; "NF ..." → "nf" (generic prefix match,
+    // works for whatever groups SPEC currently defines — only "BN Alerts"/
+    // "NF Alerts" remain as of 2026-09-09's settings cleanup).
     if (g.name.startsWith('BN ')) panel.dataset.instr = 'bn';
     else if (g.name.startsWith('NF ')) panel.dataset.instr = 'nf';
     const rows = own.map(s => {

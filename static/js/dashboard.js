@@ -18,6 +18,7 @@ function connect() {
     try {
       const d = JSON.parse(e.data);
       if (d.type === 'TICK_UPDATE') { handleTickUpdate(d.prices); return; }
+      if (d.type === 'ALERT') { if (typeof handleServerAlert === 'function') handleServerAlert(d); return; }
       if (d.type !== 'STATE_UPDATE') return;
       scheduleRender(d);
     } catch (err) { console.error(err); }
@@ -96,47 +97,6 @@ function render(d) {
   if (nfLtpEl) nfLtpEl.textContent = d.nfLtp ? fmt2(d.nfLtp) : '—';
   const nfSynBadge = document.getElementById('nf-synthetic-badge');
   if (nfSynBadge) nfSynBadge.style.display = d.nfIndexSynthetic ? '' : 'none';
-
-  const pnl    = d.dailyPnl || 0;
-  const pnlEl  = document.getElementById('stat-pnl');
-  pnlEl.textContent = (pnl >= 0 ? '+' : '') + '₹' + fmt2(pnl);
-  pnlEl.className   = 'stat-value' + (pnl > 0 ? ' pnl-pos' : pnl < 0 ? ' pnl-neg' : '');
-
-  const pnlCard = document.getElementById('card-pnl');
-  if (pnlCard) {
-    pnlCard.classList.remove('is-pos', 'is-neg');
-    if (pnl > 0) pnlCard.classList.add('is-pos');
-    else if (pnl < 0) pnlCard.classList.add('is-neg');
-  }
-
-  document.getElementById('stat-funds').textContent = d.funds != null ? '₹' + fmt2(d.funds) : '—';
-  const fundsEl2 = document.getElementById('stat-funds-2');
-  if (fundsEl2) fundsEl2.textContent = d.funds != null ? '₹' + fmt2(d.funds) : '—';
-  const pnlEl2 = document.getElementById('stat-pnl-2');
-  if (pnlEl2) {
-    pnlEl2.textContent = (pnl >= 0 ? '+' : '') + '₹' + fmt2(pnl);
-    pnlEl2.className = pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : '';
-  }
-
-  const activeEl = document.getElementById('stat-active');
-  if (d.activeTrade) {
-    activeEl.textContent = `${d.activeTrade.direction} ${d.activeTrade.optionType}`;
-    activeEl.className = 'stat-value ' + (d.activeTrade.direction === 'BUY' ? 'pnl-pos' : 'pnl-neg');
-  } else {
-    activeEl.textContent = 'None';
-    activeEl.className = 'stat-value';
-  }
-
-  const activeNfEl = document.getElementById('stat-active-nf');
-  if (activeNfEl) {
-    if (d.activeTradeNf) {
-      activeNfEl.textContent = `${d.activeTradeNf.direction} ${d.activeTradeNf.optionType}`;
-      activeNfEl.className = 'stat-value ' + (d.activeTradeNf.direction === 'BUY' ? 'pnl-pos' : 'pnl-neg');
-    } else {
-      activeNfEl.textContent = 'None';
-      activeNfEl.className = 'stat-value';
-    }
-  }
 
   renderTrade(d.activeTrade, TRADE_IDS_BN);
   renderTrade(d.activeTradeNf, TRADE_IDS_NF);
@@ -239,14 +199,18 @@ function renderClosedTrades(bnTrades, nfTrades) {
   _lastClosedBn = bnTrades;
   _lastClosedNf = nfTrades || [];
 
+  // "Today's Trades" panel was removed from the page — no-op once its DOM is gone.
+  const countEl = document.getElementById('closed-count');
+  const tbody = document.getElementById('closed-tbody');
+  if (!countEl || !tbody) return;
+
   const instrFilter = window._instrFilter || 'both';
   const merged = _lastClosedBn.map(t => ({ ...t, _instr: 'BN' }))
     .concat(_lastClosedNf.map(t => ({ ...t, _instr: 'NF' })))
     .filter(t => instrFilter === 'both' || t._instr.toLowerCase() === instrFilter)
     .sort((a, b) => (a.exitTime || '').localeCompare(b.exitTime || ''));
 
-  document.getElementById('closed-count').textContent = merged.length;
-  const tbody = document.getElementById('closed-tbody');
+  countEl.textContent = merged.length;
   if (!merged.length) {
     tbody.innerHTML = '<tr><td colspan="11" class="empty-cell">No trades yet today</td></tr>';
     return;

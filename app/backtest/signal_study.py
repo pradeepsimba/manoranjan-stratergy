@@ -5,9 +5,9 @@ Leader-consensus signal study — NOT part of the main options P&L backtest
 (app/backtest/engine.py). Answers a narrower question: when N-of-6 BN leader
 stocks both cross their own BN_PRICE_ALERT_PTS_* threshold (raw points, not
 %) AND agree on direction on bar T (the EXACT same condition
-static/js/alerts.js checks live off the latest bar — see
-checkPriceAlerts/checkConsensusAlert there), how often does BankNifty's own
-bar T+1 move the same direction, and by how much?
+app/services/price_alerts.py's check_consensus fires the live ALERT
+WebSocket push on), how often does BankNifty's own bar T+1 move the same
+direction, and by how much?
 
 Synchronous — a handful of days x ~75 bars x 6 stocks, no option pricing —
 so unlike the real backtest this needs no run_id/polling/DB persistence,
@@ -70,7 +70,8 @@ async def run_bn_leader_consensus_study(
     """
     mode="threshold" (default, original behavior): a leader only counts if it
     BOTH closed red/green AND crossed its own BN_PRICE_ALERT_PTS_* threshold
-    — the exact condition static/js/alerts.js's checkConsensusAlert fires on.
+    — the exact condition app/services/price_alerts.py's check_consensus
+    fires the live ALERT WebSocket push on.
     mode="direction": a leader counts on plain close-vs-open color alone, no
     magnitude requirement — mirrors bn_signals.leaders_momentum's leader-vote
     gate (BN_SAME_DIRECTION_REQUIRED), just evaluated standalone over history

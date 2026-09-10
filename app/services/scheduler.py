@@ -28,7 +28,7 @@ from app.engine.nf_entry_exit import _leader_qty_surge as _nf_leader_qty_surge
 from app.engine.nf_entry_exit import _stock_qty_threshold as _nf_stock_qty_threshold
 from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
 from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase
-from app.services import bn_trade, nf_trade
+from app.services import bn_trade, nf_trade, price_alerts
 from app.services.historical_data import fetch_indicator_history
 from app.services.market_data import MarketDataService
 from app.services.settings import BN_FUNDS_KEY
@@ -277,6 +277,7 @@ class SchedulerService:
                 await self._tick_entries()
                 await self._tick_exits_nf()
                 await self._tick_entries_nf()
+                await self._tick_alerts()
             except Exception as e:
                 print(f"Tick loop error: {e}")
 
@@ -429,6 +430,28 @@ class SchedulerService:
             await self._db.save_position(trade, instrument="NIFTY50")
         except Exception as e:
             print(f"DB save_position (NF) error: {e}")
+
+    async def _tick_alerts(self) -> None:
+        """
+        Server-side leader-consensus price-move alert check (see
+        price_alerts.py) — runs every tick, independent of whether/how often
+        a dashboard browser tab is open. Purely informational, same as the
+        client-side version it replaces; never touches evaluate_entry/exit.
+        """
+        st = get_state()
+        try:
+            fired = price_alerts.check_consensus(
+                st, "BankNifty", cfg.BN_LEADER_STOCKS, cfg.BN_PRICE_ALERT_ATTR,
+                cfg.BN_ALERT_CONSENSUS_REQUIRED)
+            fired += price_alerts.check_consensus(
+                st, "Nifty 50", cfg.NF_LEADER_STOCKS, cfg.NF_PRICE_ALERT_ATTR,
+                cfg.NF_ALERT_CONSENSUS_REQUIRED)
+        except Exception as e:
+            print(f"Alert check error: {e}")
+            return
+        if fired and self._ws.count() > 0:
+            for alert in fired:
+                await self._ws.broadcast(json.dumps({"type": "ALERT", **alert}, default=str))
 
     async def _restore_from_db(self) -> None:
         """

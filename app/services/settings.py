@@ -3,11 +3,20 @@ from __future__ import annotations
 """
 Dynamic settings registry + persistence.
 
+As of 2026-09-09 (explicit user decision, "remove all except threshold"),
+the only tunables left here are BN/NF Alerts — the client-side price-move
+notification thresholds. Every other former tunable (session timings,
+strategy gates, risk, options pricing/costs, qty-surge thresholds, engine
+tick interval) is now a plain static attribute in app.config, no longer
+editable from Settings or per backtest run. The "time"/"cond" coercion
+machinery below is generic infrastructure kept for any future tunable that
+needs it — no current SPEC entry uses it.
+
 SPEC declares every runtime-editable tunable: display metadata, type, bounds,
 and whether it may be overridden per-backtest-run ("bt"). Values themselves
 live in app.config (defaults + runtime overrides); this module validates user
-input, expands virtual "HH:MM" time settings into their HOUR/MIN config pairs,
-and persists overrides to the app_settings table so they survive restarts.
+input and persists overrides to the app_settings table so they survive
+restarts.
 
 Add a new tunable by adding its default to app.config._DEFAULTS AND an entry
 here — nothing else is required for it to appear on the Settings page.
@@ -38,181 +47,6 @@ def _s(key: str, label: str, type_: str, group: str, *,
 
 
 SPEC: List[Dict[str, Any]] = [
-    # ── Session timings ───────────────────────────────────────────────────────
-    _s("PREMARKET_TIME", "Pre-market", "time", "Session Timings",
-       parts=("PREMARKET_HOUR", "PREMARKET_MIN"), bt=False,
-       help_="No-op placeholder in the BN engine (fixed instrument universe) — kept for phase-driver timing."),
-    _s("MARKET_OPEN_TIME", "Market open / data load", "time", "Session Timings",
-       parts=("MARKET_OPEN_HOUR", "MARKET_OPEN_MIN"), bt=False,
-       help_="Historical load + WebSocket subscribe."),
-    _s("SCAN_START_TIME", "Entry scanning starts", "time", "Session Timings",
-       parts=("SCAN_START_HOUR", "SCAN_START_MIN"),
-       help_="No entries before this time (also used by the backtest)."),
-    _s("CUTOFF_TIME", "Entry cutoff", "time", "Session Timings",
-       parts=("CUTOFF_HOUR", "CUTOFF_MIN"),
-       help_="No new entries after this; exit management keeps running (also used by the backtest)."),
-    _s("SESSION_END_TIME", "Session end / square-off", "time", "Session Timings",
-       parts=("SESSION_END_HOUR", "SESSION_END_MIN"), bt=False,
-       help_="EOD square-off and daily reset."),
-
-    # ── BN Strategy — gates ───────────────────────────────────────────────────
-    _s("BN_SIDEWAYS_RANGE_MIN", "Min 5-bar range (pts)", "float", "BN Strategy",
-       min_=1, max_=200, step=0.5, help_="Block entries when BankNifty's last 5 closes span less than this."),
-    _s("BN_MOMENTUM_THRESHOLD", "Momentum threshold (pts)", "float", "BN Strategy",
-       min_=1, max_=200, step=0.5, help_="Fixed 5m move threshold; ATR can only lower it."),
-    _s("BN_ATR_PERIOD", "ATR period (bars)", "int", "BN Strategy", min_=3, max_=50),
-    _s("BN_SAME_DIRECTION_REQUIRED", "Leaders required to agree", "int", "BN Strategy",
-       min_=1, max_=6, help_="Of the 6 leader stocks."),
-    _s("BN_ENTRY_COOLDOWN_S", "Post-exit cooldown (s)", "int", "BN Strategy", min_=0, max_=600),
-
-    # ── BN Qty Surge — per-stock bar-volume-surge thresholds (compared
-    # against each leader's latest 5m bar volume — the same figure shown in
-    # the Entry Loop Monitor's VOLUME column / Big Trades panel).
-    _s("BN_QTY_THRESHOLD_HDFC", "HDFC BANK volume threshold", "float", "BN Qty Surge",
-       min_=100, max_=1_000_000, step=100, help_="Bar volume (pre-multiplier) that counts as a surge."),
-    _s("BN_QTY_THRESHOLD_ICICI", "ICICI BANK volume threshold", "float", "BN Qty Surge",
-       min_=100, max_=1_000_000, step=100),
-    _s("BN_QTY_THRESHOLD_SBI", "STATE BANK OF INDIA volume threshold", "float", "BN Qty Surge",
-       min_=100, max_=1_000_000, step=100),
-    _s("BN_QTY_THRESHOLD_AXIS", "AXIS BANK volume threshold", "float", "BN Qty Surge",
-       min_=100, max_=1_000_000, step=100),
-    _s("BN_QTY_THRESHOLD_KOTAK", "KOTAK BANK volume threshold", "float", "BN Qty Surge",
-       min_=100, max_=1_000_000, step=100),
-    _s("BN_QTY_THRESHOLD_INDUSIND", "INDUSIND BANK volume threshold", "float", "BN Qty Surge",
-       min_=100, max_=1_000_000, step=100),
-    _s("BN_QTY_INTERVAL_MULTIPLIER", "Volume threshold multiplier", "float", "BN Qty Surge",
-       min_=0.1, max_=20, step=0.1, help_="Applied on top of each per-stock threshold above."),
-
-    # ── BN Strategy — composite indicator gate ───────────────────────────────
-    _s("BN_INDICATOR_LOOKBACK_BARS", "Indicator lookback bars", "int", "BN Strategy",
-       min_=60, max_=290, help_="Tail fed to RSI/MACD/EMA; must stay under the 300-bar candle buffer."),
-    _s("BN_RSI_PERIOD", "RSI period", "int", "BN Strategy", min_=5, max_=50),
-    _s("BN_EMA_FAST", "EMA fast period", "int", "BN Strategy", min_=2, max_=100),
-    _s("BN_EMA_SLOW", "EMA slow period", "int", "BN Strategy", min_=3, max_=200),
-    _s("BN_MACD_FAST", "MACD fast period (EMA, no signal line)", "int", "BN Strategy", min_=2, max_=100),
-    _s("BN_MACD_SLOW", "MACD slow period (EMA, no signal line)", "int", "BN Strategy", min_=3, max_=200),
-    _s("BN_RSI_BULL_LEVEL", "RSI bullish level", "int", "BN Strategy", min_=50, max_=90),
-    _s("BN_RSI_BEAR_LEVEL", "RSI bearish level", "int", "BN Strategy", min_=10, max_=50),
-    _s("BN_RSI_OVERBOUGHT", "RSI overbought penalty level", "int", "BN Strategy", min_=50, max_=95),
-    _s("BN_RSI_OVERSOLD", "RSI oversold bonus level", "int", "BN Strategy", min_=5, max_=50),
-    _s("BN_EMA_EXTENSION_PCT", "EMA extension penalty (%)", "float", "BN Strategy", min_=0.1, max_=10, step=0.1),
-    _s("BN_SCORE_MIN", "Min bull/bear score to fire", "float", "BN Strategy", min_=0.5, max_=10, step=0.1),
-    _s("BN_SCORE_MARGIN", "Score margin over the other side", "float", "BN Strategy", min_=0, max_=5, step=0.1),
-
-    # ── BN Risk ────────────────────────────────────────────────────────────────
-    _s("BN_TARGET_POINTS", "Target (BankNifty pts)", "float", "BN Risk", min_=5, max_=500, step=1),
-    _s("BN_STOPLOSS_POINTS", "Initial stop (BankNifty pts)", "float", "BN Risk", min_=5, max_=500, step=1),
-    _s("BN_BREAKEVEN_TRIGGER", "Breakeven trigger (pts)", "float", "BN Risk", min_=1, max_=500, step=1),
-    _s("BN_TRAIL_TRIGGER", "Trailing-stop trigger (pts)", "float", "BN Risk", min_=1, max_=500, step=1),
-    _s("BN_TRAIL_DISTANCE", "Trailing-stop distance (pts)", "float", "BN Risk", min_=1, max_=500, step=1),
-    _s("BN_STARTING_FUNDS", "Starting funds ₹", "float", "BN Risk", min_=1_000, max_=100_000_000, step=1000,
-       help_="Only seeds the persisted balance the first time / on explicit reset."),
-
-    # ── BN Options Pricing (synthetic Black-Scholes — no real option data) ──
-    _s("BN_RISK_FREE_RATE", "Risk-free rate", "float", "BN Options Pricing", min_=0, max_=0.2, step=0.005),
-    _s("BN_IV_MIN", "IV floor", "float", "BN Options Pricing", min_=0.05, max_=1.0, step=0.01),
-    _s("BN_IV_MAX", "IV ceiling", "float", "BN Options Pricing", min_=0.05, max_=2.0, step=0.01),
-    _s("BN_IV_DEFAULT", "IV default (insufficient data)", "float", "BN Options Pricing", min_=0.05, max_=2.0, step=0.01),
-    _s("BN_IV_LOOKBACK_BARS", "IV lookback bars", "int", "BN Options Pricing", min_=5, max_=290),
-    _s("BN_IV_MANUAL_ENABLED", "Manual IV override", "bool", "BN Options Pricing", bt=False),
-    _s("BN_IV_MANUAL_VALUE", "Manual IV value", "float", "BN Options Pricing",
-       min_=0.05, max_=2.0, step=0.01, cond="BN_IV_MANUAL_ENABLED", bt=False),
-
-    # ── BN Options Costs (placeholder rates — confirm current India options
-    # STT/exchange-txn figures before trusting absolute backtest ₹ P&L) ─────
-    _s("BN_COST_BROKERAGE_FLAT", "Brokerage ₹/order (flat)", "float", "BN Options Costs", min_=0, max_=100),
-    _s("BN_COST_STT_SELL_PCT", "STT sell-side (fraction)", "float", "BN Options Costs", min_=0, max_=0.01, step=0.0001),
-    _s("BN_COST_TXN_PCT", "Exchange txn (fraction)", "float", "BN Options Costs", min_=0, max_=0.01, step=0.00001),
-    _s("BN_COST_GST_PCT", "GST (fraction)", "float", "BN Options Costs", min_=0, max_=1, step=0.01),
-    _s("BN_COST_SEBI_PCT", "SEBI fee (fraction)", "float", "BN Options Costs", min_=0, max_=0.001, step=0.000001),
-
-    # ── Engine (live only) ───────────────────────────────────────────────────
-    _s("TICK_EVAL_INTERVAL_MS", "Tick evaluation interval ms", "int", "Engine",
-       min_=0, max_=5000, bt=False, help_="0 = run as fast as the loop allows."),
-
-    # ── Backtest ───────────────────────────────────────────────────────────────
-    _s("BACKTEST_WARMUP_DAYS", "Backtest warmup days", "int", "Backtest", min_=3, max_=30),
-    _s("SLIPPAGE_BPS", "Slippage (bps)", "float", "Backtest", min_=0, max_=100, step=0.5,
-       help_="Applied to the option premium fill."),
-
-    # ── NF (Nifty 50) Strategy — gates ───────────────────────────────────────
-    _s("NF_SIDEWAYS_RANGE_MIN", "Min 5-bar range (pts)", "float", "NF Strategy",
-       min_=1, max_=200, step=0.5, help_="Block entries when Nifty 50's last 5 closes span less than this.", bt=False),
-    _s("NF_MOMENTUM_THRESHOLD", "Momentum threshold (pts)", "float", "NF Strategy",
-       min_=1, max_=200, step=0.5, help_="Fixed 5m move threshold; ATR can only lower it.", bt=False),
-    _s("NF_ATR_PERIOD", "ATR period (bars)", "int", "NF Strategy", min_=3, max_=50, bt=False),
-    _s("NF_SAME_DIRECTION_REQUIRED", "Leaders required to agree", "int", "NF Strategy",
-       min_=1, max_=12, help_="Of the 12 leader stocks.", bt=False),
-    _s("NF_ENTRY_COOLDOWN_S", "Post-exit cooldown (s)", "int", "NF Strategy", min_=0, max_=600, bt=False),
-
-    # ── NF Qty Surge — per-stock bar-volume-surge thresholds ─────────────────
-    _s("NF_QTY_THRESHOLD_HDFC", "HDFC BANK volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_RELIANCE", "RELIANCE INDUSTRIES volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_ICICI", "ICICI BANK volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_INFY", "INFOSYS volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_BHARTIARTL", "BHARTI AIRTEL volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_ITC", "ITC volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_HCLTECH", "HCL TECHNOLOGIES volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_LT", "LARSEN & TOUBRO volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_KOTAK", "KOTAK BANK volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_AXIS", "AXIS BANK volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_SBI", "STATE BANK OF INDIA volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_THRESHOLD_HUL", "HINDUSTAN UNILEVER volume threshold", "float", "NF Qty Surge",
-       min_=100, max_=1_000_000, step=100, bt=False),
-    _s("NF_QTY_INTERVAL_MULTIPLIER", "Volume threshold multiplier", "float", "NF Qty Surge",
-       min_=0.1, max_=20, step=0.1, bt=False),
-
-    # ── NF Strategy — composite indicator gate ───────────────────────────────
-    _s("NF_INDICATOR_LOOKBACK_BARS", "Indicator lookback bars", "int", "NF Strategy",
-       min_=60, max_=290, help_="Tail fed to RSI/MACD/EMA; must stay under the 300-bar candle buffer.", bt=False),
-    _s("NF_RSI_PERIOD", "RSI period", "int", "NF Strategy", min_=5, max_=50, bt=False),
-    _s("NF_EMA_FAST", "EMA fast period", "int", "NF Strategy", min_=2, max_=100, bt=False),
-    _s("NF_EMA_SLOW", "EMA slow period", "int", "NF Strategy", min_=3, max_=200, bt=False),
-    _s("NF_MACD_FAST", "MACD fast period (EMA, no signal line)", "int", "NF Strategy", min_=2, max_=100, bt=False),
-    _s("NF_MACD_SLOW", "MACD slow period (EMA, no signal line)", "int", "NF Strategy", min_=3, max_=200, bt=False),
-    _s("NF_RSI_BULL_LEVEL", "RSI bullish level", "int", "NF Strategy", min_=50, max_=90, bt=False),
-    _s("NF_RSI_BEAR_LEVEL", "RSI bearish level", "int", "NF Strategy", min_=10, max_=50, bt=False),
-    _s("NF_RSI_OVERBOUGHT", "RSI overbought penalty level", "int", "NF Strategy", min_=50, max_=95, bt=False),
-    _s("NF_RSI_OVERSOLD", "RSI oversold bonus level", "int", "NF Strategy", min_=5, max_=50, bt=False),
-    _s("NF_EMA_EXTENSION_PCT", "EMA extension penalty (%)", "float", "NF Strategy", min_=0.1, max_=10, step=0.1, bt=False),
-    _s("NF_SCORE_MIN", "Min bull/bear score to fire", "float", "NF Strategy", min_=0.5, max_=10, step=0.1, bt=False),
-    _s("NF_SCORE_MARGIN", "Score margin over the other side", "float", "NF Strategy", min_=0, max_=5, step=0.1, bt=False),
-
-    # ── NF Risk ────────────────────────────────────────────────────────────────
-    _s("NF_TARGET_POINTS", "Target (Nifty 50 pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
-    _s("NF_STOPLOSS_POINTS", "Initial stop (Nifty 50 pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
-    _s("NF_BREAKEVEN_TRIGGER", "Breakeven trigger (pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
-    _s("NF_TRAIL_TRIGGER", "Trailing-stop trigger (pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
-    _s("NF_TRAIL_DISTANCE", "Trailing-stop distance (pts)", "float", "NF Risk", min_=1, max_=500, step=0.5, bt=False),
-
-    # ── NF Options Pricing (synthetic Black-Scholes — no real option data) ──
-    _s("NF_RISK_FREE_RATE", "Risk-free rate", "float", "NF Options Pricing", min_=0, max_=0.2, step=0.005, bt=False),
-    _s("NF_IV_MIN", "IV floor", "float", "NF Options Pricing", min_=0.05, max_=1.0, step=0.01, bt=False),
-    _s("NF_IV_MAX", "IV ceiling", "float", "NF Options Pricing", min_=0.05, max_=2.0, step=0.01, bt=False),
-    _s("NF_IV_DEFAULT", "IV default (insufficient data)", "float", "NF Options Pricing", min_=0.05, max_=2.0, step=0.01, bt=False),
-    _s("NF_IV_LOOKBACK_BARS", "IV lookback bars", "int", "NF Options Pricing", min_=5, max_=290, bt=False),
-    _s("NF_IV_MANUAL_ENABLED", "Manual IV override", "bool", "NF Options Pricing", bt=False),
-    _s("NF_IV_MANUAL_VALUE", "Manual IV value", "float", "NF Options Pricing",
-       min_=0.05, max_=2.0, step=0.01, cond="NF_IV_MANUAL_ENABLED", bt=False),
-
-    # ── NF Options Costs ──────────────────────────────────────────────────────
-    _s("NF_COST_BROKERAGE_FLAT", "Brokerage ₹/order (flat)", "float", "NF Options Costs", min_=0, max_=100, bt=False),
-    _s("NF_COST_STT_SELL_PCT", "STT sell-side (fraction)", "float", "NF Options Costs", min_=0, max_=0.01, step=0.0001, bt=False),
-    _s("NF_COST_TXN_PCT", "Exchange txn (fraction)", "float", "NF Options Costs", min_=0, max_=0.01, step=0.00001, bt=False),
-    _s("NF_COST_GST_PCT", "GST (fraction)", "float", "NF Options Costs", min_=0, max_=1, step=0.01, bt=False),
-    _s("NF_COST_SEBI_PCT", "SEBI fee (fraction)", "float", "NF Options Costs", min_=0, max_=0.001, step=0.000001, bt=False),
-
     # ── Dashboard price-move alerts — client-side only (browser Notification
     # API), never read by the trading engine itself; see static/js/alerts.js.
     # Per leader stock (BN_PRICE_ALERT_ATTR/NF_PRICE_ALERT_ATTR wiring), in
@@ -271,10 +105,7 @@ SPEC: List[Dict[str, Any]] = [
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
-GROUP_ORDER = ["Session Timings", "BN Strategy", "BN Qty Surge", "BN Risk", "BN Options Pricing",
-               "BN Options Costs", "BN Alerts", "Engine", "Backtest",
-               "NF Strategy", "NF Qty Surge", "NF Risk", "NF Options Pricing", "NF Options Costs",
-               "NF Alerts"]
+GROUP_ORDER = ["BN Alerts", "NF Alerts"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.
@@ -297,13 +128,6 @@ if _spec_attr_keys != _defaults_keys:
         f"missing from SPEC: {sorted(_defaults_keys - _spec_attr_keys)}, "
         f"unknown in SPEC: {sorted(_spec_attr_keys - _defaults_keys)}"
     )
-
-# Session times must stay ordered or the phase driver / backtest window breaks.
-_TIME_ORDER = ("PREMARKET", "MARKET_OPEN", "SCAN_START", "CUTOFF", "SESSION_END")
-_TIME_LABEL = {"PREMARKET": "pre-market", "MARKET_OPEN": "market open",
-               "SCAN_START": "scan start", "CUTOFF": "entry cutoff",
-               "SESSION_END": "session end"}
-
 
 # ── Value coercion / validation ───────────────────────────────────────────────
 
@@ -372,64 +196,6 @@ def expand_changes(changes: Dict[str, Any], *, bt_only: bool = False) -> Dict[st
     return out
 
 
-# cfg attrs whose value affects an indicator's minimum-bar requirement — the
-# self-heal and reset guards drop/validate this whole set together.
-BN_INDICATOR_PERIOD_KEYS = ("BN_MACD_FAST", "BN_MACD_SLOW", "BN_EMA_FAST",
-                           "BN_EMA_SLOW", "BN_RSI_PERIOD", "BN_INDICATOR_LOOKBACK_BARS")
-
-
-def validate_bn_indicator_periods(attr_changes: Dict[str, Any]) -> None:
-    """
-    Cross-field guards so a period/lookback combo can't leave an indicator
-    all-NaN — which silently blocks the BN composite gate (never bullish/
-    bearish) in both live and backtest, with no error. No-op unless a
-    relevant key changed.
-    """
-    if not any(k in attr_changes for k in BN_INDICATOR_PERIOD_KEYS):
-        return
-
-    def eff(k: str) -> int:
-        return attr_changes.get(k, getattr(cfg, k))
-
-    fast, slow = eff("BN_MACD_FAST"), eff("BN_MACD_SLOW")
-    if fast >= slow:
-        raise ValueError(
-            f"BN MACD fast period ({fast}) must be less than the slow period ({slow})")
-
-    lookback = eff("BN_INDICATOR_LOOKBACK_BARS")
-    need = max(eff("BN_EMA_SLOW"), slow, eff("BN_RSI_PERIOD")) + 1
-    if lookback < need:
-        raise ValueError(
-            f"BN indicator lookback ({lookback}) is too small — needs "
-            f"≥ {need} bars; raise BN_INDICATOR_LOOKBACK_BARS or lower the period(s)")
-
-
-# NF (Nifty 50) equivalent of BN_INDICATOR_PERIOD_KEYS / validate_bn_indicator_periods.
-NF_INDICATOR_PERIOD_KEYS = ("NF_MACD_FAST", "NF_MACD_SLOW", "NF_EMA_FAST",
-                           "NF_EMA_SLOW", "NF_RSI_PERIOD", "NF_INDICATOR_LOOKBACK_BARS")
-
-
-def validate_nf_indicator_periods(attr_changes: Dict[str, Any]) -> None:
-    """NF mirror of validate_bn_indicator_periods — same guard, NF_* keys."""
-    if not any(k in attr_changes for k in NF_INDICATOR_PERIOD_KEYS):
-        return
-
-    def eff(k: str) -> int:
-        return attr_changes.get(k, getattr(cfg, k))
-
-    fast, slow = eff("NF_MACD_FAST"), eff("NF_MACD_SLOW")
-    if fast >= slow:
-        raise ValueError(
-            f"NF MACD fast period ({fast}) must be less than the slow period ({slow})")
-
-    lookback = eff("NF_INDICATOR_LOOKBACK_BARS")
-    need = max(eff("NF_EMA_SLOW"), slow, eff("NF_RSI_PERIOD")) + 1
-    if lookback < need:
-        raise ValueError(
-            f"NF indicator lookback ({lookback}) is too small — needs "
-            f"≥ {need} bars; raise NF_INDICATOR_LOOKBACK_BARS or lower the period(s)")
-
-
 def _coerce_attr(key: str, raw: Any) -> Any:
     """
     Validate one raw cfg-attr value (as stored in the DB) against its SPEC.
@@ -442,34 +208,6 @@ def _coerce_attr(key: str, raw: Any) -> Any:
         return _coerce(spec, raw)
     hi = 23 if role == "hour" else 59
     return _coerce({"key": key, "type": "int", "min": 0, "max": hi}, raw)
-
-
-def validate_time_order(attr_changes: Dict[str, Any],
-                        points: tuple = _TIME_ORDER) -> None:
-    """
-    Cross-field guard: with `attr_changes` applied on top of the current
-    config, the session times in `points` (order matters) must be ordered —
-    the full live chain enforces
-        premarket ≤ market open ≤ scan start < cutoff ≤ session end,
-    while the backtest passes points=("SCAN_START","CUTOFF") since those are
-    the only times a replay uses. No-op when attr_changes touches none of the
-    points. Raises ValueError naming the violated pair.
-    """
-    if not any(k in attr_changes for p in points
-               for k in (f"{p}_HOUR", f"{p}_MIN")):
-        return
-
-    def eff(attr: str) -> int:
-        return attr_changes.get(attr, getattr(cfg, attr))
-
-    minutes = [eff(f"{p}_HOUR") * 60 + eff(f"{p}_MIN") for p in points]
-    for i in range(len(points) - 1):
-        strict = points[i] == "SCAN_START"   # zero-width scan window is useless
-        if minutes[i] > minutes[i + 1] or (strict and minutes[i] == minutes[i + 1]):
-            raise ValueError(
-                f"session times out of order: {_TIME_LABEL[points[i]]} must be "
-                f"{'before' if strict else 'at or before'} {_TIME_LABEL[points[i + 1]]}"
-            )
 
 
 def _attr_keys(spec: Dict[str, Any]) -> List[str]:
@@ -534,40 +272,6 @@ async def load_and_apply(db) -> None:
         except (ValueError, TypeError) as e:
             print(f"Settings: ignoring invalid stored override {k}={v!r} ({e})")
 
-    # Cross-field self-heal: individually-valid rows can still form an
-    # inverted session-time chain (partial manual edit / historical bug).
-    # Fall back to the DEFAULT times rather than brick the trading day.
-    try:
-        validate_time_order(valid)
-    except ValueError as e:
-        time_attrs = [k for k in valid
-                      if k.endswith("_HOUR") or k.endswith("_MIN")]
-        for k in time_attrs:
-            valid.pop(k, None)
-        print(f"Settings: stored session times invalid ({e}) — "
-              f"dropped {time_attrs}, using default timings")
-
-    # Same self-heal for a stored indicator period/lookback combo that would
-    # leave the BN composite gate all-NaN. Drop ALL indicator-period
-    # overrides back to defaults (which are internally consistent).
-    try:
-        validate_bn_indicator_periods(valid)
-    except ValueError as e:
-        dropped = [k for k in BN_INDICATOR_PERIOD_KEYS if k in valid]
-        for k in dropped:
-            valid.pop(k, None)
-        print(f"Settings: stored indicator periods invalid ({e}) — "
-              f"dropped {dropped}, using defaults")
-
-    try:
-        validate_nf_indicator_periods(valid)
-    except ValueError as e:
-        dropped = [k for k in NF_INDICATOR_PERIOD_KEYS if k in valid]
-        for k in dropped:
-            valid.pop(k, None)
-        print(f"Settings: stored indicator periods invalid ({e}) — "
-              f"dropped {dropped}, using defaults")
-
     if valid:
         cfg.set_runtime_overrides(valid)
         print(f"Settings: applied {len(valid)} stored overrides")
@@ -580,9 +284,6 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     changes in code flow through). Returns the fresh describe() payload.
     """
     attr_changes = expand_changes(changes)
-    validate_time_order(attr_changes)
-    validate_bn_indicator_periods(attr_changes)
-    validate_nf_indicator_periods(attr_changes)
 
     defaults   = cfg.dynamic_defaults()
     store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
@@ -608,14 +309,6 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
             if spec is None:
                 raise ValueError(f"unknown setting: {key}")
             attr_keys.extend(_attr_keys(spec))
-
-    # A PARTIAL reset must honor the same cross-field guards as a save.
-    # (A full reset is always valid — defaults are internally consistent.)
-    defaults = cfg.dynamic_defaults()
-    post_reset = {k: defaults[k] for k in attr_keys}
-    validate_time_order(post_reset)
-    validate_bn_indicator_periods(post_reset)
-    validate_nf_indicator_periods(post_reset)
 
     await db.delete_app_settings(attr_keys)
     cfg.clear_runtime_overrides(attr_keys)

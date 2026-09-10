@@ -1,21 +1,24 @@
 'use strict';
 
 // ── Leader-stock price-move alerts ────────────────────────────────────────────
-// Client-side only: fires a single browser Notification (falling back to the
-// in-page toast if permission isn't granted/supported) only on the CONSENSUS
-// condition — at least BN_ALERT_CONSENSUS_REQUIRED/NF_ALERT_CONSENSUS_REQUIRED
-// leader stocks have EACH crossed their own configured per-stock threshold, in
-// raw POINTS (Settings page, "BN/NF Alerts" groups; mirrors app/config.py's
-// BN_PRICE_ALERT_ATTR/NF_PRICE_ALERT_ATTR wiring — points, not %), AND agree
-// on direction. An individual stock crossing its own threshold alone no
-// longer fires a notification by itself (explicit user decision, 2026-09-01)
-// — it only feeds into the consensus count and the live threshold badge
-// below the Global Signal. Reads the SAME liveLeaderRows/liveLeaderRowsNf
-// fields the Entry Loop Monitor's leader table already renders from — no
-// new server payload needed.
+// The actual CONSENSUS alert condition — at least BN_ALERT_CONSENSUS_REQUIRED/
+// NF_ALERT_CONSENSUS_REQUIRED leader stocks have EACH crossed their own
+// configured per-stock threshold, in raw POINTS (Settings page, "BN/NF
+// Alerts" groups; mirrors app/config.py's BN_PRICE_ALERT_ATTR/
+// NF_PRICE_ALERT_ATTR wiring), AND agree on direction — is now checked
+// SERVER-SIDE, every tick, in app/services/price_alerts.py (explicit user
+// decision, 2026-09-09: moved off the browser so it doesn't depend on a
+// dashboard tab being open, and fires the instant the condition is met
+// rather than only once/sec off STATE_UPDATE). The server pushes a
+// `{type: "ALERT"}` WebSocket message when it fires; handleServerAlert
+// below just displays it — see dashboard.js's ws.onmessage.
 //
-// Edge-triggered: fires once when consensus is first reached, not on every
-// tick it holds (otherwise every ~1s STATE_UPDATE would re-fire).
+// What STAYS client-side: the live "X/N leaders crossed" badge next to the
+// Global Signal (checkPriceAlerts/_renderThresholdBadge below) — a coarser,
+// once/sec visual readout of the same underlying condition, purely cosmetic,
+// not the alert-firing path. Reads the SAME liveLeaderRows/liveLeaderRowsNf
+// fields the dashboard already renders from — no extra server payload needed
+// for the badge.
 //
 // Browser note: the Notification API is restricted to secure contexts
 // (https, or http://localhost) in current Chrome/Firefox — opening the
@@ -42,7 +45,6 @@ const NF_PRICE_ALERT_KEY = {
 
 let _alertPtsByKey = {};   // {settings_key: value}, refreshed from /api/settings
 let _consensusRequired = { BankNifty: 4, 'Nifty 50': 8 };
-const _wasConsensus = {};        // {"BankNifty:up": true/false, ...} — consensus alert edge
 
 function _refreshAlertThresholds() {
   fetch('/api/settings')
@@ -67,10 +69,19 @@ function _fireAlert(title, body) {
   if (typeof toast === 'function') toast(`${title}: ${body}`, 'warn');
 }
 
-// Returns [{stock, crossed, dir}, ...] for the consensus check below. Does
-// NOT fire a notification per stock — only feeds the consensus count/badge;
-// see checkConsensusAlert for the one thing that actually notifies.
-function checkPriceAlerts(leaderRows, instrLabel, keyByStock) {
+// Handles a server-pushed {type: "ALERT", title, body} WebSocket message
+// (see dashboard.js's ws.onmessage) — the server already did the consensus
+// check and edge-triggering in app/services/price_alerts.py; this just
+// displays it, the same way a client-fired alert used to.
+function handleServerAlert(d) {
+  if (!d || !d.title) return;
+  _fireAlert(d.title, d.body || '');
+}
+
+// Returns [{stock, crossed, dir}, ...] — feeds ONLY the live threshold badge
+// below (_renderThresholdBadge); the actual alert-firing consensus check now
+// runs server-side, see the file header comment.
+function checkPriceAlerts(leaderRows, keyByStock) {
   const results = [];
   if (!Array.isArray(leaderRows)) return results;
   leaderRows.forEach(r => {
@@ -83,29 +94,6 @@ function checkPriceAlerts(leaderRows, instrLabel, keyByStock) {
     results.push({ stock: r.stock, crossed: movePts >= pts, dir });
   });
   return results;
-}
-
-// "Leader consensus" alert — at least `required` leaders BOTH crossed their
-// own threshold AND agree on direction. Edge-triggered per direction, so it
-// re-fires only after the count drops back below `required` and crosses
-// again (not every tick while consensus holds).
-function checkConsensusAlert(results, instrLabel, required) {
-  const up = results.filter(r => r.crossed && r.dir === 'up');
-  const down = results.filter(r => r.crossed && r.dir === 'down');
-
-  ['up', 'down'].forEach(dir => {
-    const matching = dir === 'up' ? up : down;
-    const key = `${instrLabel}:${dir}`;
-    const met = matching.length >= required;
-    if (met && !_wasConsensus[key]) {
-      const names = matching.map(r => r.stock).join(', ');
-      _fireAlert(
-        `${instrLabel}: ${matching.length}/${results.length} leaders moved ${dir} together`,
-        `${names} — each crossed its own move-alert threshold (need ≥${required})`
-      );
-    }
-    _wasConsensus[key] = met;
-  });
 }
 
 // Live "X/N leaders crossed" readout next to the Global Signal badge — same
@@ -124,12 +112,10 @@ function _renderThresholdBadge(elId, results, required) {
 }
 
 function checkAllPriceAlerts(liveLeaderRows, liveLeaderRowsNf) {
-  const bnResults = checkPriceAlerts(liveLeaderRows, 'BankNifty', BN_PRICE_ALERT_KEY);
-  checkConsensusAlert(bnResults, 'BankNifty', _consensusRequired.BankNifty);
+  const bnResults = checkPriceAlerts(liveLeaderRows, BN_PRICE_ALERT_KEY);
   _renderThresholdBadge('alert-threshold-badge', bnResults, _consensusRequired.BankNifty);
 
-  const nfResults = checkPriceAlerts(liveLeaderRowsNf, 'Nifty 50', NF_PRICE_ALERT_KEY);
-  checkConsensusAlert(nfResults, 'Nifty 50', _consensusRequired['Nifty 50']);
+  const nfResults = checkPriceAlerts(liveLeaderRowsNf, NF_PRICE_ALERT_KEY);
   _renderThresholdBadge('alert-threshold-badge-nf', nfResults, _consensusRequired['Nifty 50']);
 }
 

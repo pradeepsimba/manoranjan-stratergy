@@ -215,11 +215,11 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         raise HTTPException(400, "from_date must be on or before to_date")
 
     try:
+        # No SPEC key is bt=True any more (2026-09-09 settings cleanup —
+        # every strategy/session tunable is now a static cfg attribute), so
+        # this only ever succeeds with an empty overrides dict; any key at
+        # all raises "unknown setting" here, which is the correct behavior.
         attr_overrides = settings.expand_changes(req.overrides or {}, bt_only=True)
-        # Only the scan window matters to a replay — validating against the
-        # live-only times (market open/session-end) would falsely reject.
-        settings.validate_time_order(attr_overrides, points=("SCAN_START", "CUTOFF"))
-        settings.validate_bn_indicator_periods(attr_overrides)
     except ValueError as e:
         raise HTTPException(400, f"overrides: {e}")
 

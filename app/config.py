@@ -1,28 +1,33 @@
 from __future__ import annotations
 
 """
-Configuration — static system settings plus the DYNAMIC tunables layer.
+Configuration — static system settings plus a small DYNAMIC tunables layer.
 
 Static values (endpoints, credentials, structural pool/buffer sizes, the
-Bank Nifty instrument universe) are plain module attributes and require a
-restart to change.
+Bank Nifty instrument universe, and — as of 2026-09-09, explicit user
+decision — every strategy/risk/pricing/cost/session-timing parameter for
+both BN and NF) are plain module attributes and require a restart to change.
 
-Everything else lives in _DEFAULTS and is resolved through the module-level
-__getattr__ (PEP 562) with this precedence:
+Only the BN/NF Alerts settings (per-stock move-alert point thresholds +
+consensus-required counts, purely client-side notification tuning — never
+read by the trading engine) remain dynamic, living in _DEFAULTS and resolved
+through the module-level __getattr__ (PEP 562) with this precedence:
 
-    1. thread-local overrides  — a running backtest's per-run parameters,
-                                 active only inside its worker threads
+    1. thread-local overrides  — active only inside backtest worker threads;
+                                 moot now since no bt=True tunable remains
     2. runtime overrides       — dashboard Settings page, persisted in the
                                  app_settings table and applied at startup
     3. the hard default below
 
-`import app.config as cfg; cfg.BN_TARGET_POINTS` therefore always returns the
-CURRENT value. Code must read cfg attributes at call time — never copy them
-into module-level constants or default-argument values, or they freeze at
-import and stop being dynamic.
+`import app.config as cfg; cfg.BN_ALERT_CONSENSUS_REQUIRED` therefore always
+returns the CURRENT value. Code must read a dynamic cfg attribute at call
+time — never copy it into a module-level constant or default-argument value,
+or it freezes at import and stops being dynamic. A STATIC attribute (the vast
+majority now) has no such restriction — it's just a plain Python value.
 
-The editable registry (labels, types, bounds, grouping) lives in
-app/services/settings.py — add new tunables in BOTH places.
+The editable registry (labels, types, bounds, grouping) for the remaining
+dynamic tunables lives in app/services/settings.py — add new ones in BOTH
+places.
 """
 
 import os
@@ -333,157 +338,165 @@ BACKTEST_TIMEFRAMES = ["5m"]
 BACKTEST_MODES      = ["intraday"]
 SCAN_WORKERS        = min(8, max(4, os.cpu_count() or 4))   # per-day backtest parallelism (ThreadPoolExecutor)
 
-# ── Dynamic tunables — hard defaults ──────────────────────────────────────────
+# Moved out of the dynamic Settings-page tunables (2026-09-09, explicit user
+# decision) — the Backtest UI panel is gone from the dashboard, so per-run
+# tuning from Settings no longer has a use; the backtest engine/API/DB history
+# all still work exactly as before, just with these fixed instead of editable.
+BACKTEST_WARMUP_DAYS = 7     # days of pre-range history loaded so indicators have converged by from_date
+SLIPPAGE_BPS         = 2.0   # applied to the option premium fill
+
+# ── Static: session timings (IST) — SCAN_START/CUTOFF reproduce c.html's
+# real 09:30-15:00 trading window using the existing phase-driver machinery.
+# Moved out of the dynamic Settings-page tunables 2026-09-09 (explicit user
+# decision, "remove all except threshold") — restart-only to change now.
+PREMARKET_HOUR,   PREMARKET_MIN   = 9,  0
+MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 9,  15   # historical load + WS subscribe
+SCAN_START_HOUR,  SCAN_START_MIN  = 9,  30   # entries allowed from here
+CUTOFF_HOUR,      CUTOFF_MIN      = 15, 0    # no new entries after this
+SESSION_END_HOUR, SESSION_END_MIN = 15, 30   # terminate session
+
+# ── Static: BN Strategy — sideways / momentum / leader-vote / volume-surge
+# gates. Same 2026-09-09 move-to-static as session timings above.
+BN_SIDEWAYS_RANGE_MIN      = 12.0   # min 5-bar BankNifty close range to trade
+BN_MOMENTUM_THRESHOLD      = 28.0   # fixed 5m momentum threshold (points)
+BN_ATR_PERIOD               = 10
+BN_SAME_DIRECTION_REQUIRED  = 3     # of 6 leaders must agree
+BN_ENTRY_COOLDOWN_S         = 60    # no new entry within this long of the last exit
+
+# BN Strategy — per-stock volume-surge thresholds, compared against each
+# leader's latest 5m bar volume (see BN_QTY_THRESHOLD_ATTR above and
+# bn_entry_exit._leader_qty_surge). Calibrated 2026-07-27 from ~15 live
+# bars/stock (~1.5x each stock's observed average bar volume, so a genuine
+# spike is needed to fire, not every bar):
+#   HDFC ~37.5k avg -> 55k | ICICI ~32.3k avg -> 48k | AXIS ~18.7k avg -> 28k
+#   SBI ~11.8k avg -> 18k  | KOTAK ~28.7k avg -> 43k | INDUSIND ~11k avg -> 16.5k
+BN_QTY_THRESHOLD_HDFC       = 55_000.0
+BN_QTY_THRESHOLD_ICICI      = 48_000.0
+BN_QTY_THRESHOLD_SBI        = 18_000.0
+BN_QTY_THRESHOLD_AXIS       = 28_000.0
+BN_QTY_THRESHOLD_KOTAK      = 43_000.0
+BN_QTY_THRESHOLD_INDUSIND   = 16_500.0
+BN_QTY_INTERVAL_MULTIPLIER  = 1.0
+
+# BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring)
+BN_INDICATOR_LOOKBACK_BARS = 200
+BN_RSI_PERIOD          = 14
+BN_EMA_FAST            = 20
+BN_EMA_SLOW            = 50
+BN_MACD_FAST           = 12
+BN_MACD_SLOW           = 26
+BN_RSI_BULL_LEVEL      = 58
+BN_RSI_BEAR_LEVEL      = 42
+BN_RSI_OVERBOUGHT      = 72
+BN_RSI_OVERSOLD        = 28
+BN_EMA_EXTENSION_PCT   = 1.2
+BN_SCORE_MIN           = 2.0
+BN_SCORE_MARGIN        = 0.9
+
+# BN Risk — target/stop/trailing on the underlying BankNifty index (points)
+BN_TARGET_POINTS      = 35.0
+BN_STOPLOSS_POINTS    = 18.0
+BN_BREAKEVEN_TRIGGER  = 12.0
+BN_TRAIL_TRIGGER      = 18.0
+BN_TRAIL_DISTANCE     = 12.0
+BN_STARTING_FUNDS     = 100_000.0   # ₹ — seeds the persisted funds balance once
+
+# BN Options Pricing — synthetic Black-Scholes premium, no real option data
+BN_RISK_FREE_RATE      = 0.065
+BN_IV_MIN               = 0.20
+BN_IV_MAX               = 0.70
+BN_IV_DEFAULT            = 0.28
+BN_IV_LOOKBACK_BARS      = 50
+BN_IV_MANUAL_ENABLED     = False
+BN_IV_MANUAL_VALUE       = 0.30
+
+# BN Options Costs — placeholder rates (India options STT/txn charges change
+# periodically; confirm current figures before trusting absolute backtest
+# ₹ P&L — relative signal quality is insensitive to this).
+BN_COST_BROKERAGE_FLAT = 20.0        # ₹ per executed order, flat
+BN_COST_STT_SELL_PCT   = 0.001       # STT on sell-side premium value
+BN_COST_TXN_PCT        = 0.0005      # exchange transaction charge
+BN_COST_GST_PCT        = 0.18        # GST on (brokerage + txn)
+BN_COST_SEBI_PCT       = 0.000001    # SEBI turnover fee
+
+# Tick-wise engine
+TICK_EVAL_INTERVAL_MS = 100
+
+# ── Static: NF (Nifty 50) Strategy — parallel to the BN block above. Point-
+# based thresholds (sideways/momentum/target/stop/breakeven/trail) start
+# scaled down ~0.45x from BN's own calibrated values, matching Nifty 50
+# trading at roughly 0.45x BankNifty's spot level (~25,000 vs ~55,000) — a
+# starting point only, same "recalibrate from live bars" caveat as BN's own
+# qty thresholds. Dimensionless gates (RSI/EMA/MACD periods, score levels)
+# reuse BN's exact defaults — those don't scale with spot price.
+NF_SIDEWAYS_RANGE_MIN      = 6.0    # min 5-bar Nifty 50 close range to trade
+NF_MOMENTUM_THRESHOLD      = 13.0   # fixed 5m momentum threshold (points)
+NF_ATR_PERIOD               = 10
+NF_SAME_DIRECTION_REQUIRED  = 6     # of 12 leaders must agree
+NF_ENTRY_COOLDOWN_S         = 60
+
+# NF Strategy — per-stock volume-surge thresholds. PLACEHOLDER values — no
+# live volume data yet for these stocks on this feed; calibrate the same way
+# BN's own thresholds were (see BN_QTY_THRESHOLD_* comment above).
+NF_QTY_THRESHOLD_HDFC       = 55_000.0
+NF_QTY_THRESHOLD_RELIANCE   = 40_000.0
+NF_QTY_THRESHOLD_ICICI      = 48_000.0
+NF_QTY_THRESHOLD_INFY       = 35_000.0
+NF_QTY_THRESHOLD_BHARTIARTL = 30_000.0
+NF_QTY_THRESHOLD_ITC        = 30_000.0
+NF_QTY_THRESHOLD_HCLTECH    = 20_000.0
+NF_QTY_THRESHOLD_LT         = 15_000.0
+NF_QTY_THRESHOLD_KOTAK      = 43_000.0
+NF_QTY_THRESHOLD_AXIS       = 28_000.0
+NF_QTY_THRESHOLD_SBI        = 18_000.0
+NF_QTY_THRESHOLD_HUL        = 15_000.0
+NF_QTY_INTERVAL_MULTIPLIER  = 1.0
+
+# NF Strategy — composite indicator gate (same dimensionless defaults as BN)
+NF_INDICATOR_LOOKBACK_BARS = 200
+NF_RSI_PERIOD          = 14
+NF_EMA_FAST            = 20
+NF_EMA_SLOW            = 50
+NF_MACD_FAST           = 12
+NF_MACD_SLOW           = 26
+NF_RSI_BULL_LEVEL      = 58
+NF_RSI_BEAR_LEVEL      = 42
+NF_RSI_OVERBOUGHT      = 72
+NF_RSI_OVERSOLD        = 28
+NF_EMA_EXTENSION_PCT   = 1.2
+NF_SCORE_MIN           = 2.0
+NF_SCORE_MARGIN        = 0.9
+
+# NF Risk — target/stop/trailing on the underlying Nifty 50 index (points)
+NF_TARGET_POINTS      = 16.0
+NF_STOPLOSS_POINTS    = 8.0
+NF_BREAKEVEN_TRIGGER  = 5.5
+NF_TRAIL_TRIGGER      = 8.0
+NF_TRAIL_DISTANCE     = 5.5
+# No NF_STARTING_FUNDS — BN and NF share one paper account balance
+# (st.funds), seeded once from BN_STARTING_FUNDS; see scheduler._load_funds.
+
+# NF Options Pricing — synthetic Black-Scholes premium, no real option data
+NF_RISK_FREE_RATE      = 0.065
+NF_IV_MIN               = 0.20
+NF_IV_MAX               = 0.70
+NF_IV_DEFAULT            = 0.28
+NF_IV_LOOKBACK_BARS      = 50
+NF_IV_MANUAL_ENABLED     = False
+NF_IV_MANUAL_VALUE       = 0.30
+
+# NF Options Costs — same placeholder rates as BN (confirm current India
+# options STT/exchange-txn figures before trusting absolute ₹ P&L).
+NF_COST_BROKERAGE_FLAT = 20.0
+NF_COST_STT_SELL_PCT   = 0.001
+NF_COST_TXN_PCT        = 0.0005
+NF_COST_GST_PCT        = 0.18
+NF_COST_SEBI_PCT       = 0.000001
+
+# ── Dynamic tunables — hard defaults. Only BN/NF Alerts remain here (2026-
+# 09-09, explicit user decision "remove all except threshold") — everything
+# else above is now a plain static attribute. ─────────────────────────────
 _DEFAULTS: Dict[str, Any] = {
-    # Session timings (IST) — SCAN_START/CUTOFF reproduce c.html's real
-    # 09:30-15:00 trading window using the existing phase-driver machinery.
-    "PREMARKET_HOUR":   9,  "PREMARKET_MIN":   0,
-    "MARKET_OPEN_HOUR": 9,  "MARKET_OPEN_MIN": 15,   # historical load + WS subscribe
-    "SCAN_START_HOUR":  9,  "SCAN_START_MIN":  30,   # entries allowed from here
-    "CUTOFF_HOUR":      15, "CUTOFF_MIN":      0,    # no new entries after this
-    "SESSION_END_HOUR": 15, "SESSION_END_MIN": 30,   # terminate session
-
-    # BN Strategy — sideways / momentum / leader-vote / volume-surge gates
-    "BN_SIDEWAYS_RANGE_MIN":   12.0,   # min 5-bar BankNifty close range to trade
-    "BN_MOMENTUM_THRESHOLD":   28.0,   # fixed 5m momentum threshold (points)
-    "BN_ATR_PERIOD":           10,
-    "BN_SAME_DIRECTION_REQUIRED": 3,   # of 6 leaders must agree
-    "BN_ENTRY_COOLDOWN_S":     60,     # no new entry within this long of the last exit
-
-    # BN Strategy — per-stock volume-surge thresholds, compared against each
-    # leader's latest 5m bar volume (see BN_QTY_THRESHOLD_ATTR above and
-    # bn_entry_exit._leader_qty_surge). Calibrated 2026-07-27 from ~15 live
-    # bars/stock (~1.5x each stock's observed average bar volume, so a
-    # genuine spike is needed to fire, not every bar):
-    #   HDFC ~37.5k avg -> 55k | ICICI ~32.3k avg -> 48k | AXIS ~18.7k avg -> 28k
-    #   SBI ~11.8k avg -> 18k  | KOTAK ~28.7k avg -> 43k | INDUSIND ~11k avg -> 16.5k
-    "BN_QTY_THRESHOLD_HDFC":     55_000.0,
-    "BN_QTY_THRESHOLD_ICICI":    48_000.0,
-    "BN_QTY_THRESHOLD_SBI":      18_000.0,
-    "BN_QTY_THRESHOLD_AXIS":     28_000.0,
-    "BN_QTY_THRESHOLD_KOTAK":    43_000.0,
-    "BN_QTY_THRESHOLD_INDUSIND": 16_500.0,
-    "BN_QTY_INTERVAL_MULTIPLIER": 1.0,
-
-    # BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring)
-    "BN_INDICATOR_LOOKBACK_BARS": 200,
-    "BN_RSI_PERIOD":       14,
-    "BN_EMA_FAST":         20,
-    "BN_EMA_SLOW":         50,
-    "BN_MACD_FAST":        12,
-    "BN_MACD_SLOW":        26,
-    "BN_RSI_BULL_LEVEL":   58,
-    "BN_RSI_BEAR_LEVEL":   42,
-    "BN_RSI_OVERBOUGHT":   72,
-    "BN_RSI_OVERSOLD":     28,
-    "BN_EMA_EXTENSION_PCT": 1.2,
-    "BN_SCORE_MIN":        2.0,
-    "BN_SCORE_MARGIN":     0.9,
-
-    # BN Risk — target/stop/trailing on the underlying BankNifty index (points)
-    "BN_TARGET_POINTS":     35.0,
-    "BN_STOPLOSS_POINTS":   18.0,
-    "BN_BREAKEVEN_TRIGGER": 12.0,
-    "BN_TRAIL_TRIGGER":     18.0,
-    "BN_TRAIL_DISTANCE":    12.0,
-    "BN_STARTING_FUNDS":    100_000.0,   # ₹ — seeds the persisted funds balance once
-
-    # BN Options Pricing — synthetic Black-Scholes premium, no real option data
-    "BN_RISK_FREE_RATE": 0.065,
-    "BN_IV_MIN":         0.20,
-    "BN_IV_MAX":         0.70,
-    "BN_IV_DEFAULT":     0.28,
-    "BN_IV_LOOKBACK_BARS": 50,
-    "BN_IV_MANUAL_ENABLED": False,
-    "BN_IV_MANUAL_VALUE":   0.30,
-
-    # BN Options Costs — placeholder rates (India options STT/txn charges
-    # change periodically; confirm current figures before trusting absolute
-    # backtest ₹ P&L — relative signal quality is insensitive to this).
-    "BN_COST_BROKERAGE_FLAT": 20.0,      # ₹ per executed order, flat
-    "BN_COST_STT_SELL_PCT":   0.001,     # STT on sell-side premium value
-    "BN_COST_TXN_PCT":        0.0005,    # exchange transaction charge
-    "BN_COST_GST_PCT":        0.18,      # GST on (brokerage + txn)
-    "BN_COST_SEBI_PCT":       0.000001,  # SEBI turnover fee
-
-    # Tick-wise engine
-    "TICK_EVAL_INTERVAL_MS": 100,
-
-    # Backtest
-    "BACKTEST_WARMUP_DAYS": 7,
-    "SLIPPAGE_BPS":         2.0,
-
-    # ── NF (Nifty 50) Strategy — parallel to the BN block above. Point-based
-    # thresholds (sideways/momentum/target/stop/breakeven/trail) start scaled
-    # down ~0.45x from BN's own calibrated values, matching Nifty 50 trading
-    # at roughly 0.45x BankNifty's spot level (~25,000 vs ~55,000) — a
-    # starting point only, same "recalibrate from live bars" caveat as BN's
-    # own qty thresholds. Dimensionless gates (RSI/EMA/MACD periods, score
-    # levels) reuse BN's exact defaults — those don't scale with spot price.
-    "NF_SIDEWAYS_RANGE_MIN":   6.0,    # min 5-bar Nifty 50 close range to trade
-    "NF_MOMENTUM_THRESHOLD":   13.0,   # fixed 5m momentum threshold (points)
-    "NF_ATR_PERIOD":           10,
-    "NF_SAME_DIRECTION_REQUIRED": 6,   # of 12 leaders must agree
-    "NF_ENTRY_COOLDOWN_S":     60,
-
-    # NF Strategy — per-stock volume-surge thresholds. PLACEHOLDER values —
-    # no live volume data yet for these stocks on this feed; calibrate the
-    # same way BN's own thresholds were (see BN_QTY_THRESHOLD_* comment).
-    "NF_QTY_THRESHOLD_HDFC":       55_000.0,
-    "NF_QTY_THRESHOLD_RELIANCE":   40_000.0,
-    "NF_QTY_THRESHOLD_ICICI":      48_000.0,
-    "NF_QTY_THRESHOLD_INFY":       35_000.0,
-    "NF_QTY_THRESHOLD_BHARTIARTL": 30_000.0,
-    "NF_QTY_THRESHOLD_ITC":        30_000.0,
-    "NF_QTY_THRESHOLD_HCLTECH":    20_000.0,
-    "NF_QTY_THRESHOLD_LT":         15_000.0,
-    "NF_QTY_THRESHOLD_KOTAK":      43_000.0,
-    "NF_QTY_THRESHOLD_AXIS":       28_000.0,
-    "NF_QTY_THRESHOLD_SBI":        18_000.0,
-    "NF_QTY_THRESHOLD_HUL":        15_000.0,
-    "NF_QTY_INTERVAL_MULTIPLIER": 1.0,
-
-    # NF Strategy — composite indicator gate (same dimensionless defaults as BN)
-    "NF_INDICATOR_LOOKBACK_BARS": 200,
-    "NF_RSI_PERIOD":       14,
-    "NF_EMA_FAST":         20,
-    "NF_EMA_SLOW":         50,
-    "NF_MACD_FAST":        12,
-    "NF_MACD_SLOW":        26,
-    "NF_RSI_BULL_LEVEL":   58,
-    "NF_RSI_BEAR_LEVEL":   42,
-    "NF_RSI_OVERBOUGHT":   72,
-    "NF_RSI_OVERSOLD":     28,
-    "NF_EMA_EXTENSION_PCT": 1.2,
-    "NF_SCORE_MIN":        2.0,
-    "NF_SCORE_MARGIN":     0.9,
-
-    # NF Risk — target/stop/trailing on the underlying Nifty 50 index (points)
-    "NF_TARGET_POINTS":     16.0,
-    "NF_STOPLOSS_POINTS":   8.0,
-    "NF_BREAKEVEN_TRIGGER": 5.5,
-    "NF_TRAIL_TRIGGER":     8.0,
-    "NF_TRAIL_DISTANCE":    5.5,
-    # No NF_STARTING_FUNDS — BN and NF share one paper account balance
-    # (st.funds), seeded once from BN_STARTING_FUNDS; see scheduler._load_funds.
-
-    # NF Options Pricing — synthetic Black-Scholes premium, no real option data
-    "NF_RISK_FREE_RATE": 0.065,
-    "NF_IV_MIN":         0.20,
-    "NF_IV_MAX":         0.70,
-    "NF_IV_DEFAULT":     0.28,
-    "NF_IV_LOOKBACK_BARS": 50,
-    "NF_IV_MANUAL_ENABLED": False,
-    "NF_IV_MANUAL_VALUE":   0.30,
-
-    # NF Options Costs — same placeholder rates as BN (confirm current India
-    # options STT/exchange-txn figures before trusting absolute ₹ P&L).
-    "NF_COST_BROKERAGE_FLAT": 20.0,
-    "NF_COST_STT_SELL_PCT":   0.001,
-    "NF_COST_TXN_PCT":        0.0005,
-    "NF_COST_GST_PCT":        0.18,
-    "NF_COST_SEBI_PCT":       0.000001,
-
     # ── Dashboard price-move alerts (browser Notification API, client-side
     # only — not read anywhere in the trading engine) — per-leader-stock,
     # fires when THAT stock's latest bar |close-open| move exceeds its own
