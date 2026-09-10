@@ -508,12 +508,12 @@ _DEFAULTS: Dict[str, Any] = {
     # would be trivially crossed on an expensive stock (e.g. LT ~4000) and
     # nearly unreachable on a cheap one (e.g. KOTAK ~400). Recalibrate from
     # observed live bars, same caveat as the qty-surge thresholds.
-    "BN_PRICE_ALERT_PTS_HDFC":     1.5,
-    "BN_PRICE_ALERT_PTS_ICICI":    1.5,
-    "BN_PRICE_ALERT_PTS_SBI":      1.5,
-    "BN_PRICE_ALERT_PTS_AXIS":     1.5,
-    "BN_PRICE_ALERT_PTS_KOTAK":    1.5,
-    "BN_PRICE_ALERT_PTS_INDUSIND": 1.5,
+    "BN_PRICE_ALERT_PTS_HDFC":     0.4,
+    "BN_PRICE_ALERT_PTS_ICICI":    0.4,
+    "BN_PRICE_ALERT_PTS_SBI":      0.4,
+    "BN_PRICE_ALERT_PTS_AXIS":     0.4,
+    "BN_PRICE_ALERT_PTS_KOTAK":    0.4,
+    "BN_PRICE_ALERT_PTS_INDUSIND": 0.4,
 
     "NF_PRICE_ALERT_PTS_HDFC":       3.5,   # ~725
     "NF_PRICE_ALERT_PTS_RELIANCE":   6.5,   # ~1300

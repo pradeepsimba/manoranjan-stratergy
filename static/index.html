@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
-  <link rel="stylesheet" href="/css/dashboard.css?v=49">
+  <link rel="stylesheet" href="/css/dashboard.css?v=51">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -190,6 +190,7 @@
       <div class="panel-body dash-body" id="stock-candles-body">
         <div class="global-signal-badge" id="global-signal-badge">GLOBAL SIGNAL: —</div>
         <div class="global-signal-badge" id="weighted-red-green" hidden></div>
+        <div class="alert-banner" id="alert-banner-bn">No consensus alerts yet today.</div>
         <div class="alert-threshold-badge" id="alert-threshold-badge">0/6 leaders crossed their alert threshold</div>
         <div class="breakout-banner" id="breakout-banner">No breakout detected.</div>
         <div class="tbl-wrap" id="stock-table-wrap">
@@ -229,6 +230,7 @@
       <div class="panel-body dash-body" id="stock-candles-nf-body">
         <div class="global-signal-badge" id="global-signal-badge-nf">GLOBAL SIGNAL: —</div>
         <div class="global-signal-badge" id="weighted-red-green-nf" hidden></div>
+        <div class="alert-banner" id="alert-banner-nf">No consensus alerts yet today.</div>
         <div class="alert-threshold-badge" id="alert-threshold-badge-nf">0/12 leaders crossed their alert threshold</div>
         <div class="breakout-banner" id="breakout-banner-nf">No breakout detected.</div>
         <div class="tbl-wrap" id="stock-table-nf-wrap">
@@ -251,7 +253,7 @@
 <script src="/js/breakout.js?v=49"></script>
 <script src="/js/qtyAudit.js?v=49"></script>
 <script src="/js/kiteForm.js?v=49"></script>
-<script src="/js/alerts.js?v=49"></script>
+<script src="/js/alerts.js?v=50"></script>
 <script src="/js/dashboard.js?v=49"></script>
 </body>
 </html>
