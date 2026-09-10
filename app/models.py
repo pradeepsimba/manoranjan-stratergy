@@ -97,6 +97,7 @@ class BNTrade:
     index_pnl_points:  float           = 0.0     # diagnostic only — never used for settlement
     confidence:        float           = 0.0
     entry_signal:      Optional[BNSignal] = None
+    exit_label:        str               = ""    # e.g. "TARGET HIT" / "MANUAL EXIT" — set by _settle
 
 
 # ── Nifty 50 options strategy — parallel to the BN dataclasses above, same
@@ -149,6 +150,7 @@ class NFTrade:
     index_pnl_points:  float           = 0.0
     confidence:        float           = 0.0
     entry_signal:      Optional[NFSignal] = None
+    exit_label:        str               = ""    # e.g. "TARGET HIT" / "MANUAL EXIT" — set by _settle
 
 
 @dataclass(slots=True)

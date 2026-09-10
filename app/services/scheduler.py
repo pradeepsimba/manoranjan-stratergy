@@ -283,6 +283,16 @@ class SchedulerService:
 
             await asyncio.sleep(max(0.0, cfg.TICK_EVAL_INTERVAL_MS / 1000.0))
 
+    async def _notify(self, title: str, body: str) -> None:
+        """
+        Push an ALERT WebSocket message — same shape/consumer as
+        price_alerts.check_consensus's alerts (see _tick_alerts below), just
+        fired for trade entry/exit events instead of a price-move condition.
+        Reuses DashboardWSManager.broadcast, which already no-ops when no
+        client (browser or Android) is connected.
+        """
+        await self._ws.broadcast(json.dumps({"type": "ALERT", "title": title, "body": body}, default=str))
+
     async def _tick_exits(self) -> None:
         st = get_state()
         if st.active_trade is None or st.bn_index_ltp <= 0:
@@ -299,6 +309,10 @@ class SchedulerService:
         try:
             closed = bn_trade.check_tick_exit(_now(), st.bn_index_ltp, lookback)
             if closed:
+                await self._notify(
+                    f"BankNifty {closed.exit_label}",
+                    f"{closed.option_type} {closed.strike} · P&L ₹{closed.pnl:+.2f}",
+                )
                 await self._db.update_position_exit(
                     order_id=closed.order_id, exit_price=closed.exit_index_price,
                     exit_time=closed.exit_time, pnl=closed.pnl,
@@ -356,6 +370,10 @@ class SchedulerService:
             return
 
         trade = bn_trade.place_paper_order(signal, now)
+        await self._notify(
+            f"BankNifty {trade.direction} entered",
+            f"{trade.option_type} {trade.strike} @ ₹{trade.entry_premium:.2f}",
+        )
         try:
             await self._db.save_position(trade, instrument="BANKNIFTY")
         except Exception as e:
@@ -376,6 +394,10 @@ class SchedulerService:
         try:
             closed = nf_trade.check_tick_exit(_now(), st.nf_index_ltp, lookback)
             if closed:
+                await self._notify(
+                    f"Nifty 50 {closed.exit_label}",
+                    f"{closed.option_type} {closed.strike} · P&L ₹{closed.pnl:+.2f}",
+                )
                 await self._db.update_position_exit(
                     order_id=closed.order_id, exit_price=closed.exit_index_price,
                     exit_time=closed.exit_time, pnl=closed.pnl,
@@ -426,6 +448,10 @@ class SchedulerService:
             return
 
         trade = nf_trade.place_paper_order(signal, now)
+        await self._notify(
+            f"Nifty 50 {trade.direction} entered",
+            f"{trade.option_type} {trade.strike} @ ₹{trade.entry_premium:.2f}",
+        )
         try:
             await self._db.save_position(trade, instrument="NIFTY50")
         except Exception as e:
@@ -531,6 +557,10 @@ class SchedulerService:
                 lookback = closes[-cfg.BN_IV_LOOKBACK_BARS:] if closes.size > cfg.BN_IV_LOOKBACK_BARS else closes
                 closed = bn_trade.force_close(_now(), st.bn_index_ltp, lookback)
                 if closed:
+                    await self._notify(
+                        f"BankNifty {closed.exit_label}",
+                        f"{closed.option_type} {closed.strike} · P&L ₹{closed.pnl:+.2f}",
+                    )
                     try:
                         await self._db.update_position_exit(
                             order_id=closed.order_id, exit_price=closed.exit_index_price,
@@ -548,6 +578,10 @@ class SchedulerService:
                 lookback = closes[-cfg.NF_IV_LOOKBACK_BARS:] if closes.size > cfg.NF_IV_LOOKBACK_BARS else closes
                 closed = nf_trade.force_close(_now(), st.nf_index_ltp, lookback)
                 if closed:
+                    await self._notify(
+                        f"Nifty 50 {closed.exit_label}",
+                        f"{closed.option_type} {closed.strike} · P&L ₹{closed.pnl:+.2f}",
+                    )
                     try:
                         await self._db.update_position_exit(
                             order_id=closed.order_id, exit_price=closed.exit_index_price,
