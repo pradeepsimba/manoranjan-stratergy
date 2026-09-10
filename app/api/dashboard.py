@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import json
 import uuid
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
@@ -124,11 +123,6 @@ async def manual_order(req: ManualOrderRequest) -> Dict[str, Any]:
         trade = bn_trade.place_manual_order(req.direction.upper(), datetime.now(IST))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    await ws_manager.broadcast(json.dumps({
-        "type": "ALERT",
-        "title": f"BankNifty {trade.direction} entered",
-        "body": f"{trade.option_type} {trade.strike} @ ₹{trade.entry_premium:.2f} (manual)",
-    }, default=str))
     try:
         await _db.save_position(trade, instrument="BANKNIFTY")
     except Exception as e:
@@ -159,11 +153,6 @@ async def manual_exit() -> Dict[str, Any]:
     closed = bn_trade.force_close(datetime.now(IST), st.bn_index_ltp, lookback, label="MANUAL EXIT")
     if closed is None:
         raise HTTPException(400, "No active trade to exit")
-    await ws_manager.broadcast(json.dumps({
-        "type": "ALERT",
-        "title": f"BankNifty {closed.exit_label}",
-        "body": f"{closed.option_type} {closed.strike} · P&L ₹{closed.pnl:+.2f}",
-    }, default=str))
     try:
         await _db.update_position_exit(
             order_id=closed.order_id, exit_price=closed.exit_index_price,

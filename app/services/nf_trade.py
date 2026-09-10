@@ -41,7 +41,6 @@ def place_paper_order(signal: NFSignal, now: datetime) -> NFTrade:
 def _settle(trade: NFTrade, now: datetime, exit_index_price: float,
            exit_premium: float, label: str) -> NFTrade:
     finalize_exit(trade, now, exit_index_price, exit_premium)
-    trade.exit_label = label
     st = get_state()
     st.daily_pnl += trade.pnl
     st.funds += trade.pnl

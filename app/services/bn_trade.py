@@ -91,7 +91,6 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
 def _settle(trade: BNTrade, now: datetime, exit_index_price: float,
            exit_premium: float, label: str) -> BNTrade:
     finalize_exit(trade, now, exit_index_price, exit_premium)
-    trade.exit_label = label
     st = get_state()
     st.daily_pnl += trade.pnl
     st.funds += trade.pnl
