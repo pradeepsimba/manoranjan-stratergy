@@ -17,5 +17,9 @@ fi
 mkdir -p "$SCRIPT_DIR/certs"
 cp "$LIVE_DIR/fullchain.pem" "$SCRIPT_DIR/certs/fullchain.pem"
 cp "$LIVE_DIR/privkey.pem" "$SCRIPT_DIR/certs/privkey.pem"
+# cp preserves certbot's mode on privkey.pem (0600, root-only) - the app
+# container runs as non-root appuser, so it can't read that. Loosen only this
+# copy (the original in /etc/letsencrypt stays root-only).
+chmod 644 "$SCRIPT_DIR/certs/fullchain.pem" "$SCRIPT_DIR/certs/privkey.pem"
 
 docker restart "$APP_CONTAINER_NAME" 2>/dev/null || true
