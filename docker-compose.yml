@@ -13,6 +13,14 @@ services:
       # Connects to PostgreSQL running on the host machine.
       # host.docker.internal resolves to the host via the mapping below (Linux).
       POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://postgres:postgres@host.docker.internal:5432/trading_db}
+      # Whole-app login (see app/auth.py) - main.py's load_dotenv() can't see
+      # this project's .env from inside the container (never copied/mounted
+      # into the image), so these must be passed through explicitly like
+      # POSTGRES_DSN above, or login always fails ("invalid" for every
+      # password - an empty SETTINGS_PASSWORD can never match).
+      SETTINGS_USER: ${SETTINGS_USER:-admin}
+      SETTINGS_PASSWORD: ${SETTINGS_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:
