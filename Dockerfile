@@ -37,22 +37,26 @@ RUN pip install -r requirements.txt
 COPY main.py .
 COPY app/    ./app/
 COPY static/ ./static/
-COPY docker-entrypoint.sh .
 
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 appuser \
- && chmod +x docker-entrypoint.sh \
  && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8080
 
-# Liveness: the dashboard status endpoint responds even before market open.
-# Uses -k since this may be serving HTTPS (see docker-entrypoint.sh) with a
-# cert whose name won't match "localhost".
+# Liveness: /healthz is the one route with no login required (see main.py) -
+# /api/status itself is behind login now, same as everything else in this app.
+# Plain HTTP - TLS is terminated by the nginx service in front of this one
+# (see docker-compose.yml / default.conf), not by uvicorn itself.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsSk https://localhost:8080/api/status || curl -fsS http://localhost:8080/api/status || exit 1
+  CMD curl -fsS http://localhost:8080/healthz || exit 1
 
 # Single worker on purpose: AppState is an in-process singleton and the
 # scheduler/WebSocket feed must not be duplicated across workers.
-CMD ["./docker-entrypoint.sh"]
+# --forwarded-allow-ips='*': this container is expose-only (unreachable except
+# via the nginx service, which sets X-Forwarded-Proto - see default.conf), so
+# uvicorn's default of trusting only 127.0.0.1 would otherwise silently keep
+# request.url.scheme "http" here and main.py's login cookie would never get
+# its Secure flag, even though the public connection really is HTTPS.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--forwarded-allow-ips=*"]

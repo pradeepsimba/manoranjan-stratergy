@@ -15,15 +15,13 @@ services:
       POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://postgres:postgres@host.docker.internal:5432/trading_db}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    ports:
-      # Host ${APP_PORT} -> container 8080 (the actual address in use:
-      # https://algo.vaangamart.com:8082 by default — CLAUDE.md's documented
-      # 8080 was stale). A second checkout must set APP_PORT to a free host port.
-      - "${APP_PORT:-8082}:8080"
-    volumes:
-      # Let's Encrypt cert for algo.vaangamart.com (see ssl.sh / ssl-deploy-hook.sh)
-      # - docker-entrypoint.sh serves HTTPS once these files exist.
-      - ./certs:/app/certs:ro
+    expose:
+      # Internal only now - the "nginx" service below is the public entry
+      # point (https://algo.vaangamart.com:8082), terminating TLS and
+      # reverse-proxying here in plain HTTP. Not reachable directly from the
+      # host any more (a second checkout's APP_PORT override moved to nginx's
+      # own port below).
+      - "8080"
 
   # TLS-terminating reverse proxy in front of the SAME app container above —
   # not a second copy of it (the scheduler/WebSocket feed/AppState are an
@@ -48,6 +46,24 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+
+  # Public entry point for the real algo.vaangamart.com cert (see ssl.sh /
+  # ssl-deploy-hook.sh) - terminates TLS, redirects plain http:// requests to
+  # https (nginx's error_page 497 trick, same as backend_server_algo's
+  # default.conf), and reverse-proxies to the app container above in plain
+  # HTTP. Separate from "caddy" above, which is LAN-only (self-signed,
+  # different port/purpose) and untouched by this.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: ${NGINX_CONTAINER_NAME:-mano-nginx}
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "${APP_PORT:-8082}:8082"
+    volumes:
+      - ./default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/ssl:ro
 
 volumes:
   caddy_data:

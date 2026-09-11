@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 import app.config as cfg
 import app.services.settings as settings
-from app.auth import require_settings_auth
+from app.auth import require_login
 from app.backtest.engine import run_backtest
 from app.backtest.signal_study import run_bn_leader_consensus_study
 from app.services import bn_trade
@@ -25,7 +25,12 @@ from app.ws.dashboard_ws import ws_manager
 
 IST = ZoneInfo("Asia/Kolkata")
 
-router = APIRouter()
+# Whole-app login (see app/auth.py) applied at the router level - every route
+# below requires it. The one deliberate exception, /ws/dashboard, lives on
+# ws_router at the bottom of this file instead, which carries no such
+# dependency.
+router = APIRouter(dependencies=[Depends(require_login)])
+ws_router = APIRouter()
 
 _db    = None
 _sched = None
@@ -67,14 +72,10 @@ class SettingsReset(BaseModel):
 
 @router.get("/api/settings")
 def get_settings() -> Dict[str, Any]:
-    # Deliberately NOT gated by require_settings_auth - this read-only
-    # endpoint also backs the open dashboard's Trade Conditions modal
-    # (dashboard.js) and per-stock alert thresholds (alerts.js), not just the
-    # protected /settings page. Only writes (below) need to be gated.
     return settings.describe()
 
 
-@router.put("/api/settings", dependencies=[Depends(require_settings_auth)])
+@router.put("/api/settings")
 async def update_settings(req: SettingsUpdate) -> Dict[str, Any]:
     if _db is None:
         raise HTTPException(503, "Database not ready")
@@ -86,7 +87,7 @@ async def update_settings(req: SettingsUpdate) -> Dict[str, Any]:
         raise HTTPException(400, str(e))
 
 
-@router.post("/api/settings/reset", dependencies=[Depends(require_settings_auth)])
+@router.post("/api/settings/reset")
 async def reset_settings(req: SettingsReset) -> Dict[str, Any]:
     if _db is None:
         raise HTTPException(503, "Database not ready")
@@ -309,8 +310,10 @@ async def list_backtests() -> List[Dict[str, Any]]:
 
 
 # ── Dashboard WebSocket ───────────────────────────────────────────────────────
+# On ws_router, not router - deliberately NOT behind login (explicit user
+# decision: the alert feature's live price feed stays open).
 
-@router.websocket("/ws/dashboard")
+@ws_router.websocket("/ws/dashboard")
 async def dashboard_ws(websocket: WebSocket) -> None:
     await ws_manager.connect(websocket)
     try:

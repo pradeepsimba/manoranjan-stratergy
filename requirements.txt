@@ -6,3 +6,7 @@ asyncpg
 numpy
 TA-Lib
 python-dotenv
+# Login page session cookie (see app/auth.py) - itsdangerous signs it,
+# python-multipart is required by FastAPI's Form(...) parsing for the login POST.
+itsdangerous
+python-multipart

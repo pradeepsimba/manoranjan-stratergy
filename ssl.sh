@@ -1,9 +1,9 @@
 #!/bin/bash
 # Checks the Let's Encrypt cert for algo.vaangamart.com and renews it if it's
 # due, or issues a new one via certbot standalone if none exists yet. Run this
-# AFTER `docker compose up` - the deploy-hook restarts the app container
-# (uvicorn only reads the cert file at startup, no live reload), which needs
-# to already exist for that restart to do anything.
+# AFTER `docker compose up` - the deploy-hook reloads the nginx container
+# (see default.conf), which needs to already exist for that reload to do
+# anything.
 #
 # One domain cert shared with kotak-neo-order-tool's own copy of this same
 # script (both point at the same /etc/letsencrypt/live/algo.vaangamart.com

@@ -3,12 +3,15 @@ load_dotenv()
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, Form, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.dashboard import router, set_services
-from app.auth import require_settings_auth
+from app.api.dashboard import router, set_services, ws_router
+from app.auth import (
+    COOKIE_NAME, SESSION_MAX_AGE_SEC, check_credentials, limiter as login_limiter,
+    make_session_token, require_login_page,
+)
 from app.services.database import DatabaseService
 from app.services.market_data import MarketDataService
 from app.services.scheduler import SchedulerService
@@ -49,19 +52,72 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Bank Nifty Options Paper Trader", lifespan=lifespan)
 
 app.include_router(router)
+app.include_router(ws_router)   # /ws/dashboard - deliberately NOT behind login
 
 app.mount("/css", StaticFiles(directory="static/css"), name="css")
 app.mount("/js",  StaticFiles(directory="static/js"),  name="js")
 
 
-@app.get("/")
+@app.get("/healthz")
+def healthz() -> dict:
+    # Unauthenticated on purpose - the Dockerfile's HEALTHCHECK curls this
+    # from inside the container with no credentials; /api/status itself is
+    # behind login now, same as everything else in this app.
+    return {"ok": True}
+
+
+@app.get("/", dependencies=[Depends(require_login_page)])
 def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
-@app.get("/settings", dependencies=[Depends(require_settings_auth)])
+@app.get("/settings", dependencies=[Depends(require_login_page)])
 def settings_page() -> FileResponse:
     return FileResponse("static/settings.html")
+
+
+# ── Login / logout (see app/auth.py) ────────────────────────────────────────────
+
+@app.get("/login")
+def login_page() -> FileResponse:
+    return FileResponse("static/login.html")
+
+
+@app.post("/login")
+def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    ip = request.client.host if request.client else "unknown"
+    if not login_limiter.allow(ip):
+        return RedirectResponse("/login?error=locked", status_code=302)
+
+    if not check_credentials(username, password):
+        # allow() above already reserved (counted) this attempt atomically -
+        # see LoginAttemptLimiter's own docstring for why a separate
+        # record-failure call here would double count.
+        return RedirectResponse("/login?error=1", status_code=302)
+    login_limiter.record_success(ip)
+
+    token = make_session_token()
+    response = RedirectResponse("/", status_code=303)
+    # secure=True whenever the request arrived over HTTPS. This app itself is
+    # plain HTTP only - nginx terminates TLS in front of it and this reads
+    # that via X-Forwarded-Proto (see default.conf and the Dockerfile's
+    # --forwarded-allow-ips). A hardcoded secure=True would break login if
+    # this is ever run directly (no nginx) for local dev instead.
+    # samesite="strict" is this app's only CSRF defense (no CSRF token
+    # anywhere) - safe since the login flow never needs this cookie sent
+    # cross-site.
+    response.set_cookie(
+        COOKIE_NAME, token, max_age=SESSION_MAX_AGE_SEC, httponly=True,
+        samesite="strict", secure=request.url.scheme == "https",
+    )
+    return response
+
+
+@app.get("/logout")
+def logout() -> RedirectResponse:
+    response = RedirectResponse("/login", status_code=302)
+    response.delete_cookie(COOKIE_NAME)
+    return response
 
 
 if __name__ == "__main__":

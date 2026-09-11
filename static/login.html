@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login - Bank Nifty Options Paper Trader</title>
+<script>
+  (function () {
+    var saved = localStorage.getItem('theme');
+    var theme = saved || 'dark';
+    document.documentElement.setAttribute('data-theme', theme);
+  })();
+</script>
+<style>
+  :root {
+    --bg: #f6f6f4; --card-bg: #ffffff; --text: #1c1f24; --text-muted: #666f7a;
+    --border: #e2e4e2; --accent: #2f7a4f; --accent-hover: #266341; --accent-text: #eafff2;
+    --error: #c23b3b; --error-soft: #fbe7e5; --input-bg: #fbfaf7;
+    --shadow-lg: 0 20px 45px -12px rgba(20,23,26,0.18), 0 4px 12px rgba(20,23,26,0.06);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    --radius-sm: 8px; --radius-md: 10px; --radius-lg: 16px;
+  }
+  html[data-theme="dark"] {
+    --bg: #0d0f12; --card-bg: #161920; --text: #e8eaed; --text-muted: #98a0ac;
+    --border: #262b34; --accent: #34c37f; --accent-hover: #46d690; --accent-text: #06180f;
+    --error: #e05a5a; --error-soft: rgba(224,90,90,0.14); --input-bg: #1b1f27;
+    --shadow-lg: 0 20px 45px -12px rgba(0,0,0,0.55), 0 4px 12px rgba(0,0,0,0.3);
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: var(--font); background: var(--bg); color: var(--text);
+    display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0;
+    padding: 1.5rem; transition: background 0.2s, color 0.2s;
+  }
+  a:focus-visible, button:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm);
+  }
+  input:focus-visible { outline: none; }
+  form {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 2.25rem 2rem; width: 100%; max-width: 340px; box-shadow: var(--shadow-lg); position: relative;
+  }
+  .brand { display: flex; align-items: center; justify-content: center; gap: 0.55rem; margin-bottom: 1.5rem; }
+  .brand-mark {
+    width: 2.1rem; height: 2.1rem; border-radius: var(--radius-sm); background: var(--accent);
+    display: flex; align-items: center; justify-content: center; font-size: 1.1rem; flex-shrink: 0;
+  }
+  h1 { font-size: 0.98rem; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  .field { margin-bottom: 1rem; }
+  label { display: block; font-size: 0.78rem; font-weight: 550; margin-bottom: 0.35rem; color: var(--text-muted); }
+  input {
+    width: 100%; padding: 0.65rem 0.75rem; border-radius: var(--radius-md); border: 1px solid var(--border);
+    background: var(--input-bg); color: var(--text); font: inherit; font-size: 0.92rem;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+  button[type="submit"] {
+    width: 100%; padding: 0.7rem; margin-top: 0.3rem; border: none; border-radius: var(--radius-md); background: var(--accent);
+    color: var(--accent-text); font-weight: 650; font-size: 0.92rem; cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+  }
+  button[type="submit"]:hover { background: var(--accent-hover); transform: translateY(-1px); }
+  button[type="submit"]:active { transform: translateY(1px); }
+  .error {
+    color: var(--error); background: var(--error-soft); border-radius: var(--radius-sm); padding: 0.55rem 0.7rem;
+    font-size: 0.82rem; margin-bottom: 1rem; text-align: center; display: none;
+  }
+  .error.show { display: block; }
+  .theme-toggle {
+    position: absolute; top: -0.75rem; right: -0.75rem; width: 2.75rem; height: 2.75rem;
+    border-radius: 50%; border: 1px solid var(--border); background: var(--card-bg);
+    color: var(--text); cursor: pointer; font-size: 1rem; box-shadow: var(--shadow-lg);
+  }
+  @media (max-width: 420px) {
+    form { padding: 1.75rem 1.4rem; }
+    input { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <button type="button" class="theme-toggle" onclick="toggleTheme()" id="theme-btn" aria-label="Toggle theme">🌙</button>
+    <div class="brand">
+      <span class="brand-mark">📊</span>
+      <h1>Bank Nifty Options Paper Trader</h1>
+    </div>
+    <div class="error" id="error"></div>
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required autofocus>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button type="submit">Log in</button>
+  </form>
+  <script>
+    function updateToggleIcon() {
+      var theme = document.documentElement.getAttribute('data-theme');
+      document.getElementById('theme-btn').textContent = theme === 'dark' ? '☀️' : '🌙';
+    }
+    function toggleTheme() {
+      var current = document.documentElement.getAttribute('data-theme');
+      var next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+      updateToggleIcon();
+    }
+    updateToggleIcon();
+
+    const params = new URLSearchParams(location.search);
+    const err = params.get('error');
+    if (err) {
+      const box = document.getElementById('error');
+      box.textContent = err === 'locked'
+        ? 'Too many failed attempts - try again in 15 minutes.'
+        : 'Invalid username or password.';
+      box.classList.add('show');
+    }
+  </script>
+</body>
+</html>
