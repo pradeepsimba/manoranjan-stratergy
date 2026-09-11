@@ -3,11 +3,12 @@ load_dotenv()
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.dashboard import router, set_services
+from app.auth import require_settings_auth
 from app.services.database import DatabaseService
 from app.services.market_data import MarketDataService
 from app.services.scheduler import SchedulerService
@@ -58,7 +59,7 @@ def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
-@app.get("/settings")
+@app.get("/settings", dependencies=[Depends(require_settings_auth)])
 def settings_page() -> FileResponse:
     return FileResponse("static/settings.html")
 

@@ -46,6 +46,11 @@ POSTGRES_DSN = os.getenv(
     "postgresql://postgres:postgres@localhost/mano_trading_db",
 )
 
+# Settings-page login (see app/auth.py) - single shared credential, gates only
+# the Settings page/API, not the rest of the dashboard.
+SETTINGS_USER     = os.getenv("SETTINGS_USER", "admin")
+SETTINGS_PASSWORD = os.getenv("SETTINGS_PASSWORD", "")
+
 # ── Static: data intervals ────────────────────────────────────────────────────
 INTERVAL_5M = "5m"
 

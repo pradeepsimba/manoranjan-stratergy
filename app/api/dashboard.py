@@ -9,12 +9,13 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from fastapi import APIRouter, HTTPException, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 import app.config as cfg
 import app.services.settings as settings
+from app.auth import require_settings_auth
 from app.backtest.engine import run_backtest
 from app.backtest.signal_study import run_bn_leader_consensus_study
 from app.services import bn_trade
@@ -66,10 +67,14 @@ class SettingsReset(BaseModel):
 
 @router.get("/api/settings")
 def get_settings() -> Dict[str, Any]:
+    # Deliberately NOT gated by require_settings_auth - this read-only
+    # endpoint also backs the open dashboard's Trade Conditions modal
+    # (dashboard.js) and per-stock alert thresholds (alerts.js), not just the
+    # protected /settings page. Only writes (below) need to be gated.
     return settings.describe()
 
 
-@router.put("/api/settings")
+@router.put("/api/settings", dependencies=[Depends(require_settings_auth)])
 async def update_settings(req: SettingsUpdate) -> Dict[str, Any]:
     if _db is None:
         raise HTTPException(503, "Database not ready")
@@ -81,7 +86,7 @@ async def update_settings(req: SettingsUpdate) -> Dict[str, Any]:
         raise HTTPException(400, str(e))
 
 
-@router.post("/api/settings/reset")
+@router.post("/api/settings/reset", dependencies=[Depends(require_settings_auth)])
 async def reset_settings(req: SettingsReset) -> Dict[str, Any]:
     if _db is None:
         raise HTTPException(503, "Database not ready")
