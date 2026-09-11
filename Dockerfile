@@ -37,18 +37,22 @@ RUN pip install -r requirements.txt
 COPY main.py .
 COPY app/    ./app/
 COPY static/ ./static/
+COPY docker-entrypoint.sh .
 
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 appuser \
+ && chmod +x docker-entrypoint.sh \
  && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8080
 
 # Liveness: the dashboard status endpoint responds even before market open.
+# Uses -k since this may be serving HTTPS (see docker-entrypoint.sh) with a
+# cert whose name won't match "localhost".
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS http://localhost:8080/api/status || exit 1
+  CMD curl -fsSk https://localhost:8080/api/status || curl -fsS http://localhost:8080/api/status || exit 1
 
 # Single worker on purpose: AppState is an in-process singleton and the
 # scheduler/WebSocket feed must not be duplicated across workers.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+CMD ["./docker-entrypoint.sh"]

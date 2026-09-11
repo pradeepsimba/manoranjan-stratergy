@@ -17,9 +17,13 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       # Host ${APP_PORT} -> container 8080 (the actual address in use:
-      # http://192.168.0.114:8082 by default — CLAUDE.md's documented 8080
-      # was stale). A second checkout must set APP_PORT to a free host port.
+      # https://algo.vaangamart.com:8082 by default — CLAUDE.md's documented
+      # 8080 was stale). A second checkout must set APP_PORT to a free host port.
       - "${APP_PORT:-8082}:8080"
+    volumes:
+      # Let's Encrypt cert for algo.vaangamart.com (see ssl.sh / ssl-deploy-hook.sh)
+      # - docker-entrypoint.sh serves HTTPS once these files exist.
+      - ./certs:/app/certs:ro
 
   # TLS-terminating reverse proxy in front of the SAME app container above —
   # not a second copy of it (the scheduler/WebSocket feed/AppState are an

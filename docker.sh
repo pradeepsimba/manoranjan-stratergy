@@ -85,6 +85,7 @@ case "$ACTION" in
     deploy|--deploy|start|--start)
         echo "=== Deploying Docker services in background ==="
         docker compose up -d
+        bash "$(dirname "$0")/ssl.sh"
         ;;
     stop|--stop|down|--down)
         echo "=== Stopping Docker services ==="
