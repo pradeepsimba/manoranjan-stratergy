@@ -644,7 +644,20 @@ class SchedulerService:
         st.nf_diagnostic = None
         st.daily_pnl = 0.0
         st.ltp.clear()
-        st.candles_5m.clear()
+        # Re-fetch each stock's history right away (2026-09-16, explicit user
+        # decision) instead of leaving st.candles_5m empty until the next
+        # 09:15 WAIT_ZONE reload — the vendor DOES fully archive multi-day
+        # history for individual stocks (unlike either index — see the note
+        # below), so the Stock Candles panel can keep showing today's real
+        # data through the closed session instead of "N/A" on every row but
+        # the index. _load_all_historical REPLACES (not just clears) every
+        # token's candle list, so a failed fetch here just leaves today's
+        # already-good data in place rather than blanking it — see its own
+        # per-block error handling.
+        try:
+            await self._load_all_historical()
+        except Exception as e:
+            print(f"EOD stock-history refresh error: {e}")
         # bn_index_candles_5m/nf_index_candles_5m are intentionally NOT
         # cleared here — see _load_all_historical: this market-data server
         # has no historical ARCHIVE for either index (confirmed empirically —
