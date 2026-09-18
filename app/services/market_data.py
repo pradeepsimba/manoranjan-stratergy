@@ -3,13 +3,27 @@ from __future__ import annotations
 """
 Live WebSocket feed from the custom market data server.
 
-Fixed universe: BankNifty index + its 11 stocks, plus Nifty 50 index + its
-32 stocks, deduped on the 6 stocks both strategies share (see
-_build_filters) = 39 symbol-interval pairs. Still a SINGLE WS connection,
-but now close to the server's documented ~40-entries-per-connection output
-buffer limit — if that limit is a hard cap (not just a rough historical
-observation), adding any further instrument would need a second connection,
-mirroring the deleted equity engine's split primary/secondary approach.
+Fixed universe: BankNifty index + its 14 stocks (the real NIFTY BANK
+index's full membership — see cfg.BN_ALL_STOCKS), plus Nifty 50 index + its
+50 stocks, deduped on the 11 stocks both strategies share (see
+_build_filters). That's ~55 symbol-interval pairs (2026-09-16/17: the Nifty
+50 universe grew toward all 50 official constituents in stages — 3 early
+additions, LTIMindtree/Nestle India/ONGC, were removed after a direct vendor
+query confirmed zero data; 3 more, InterGlobe Aviation/Jio Financial
+Services/Max Healthcare, were added after a user-supplied official
+constituent list revealed they were missing and a vendor query confirmed
+real data. BankNifty's universe grew from 11 to its full real membership of
+14, and 11 non-index "extras" it briefly also carried were removed once
+that 14-member figure was confirmed, per an explicit user decision to track
+index members only) — past the server's documented ~40-per-connection
+output buffer limit, so filters are still split across multiple WS
+connections
+(cfg.WS_MAX_FILTERS_PER_CONN per connection), each with its own independent
+retry loop, mirroring the deleted equity engine's split primary/secondary
+approach. _process_tick is fully synchronous (no `await`), so concurrent
+connections calling it from different asyncio tasks on the
+same event loop can never interleave mid-update — the existing threading.Lock
+guards remain correct as-is.
 """
 
 import asyncio
@@ -38,11 +52,34 @@ _MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
 
 
+_OPTION_CONN_ID = "options"   # reserved key in _conn_status, distinct from the fixed-universe int chunk ids
+
+
 class MarketDataService:
     def __init__(self) -> None:
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._tasks: list[asyncio.Task] = []
+        self._conn_status: dict = {}
         self.state = get_state()
+        # Self-register so bn_trade.py/nf_trade.py can reach set_bn_option_
+        # symbol/set_nf_option_symbol without a circular import (state.py
+        # can't import this module — it's imported BY this module).
+        self.state.market_data_service = self
+
+        # ── Real-option-LTP dynamic subscription (2026-09-17) — a THIRD,
+        # separate WS connection dedicated to whichever option symbol(s) the
+        # currently-active BN/NF trade(s) need real ticks for. Unlike the
+        # fixed BN+NF universe (subscribed once at start() and never
+        # changed), this connection's filter list changes every time a trade
+        # opens or closes, so it can't share the fixed connections' "send
+        # LIVE_FEED_INIT once at connect, never again" model — instead it's
+        # torn down and reconnected with a fresh filter list on every change
+        # (see _resync_option_connection). Starts with no filters/no task —
+        # only spun up once a trade actually needs it.
+        self._bn_option: Optional[tuple] = None   # (stock_symbol, stockname) or None
+        self._nf_option: Optional[tuple] = None
+        self._option_task: Optional[asyncio.Task] = None
+        self._option_filters: list = []
         # stock_symbol (token) -> this app's own internal ALL-CAPS display
         # name. The vendor's per-tick echoed `stockname` field does NOT
         # reliably match the casing we sent in the subscription request (e.g.
@@ -57,13 +94,28 @@ class MarketDataService:
 
     def start(self) -> None:
         self._running = True
-        self._task = asyncio.create_task(self._connect_loop())
+        all_filters = self._build_filters()
+        chunk_size  = cfg.WS_MAX_FILTERS_PER_CONN
+        chunks = [all_filters[i:i + chunk_size] for i in range(0, len(all_filters), chunk_size)] or [[]]
+        self._conn_status = {i: "Disconnected" for i in range(len(chunks))}
+        self._tasks = [asyncio.create_task(self._connect_loop(chunk, i)) for i, chunk in enumerate(chunks)]
+        # Resume the option connection too, if a trade was already active
+        # across a stop()/start() cycle (e.g. restart() recovering from a WS
+        # error mid-trade) — _option_filters survives stop() deliberately.
+        if self._option_filters:
+            self._conn_status[_OPTION_CONN_ID] = "Disconnected"
+            self._option_task = asyncio.create_task(self._connect_loop(self._option_filters, _OPTION_CONN_ID))
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+        all_tasks = list(self._tasks)
+        if self._option_task:
+            all_tasks.append(self._option_task)
+        for t in all_tasks:
+            t.cancel()
+        if all_tasks:
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+        self._option_task = None
         # Cancellation skips _run_ws's post-loop status update — set it here so
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
@@ -75,22 +127,74 @@ class MarketDataService:
         self.state.ws_status = "WS Resubscribing…"
         self.start()
 
+    # ── Real-option-LTP dynamic subscription ────────────────────────────────────
+    # Called by bn_trade.py/nf_trade.py whenever their single active trade opens
+    # (real symbol/stockname) or closes (None) — see models.py's BNTrade/
+    # NFTrade.option_symbol. Each engine only ever has one active trade, so each
+    # setter fully replaces that engine's half of the merged filter set.
+
+    def set_bn_option_symbol(self, stock_symbol: Optional[str], stockname: Optional[str]) -> None:
+        self._bn_option = (stock_symbol, stockname) if stock_symbol else None
+        self._resync_option_connection()
+
+    def set_nf_option_symbol(self, stock_symbol: Optional[str], stockname: Optional[str]) -> None:
+        self._nf_option = (stock_symbol, stockname) if stock_symbol else None
+        self._resync_option_connection()
+
+    def _resync_option_connection(self) -> None:
+        """
+        Recomputes the option connection's desired filter set from
+        _bn_option/_nf_option and, if it actually changed, tears down and
+        reconnects that one dedicated connection with the new set. The
+        vendor's LIVE_FEED_INIT protocol only has an observed "subscribe at
+        connect time" shape (no separate incremental-subscribe message), so
+        a reconnect is the only way to change what this connection streams —
+        acceptable since trades open/close far less often than ticks arrive.
+        """
+        pairs = [p for p in (self._bn_option, self._nf_option) if p]
+        merged = {}
+        for sym, name in pairs:
+            merged[sym] = name   # dedupe — harmless if BN/NF ever pick the identical symbol
+        new_filters = [{"stock_symbol": sym, "stockname": name, "interval": "5m"}
+                       for sym, name in merged.items()]
+        if new_filters == self._option_filters:
+            return
+        self._option_filters = new_filters
+        if self._option_task:
+            # Not awaited — this is a sync method, called from bn_trade.py/
+            # nf_trade.py's sync functions. cancel() just schedules the
+            # cancellation; the old task's own cleanup (_run_ws's post-`async
+            # with` line) still runs in the background and could briefly
+            # overwrite _conn_status[_OPTION_CONN_ID] back to "Disconnected"
+            # right after the new task below sets "Connected" — a cosmetic
+            # status-string race only, self-corrects on the new connection's
+            # next status change; ticks are routed by symbol match, not
+            # connection identity, so this never affects data correctness.
+            self._option_task.cancel()
+            self._option_task = None
+        self._conn_status.pop(_OPTION_CONN_ID, None)
+        self._refresh_ws_status()
+        if new_filters and self._running:
+            self._conn_status[_OPTION_CONN_ID] = "Disconnected"
+            self._option_task = asyncio.create_task(self._connect_loop(new_filters, _OPTION_CONN_ID))
+
     # ── WebSocket connection loop ───────────────────────────────────────────────
 
-    async def _connect_loop(self) -> None:
+    async def _connect_loop(self, filters: list, conn_idx: int) -> None:
         while self._running:
             try:
-                print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS connecting…")
-                await self._run_ws(self._build_filters())
+                print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS connecting (conn {conn_idx}, {len(filters)} filters)…")
+                await self._run_ws(filters, conn_idx)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.state.ws_status = f"WS Error: {e}"
-                print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS error: {e}")
+                self._conn_status[conn_idx] = f"Error: {e}"
+                self._refresh_ws_status()
+                print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS error (conn {conn_idx}): {e}")
             if self._running:
                 await asyncio.sleep(5)
 
-    async def _run_ws(self, filters: list) -> None:
+    async def _run_ws(self, filters: list, conn_idx: int) -> None:
         async with websockets.connect(
             cfg.WS_URL,
             ping_interval=20,
@@ -98,15 +202,16 @@ class MarketDataService:
             open_timeout=15,
             max_size=_WS_MAX_SIZE,
         ) as ws:
-            self.state.ws_status = "WS Connected"
-            print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS connected")
+            self._conn_status[conn_idx] = "Connected"
+            self._refresh_ws_status()
+            print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS connected (conn {conn_idx})")
 
             await ws.send(json.dumps({
                 "type":       "LIVE_FEED_INIT",
                 "filters":    filters,
                 "latestOnly": True,
             }))
-            print(f"WS subscribed: {len(filters)} symbol-interval pairs")
+            print(f"WS subscribed (conn {conn_idx}): {len(filters)} symbol-interval pairs")
 
             async for message in ws:
                 if not self._running:
@@ -117,20 +222,40 @@ class MarketDataService:
                     for item in items:
                         self._process_tick(item)
                 except Exception as e:
-                    print(f"Tick parse error: {e}")
+                    print(f"Tick parse error (conn {conn_idx}): {e}")
 
-        self.state.ws_status = "WS Disconnected"
-        print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS disconnected "
+        self._conn_status[conn_idx] = "Disconnected"
+        self._refresh_ws_status()
+        print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S}] WS disconnected (conn {conn_idx}) "
               f"(loop ended — either the server closed the connection or shutdown was requested)")
+
+    def _refresh_ws_status(self) -> None:
+        """
+        Combine all connections' individual status into the single string the
+        dashboard displays (st.ws_status) — see the module docstring for why
+        there can be more than one connection now.
+        """
+        statuses  = list(self._conn_status.values())
+        connected = sum(1 for s in statuses if s == "Connected")
+        if connected == len(statuses):
+            self.state.ws_status = "WS Connected"
+        elif connected > 0:
+            self.state.ws_status = f"WS Partial ({connected}/{len(statuses)} connected)"
+        else:
+            errors = [s for s in statuses if s.startswith("Error")]
+            self.state.ws_status = f"WS Error: {errors[0]}" if errors else "WS Disconnected"
 
     # ── Subscription filter builder ────────────────────────────────────────────
 
     def _build_filters(self) -> list:
         """
-        BankNifty index + its 11 stocks, and Nifty 50 index + its 32 stocks,
-        all at 5m. Stock filters are deduped by stock_symbol (6 stocks are
-        shared between the two universes — HDFCBANK, ICICIBANK, AXISBANK,
-        SBIN, KOTAKBANK, INDUSINDBK — each must be subscribed exactly once).
+        BankNifty index + its 14 stocks, and Nifty 50 index + its 50 stocks,
+        all at 5m. Stock filters are deduped by stock_symbol — 11 tokens are
+        shared between the two universes (BN's 6 leaders plus AU Small
+        Finance Bank/Federal Bank/IDFC First Bank/PNB/Canara Bank, which
+        NF_ALL_STOCKS also carries as its own BN-parity "extras"), so the
+        combined unique-stock count is 53, not BN's 14 + NF's 50 — each
+        token must be subscribed exactly once.
         """
         filters = [
             {"stock_symbol": cfg.BN_INDEX_TOKEN, "stockname": cfg.BN_INDEX_NAME, "interval": "5m"},
@@ -153,6 +278,37 @@ class MarketDataService:
         symbol    = n.get("stock_symbol", "")
         interval  = n.get("interval",     "")
         if not symbol or interval != "5m":
+            return
+
+        # Real-option-LTP dynamic subscription (2026-09-17) — an option tick
+        # never touches candles_5m/ltp (those are documented as "the fixed
+        # BN/NF stock universe only"); it only updates whichever active
+        # trade's option_symbol it matches (see set_bn_option_symbol/
+        # set_nf_option_symbol above), refreshing that trade's live price
+        # mark and flipping its one-way premium_synthetic latch. Checked
+        # before the qty/candle-construction work below, which would be
+        # wasted effort for a tick outside the fixed universe.
+        st = self.state
+        active_bn = st.active_trade
+        active_nf = st.active_trade_nf
+        is_bn_opt = active_bn is not None and active_bn.option_symbol and symbol == active_bn.option_symbol
+        is_nf_opt = active_nf is not None and active_nf.option_symbol and symbol == active_nf.option_symbol
+        if is_bn_opt or is_nf_opt:
+            ltp = 0.0
+            if "ltp" in n:
+                ltp_raw = str(n["ltp"])
+                m = _LTP_PAT.search(ltp_raw)
+                try:
+                    ltp = float(m.group(1)) if m else float(ltp_raw)
+                except (ValueError, AttributeError):
+                    pass
+            if ltp > 0:
+                if is_bn_opt:
+                    st.bn_option_ltp = ltp
+                    active_bn.premium_synthetic = False
+                if is_nf_opt:
+                    st.nf_option_ltp = ltp
+                    active_nf.premium_synthetic = False
             return
 
         # Real per-trade quantity, embedded as "...qty N..." inside the

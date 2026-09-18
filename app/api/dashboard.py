@@ -18,7 +18,8 @@ import app.services.settings as settings
 from app.auth import require_login
 from app.backtest.engine import run_backtest
 from app.backtest.signal_study import run_bn_leader_consensus_study
-from app.services import bn_trade
+from app.services import bn_trade, nf_trade
+from app.services.historical_data import fetch_candles_for_date
 from app.services.settings import BN_FUNDS_KEY
 from app.state import get_state
 from app.ws.dashboard_ws import ws_manager
@@ -170,6 +171,60 @@ async def manual_exit() -> Dict[str, Any]:
     return {"orderId": closed.order_id, "exitPremium": closed.exit_premium, "pnl": closed.pnl}
 
 
+# ── Manual order (Nifty 50) — mirror of the BankNifty manual order above,
+# same single-active-trade-slot semantics but on st.active_trade_nf. Shares
+# the BN_FUNDS_KEY paper account (funds/daily_pnl are one shared account
+# across both instruments — see app/state.py). ────────────────────────────
+
+@router.post("/api/manual-order-nf")
+async def manual_order_nf(req: ManualOrderRequest) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    try:
+        trade = nf_trade.place_manual_order(req.direction.upper(), datetime.now(IST))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    try:
+        await _db.save_position(trade, instrument="NIFTY50")
+    except Exception as e:
+        raise HTTPException(500, f"Order placed but DB save failed: {e}")
+    return {
+        "orderId": trade.order_id, "direction": trade.direction,
+        "strike": trade.strike, "optionType": trade.option_type,
+        "entryIndexPrice": trade.entry_index_price, "entryPremium": trade.entry_premium,
+    }
+
+
+@router.post("/api/manual-exit-nf")
+async def manual_exit_nf() -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    st = get_state()
+    if st.active_trade_nf is None:
+        raise HTTPException(400, "No active trade to exit")
+    if st.nf_index_ltp <= 0:
+        raise HTTPException(400, "No live Nifty 50 price yet")
+
+    with st._nf_index_lock:
+        nf_candles = list(st.nf_index_candles_5m)
+    closes = (np.fromiter((c.close for c in nf_candles), np.float64, len(nf_candles))
+              if nf_candles else np.zeros(0, dtype=np.float64))
+    lookback = closes[-cfg.NF_IV_LOOKBACK_BARS:] if closes.size > cfg.NF_IV_LOOKBACK_BARS else closes
+
+    closed = nf_trade.force_close(datetime.now(IST), st.nf_index_ltp, lookback, label="MANUAL EXIT")
+    if closed is None:
+        raise HTTPException(400, "No active trade to exit")
+    try:
+        await _db.update_position_exit(
+            order_id=closed.order_id, exit_price=closed.exit_index_price,
+            exit_time=closed.exit_time, pnl=closed.pnl, exit_premium=closed.exit_premium,
+        )
+        await _db.set_app_settings({BN_FUNDS_KEY: st.funds})
+    except Exception as e:
+        raise HTTPException(500, f"Exit applied but DB persist failed: {e}")
+    return {"orderId": closed.order_id, "exitPremium": closed.exit_premium, "pnl": closed.pnl}
+
+
 # ── Live prices ───────────────────────────────────────────────────────────────
 
 @router.get("/api/prices")
@@ -178,6 +233,63 @@ def get_prices() -> Dict[str, float]:
     prices = {cfg.BN_INDEX_NAME: st.bn_index_ltp, cfg.NF_INDEX_NAME: st.nf_index_ltp}
     prices.update(st.ltp)
     return prices
+
+
+# ── Stock Candles panel — date-picker historical fetch ────────────────────────
+# On-demand, single-calendar-day snapshot (2026-09-16) — separate from
+# STATE_UPDATE's live stockCandles/stockCandlesNf, which is always the
+# rolling recent buffer (today, or a few days back at most, per
+# scheduler._STOCK_TABLE_BARS). Shape-compatible with that same field
+# (startTime/open/close/high/low/volume/lastQty/buyQty/sellQty/surged) so the
+# frontend can render it through the exact same renderStockCandles it
+# already has, just fed a different payload.
+
+def _historical_candle_json(c) -> Dict[str, Any]:
+    return {
+        "startTime": c.start_time, "open": c.open, "close": c.close,
+        "high": c.high, "low": c.low, "volume": c.volume,
+        "lastQty": c.last_qty, "buyQty": c.buy_qty, "sellQty": c.sell_qty,
+        "surged": False,   # historical/vendor-REST bars carry no live surge signal
+    }
+
+
+@router.get("/api/stock-candles/{instrument}")
+async def stock_candles_for_date(instrument: str, for_date: date) -> Dict[str, Any]:
+    """
+    instrument: "bn" | "nf". for_date: the ONE calendar day to fetch (query
+    param, e.g. ?for_date=2026-09-10). Individual stocks come straight from
+    the vendor's REST history (it fully archives those); the index itself
+    never has vendor history at all (see CLAUDE.md) — its bars come from
+    this app's OWN self-recorded bn_index_bars/nf_index_bars table instead,
+    so a date before this app was ever running that day returns no index row.
+    """
+    if instrument not in ("bn", "nf"):
+        raise HTTPException(400, "instrument must be 'bn' or 'nf'")
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+
+    from_iso = f"{for_date.isoformat()}T00:00:00"
+    to_iso   = f"{for_date.isoformat()}T23:59:59"
+
+    if instrument == "bn":
+        all_stocks = cfg.BN_ALL_STOCKS
+        index_name = cfg.BN_INDEX_NAME
+        index_bars = await _db.get_bn_index_bars(from_iso, to_iso)
+    else:
+        all_stocks = cfg.NF_ALL_STOCKS
+        index_name = cfg.NF_INDEX_NAME
+        index_bars = await _db.get_nf_index_bars(from_iso, to_iso)
+
+    stock_hist    = await fetch_candles_for_date(all_stocks, for_date)
+    token_to_name = {tok: name for name, tok in all_stocks.items()}
+
+    stock_candles: Dict[str, Any] = {}
+    if index_bars:
+        stock_candles[index_name] = [_historical_candle_json(c) for c in index_bars]
+    for tok, candles in stock_hist.items():
+        stock_candles[token_to_name.get(tok, tok)] = [_historical_candle_json(c) for c in candles]
+
+    return {"date": for_date.isoformat(), "stockCandles": stock_candles}
 
 
 # ── Leader-consensus signal study (NOT the options P&L backtest below) ────────

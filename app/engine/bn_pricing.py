@@ -37,6 +37,24 @@ def get_atm_strike(spot: float) -> int:
     return int(round(spot / 100.0) * 100)
 
 
+def build_option_symbol(underlying: str, expiry: datetime, strike: int, option_type: str) -> str:
+    """
+    Real vendor option-instrument symbol for a given underlying/expiry/
+    strike/type, e.g. "BANKNIFTY17SEP56400CE" — feeds the real-option-LTP
+    paper-trading feature (2026-09-17, explicit user decision; live only,
+    never called from backtest). Format (UNDERLYING + zero-padded day-of-
+    month + 3-letter uppercase month, no year digit + strike + CE/PE) is
+    inferred from a user-supplied vendor instrument-master export, NOT
+    independently confirmed against the live feed (the vendor's REST
+    endpoint was unreachable — connection timeout — when this was built).
+    If a subscribed option symbol never produces a real tick, suspect this
+    format first (same gotcha class as the Kotak Bank naming issue) —
+    reusable by both bn_entry_exit.py (cfg.BN_OPTION_UNDERLYING) and
+    nf_entry_exit.py (cfg.NF_OPTION_UNDERLYING, via nf_pricing.py's re-export).
+    """
+    return f"{underlying}{expiry.strftime('%d%b').upper()}{strike}{option_type}"
+
+
 def get_next_expiry(now: datetime) -> datetime:
     """
     Next weekly Thursday 15:30 IST. If `now` IS a Thursday past 15:30, the

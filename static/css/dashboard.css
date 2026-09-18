@@ -300,7 +300,7 @@ body {
 
 /* "Full view" toggle (Stock Candles panels) — pops the panel out of its
    half-width grid column to cover the page, so a wide table (15 bars ×
-   32 stocks) gets real horizontal room instead of only a scrollbar. */
+   50 stocks) gets real horizontal room instead of only a scrollbar. */
 .panel.fullview {
   position: fixed;
   inset: 12px;
@@ -1047,6 +1047,16 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 .candle-cell.positive .alert-tick { color: var(--pos); }
 .candle-cell.negative .alert-tick { color: var(--neg); }
 .candle-cell.neutral  .alert-tick { color: var(--txt-2); }
+
+/* Day-boundary column separator (see breakout.js's renderStockCandles'
+   dayBoundaryAt) — the first column of an older calendar day, when a "Last
+   N bars" window is wide enough to cross a day boundary. th.day-boundary
+   also carries the date label; td.day-boundary is border-only so every
+   stock row in that column visually lines up under it. */
+th.day-boundary, td.day-boundary {
+  border-left: 2px solid var(--prime);
+}
+.day-date { color: var(--prime); font-weight: 700; }
 
 .oc-toggle-label {
   display: inline-flex; align-items: center; gap: 4px;

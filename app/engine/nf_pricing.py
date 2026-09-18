@@ -16,6 +16,7 @@ import numpy as np
 import app.config as cfg
 from app.engine.bn_pricing import (  # noqa: F401 — re-exported for nf_entry_exit.py
     black_scholes,
+    build_option_symbol,
     get_atm_strike,
     get_next_expiry,
     normal_cdf,

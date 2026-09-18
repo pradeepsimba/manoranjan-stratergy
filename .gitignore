@@ -63,3 +63,4 @@ Thumbs.db
 static/dist/
 static/*.min.js
 static/*.min.css
+.claude

@@ -75,12 +75,23 @@ INTERVAL_5M = "5m"
 # 26009, trading_symbol="BANKNIFTY", instrumental_token=26009) shows the
 # correct stock_symbol is the plain trading symbol "BANKNIFTY" — matching
 # the same trading-symbol-string convention BN_ALL_STOCKS already uses post-
-# migration, not "NIFTY BANK". Retrying with this corrected value; if the
-# vendor still returns nothing, app/services/market_data.py's synthetic
-# index (from these 11 stocks' BN_INDEX_WEIGHTS-weighted % change — see
-# MarketDataService._update_synthetic_index) remains the fallback either way.
+# migration, not "NIFTY BANK". A second, independent instrument-master export
+# (2026-09-17) confirms the same row again (exchange_token 26009,
+# trading_symbol "BANKNIFTY", instrument_type INDEX). Retrying with this
+# corrected value; if the vendor still returns nothing, app/services/
+# market_data.py's synthetic index (from the BN stocks' BN_INDEX_WEIGHTS-
+# weighted % change — see MarketDataService._update_synthetic_index) remains
+# the fallback either way.
 BN_INDEX_NAME = "BANKNIFTY"
 BN_INDEX_TOKEN = "BANKNIFTY"   # was "NIFTY BANK", before that "26009" — both unconfirmed guesses
+
+# Options-underlying symbol prefix used to build a real option instrument
+# symbol (e.g. "BANKNIFTY17SEP56400CE") for the paper-trading engine's real-
+# LTP feature (2026-09-17, explicit user decision — see app/engine/
+# bn_pricing.build_option_symbol). Same as BN_INDEX_TOKEN for BankNifty, but
+# kept as its own constant since NF's equivalent (NF_OPTION_UNDERLYING,
+# below) deliberately differs from NF_INDEX_TOKEN.
+BN_OPTION_UNDERLYING = BN_INDEX_TOKEN
 
 # The 6 stocks that actually drive the trade decision (leader-vote + BN
 # composite indicator gate).
@@ -131,10 +142,12 @@ BN_PRICE_ALERT_ATTR: Dict[str, str] = {
     "INDUSIND BANK":        "BN_PRICE_ALERT_PTS_INDUSIND",
 }
 
-# All 11 stocks fetched/displayed (matches c.html's own universe, 12 tokens
-# total together with the index) — the 6
-# beyond the leaders never feed the entry decision but are kept for display /
-# future use per an explicit user decision, not because they're needed.
+# The real 14-member NIFTY BANK index universe (2026-09-16 addition of Bank
+# of Baroda/Union Bank of India/Yes Bank + 2026-09-17 correction, both
+# below; 2026-09-17 removal of the 11 non-index "extras" this dict briefly
+# also carried, per explicit user decision to track only the real index
+# members). BN_LEADER_STOCKS' 6 drive the entry decision; the other 8 below
+# are tracked for display/weighted-signal purposes only.
 BN_ALL_STOCKS: Dict[str, str] = {
     **BN_LEADER_STOCKS,
     "AU SMALL FINANCE BANK": "AUBANK",      # was "21238"
@@ -142,6 +155,27 @@ BN_ALL_STOCKS: Dict[str, str] = {
     "IDFC FIRST BANK":       "IDFCFIRSTB",  # was "11184"
     "PUNJAB NATIONAL BANK":  "PNB",         # was "10666"
     "CANARA BANK":           "CANBK",       # was "10794"
+    # Completes the real NIFTY BANK index (2026-09-16 + correction 2026-09-17)
+    # — previously left out as BN_UNTRACKED_WEIGHTS-only (no confirmed vendor
+    # symbol). Now wired as a real instrument, and the "BANKBARODA" guess is
+    # confirmed correct (2026-09-17) against a user-supplied vendor
+    # instrument-master export (exchange_token/trading_symbol/
+    # instrumental_token/instrument_type columns) — exact match: trading_
+    # symbol "BANKBARODA".
+    "BANK OF BARODA":        "BANKBARODA",
+    # These 2 complete the real NIFTY BANK index's roster of 14 members
+    # (2026-09-17 correction — the official NSE factsheet, fetched live, says
+    # "No. of Constituents: 14", and a full constituent listing — later also
+    # independently confirmed by a user-supplied NSE screenshot listing all
+    # 14 symbols, exact match — confirmed the other 12 already tracked above
+    # plus exactly these two; earlier that same day I had wrongly assumed 12
+    # was the complete index and briefly filed both of these under a "non-
+    # index extras" block instead). Real members, but — like PNB/CANBK above
+    # — with no confirmed individual weight number, so they sit on the
+    # equal-weight placeholder rather than in BN_INDEX_WEIGHTS_CONFIRMED
+    # below.
+    "UNION BANK OF INDIA":   "UNIONBANK",
+    "YES BANK":              "YESBANK",
 }
 
 # Nifty Bank per-stock weight, % — keyed by the same trading-symbol strings
@@ -149,15 +183,35 @@ BN_ALL_STOCKS: Dict[str, str] = {
 # keyed — see CLAUDE.md's "candles_5m is keyed by TOKEN" convention, now
 # token = trading symbol). Used for the weighted global-signal/contribution-
 # analysis port (app/engine/bn_breakout.py) and the synthetic BankNifty
-# index candle (app/services/market_data.py).
-#
-# Updated 2026-09-07 from a user-supplied current weightage snapshot for 9 of
-# these 11 (HDFCBANK/ICICIBANK/SBIN/KOTAKBANK/AXISBANK/INDUSINDBK/AUBANK/
-# IDFCFIRSTB/FEDERALBNK), replacing the older "Oct 30, 2025" c.html figures.
-# PNB/CANBK were NOT in that new snapshot (a "Bank of Baroda" entry appeared
-# in their place — not currently a tracked BN_ALL_STOCKS instrument) — their
-# weights are left at the prior snapshot's values rather than guessed.
+# index candle (app/services/market_data.py). Equal weight across all
+# BN_ALL_STOCKS is the base — the fallback for any stock not covered by the
+# real-weight overlay below (mirrors NF_INDEX_WEIGHTS' own pattern).
 BN_INDEX_WEIGHTS: Dict[str, float] = {
+    token: 100.0 / len(BN_ALL_STOCKS) for token in BN_ALL_STOCKS.values()
+}
+# Real weights for 10 of the 14 actual NIFTY BANK index members — 9 from a
+# 2026-09-07 user-supplied snapshot (HDFCBANK/ICICIBANK/SBIN/KOTAKBANK/
+# AXISBANK/INDUSINDBK/AUBANK/IDFCFIRSTB/FEDERALBNK, replacing the older
+# "Oct 30, 2025" c.html figures), and BANKBARODA folded in from the old
+# BN_UNTRACKED_WEIGHTS side-channel now that it's a real tracked instrument
+# (2026-09-16, see BN_ALL_STOCKS above). Independently re-confirmed
+# 2026-09-17 against the live NSE factsheet (archives.nseindia.com/content/
+# indices/ind_nifty_bank.pdf, dated August 31, 2026) — its "Top constituents
+# by weightage" table lists these exact same 10 names at these exact same
+# weight values. The remaining 4 real members — PNB/CANBK (unchanged at an
+# older snapshot's values, not in the 2026-09-07 one) and Union Bank of
+# India/Yes Bank (no weight ever supplied — these two were even miscategorized
+# as non-index "extras" until the 2026-09-17 correction above) — have no
+# current weight number and are NOT part of the rescale below.
+#
+# The 10-stock snapshot below sums to 86.81, not 100 — the snapshot just
+# didn't cover the full index. Rescaled proportionally (preserving each
+# stock's relative size) so the "Weightage (confirmed stocks)" badge's
+# denominator reads a clean 100 instead of that partial-coverage number
+# (2026-09-17, same fix already applied to NF's equivalent badge) — PNB/
+# CANBK/UNIONBANK/YESBANK are NOT part of this rescale, since they're
+# excluded from BN_INDEX_WEIGHTS_CONFIRMED below and don't feed that badge.
+_BN_REAL_WEIGHTS_CONFIRMED_RAW = {
     "HDFCBANK":   17.02,   # HDFC BANK
     "ICICIBANK":  14.86,   # ICICI BANK
     "SBIN":       10.27,   # STATE BANK OF INDIA
@@ -167,34 +221,26 @@ BN_INDEX_WEIGHTS: Dict[str, float] = {
     "INDUSINDBK": 5.45,    # INDUSIND BANK
     "AUBANK":     4.82,    # AU SMALL FINANCE BANK
     "IDFCFIRSTB": 4.68,    # IDFC FIRST BANK
-    "PNB":        2.86,    # PUNJAB NATIONAL BANK — unchanged, not in the new snapshot
-    "CANBK":      2.40,    # CANARA BANK — unchanged, not in the new snapshot
+    "BANKBARODA": 3.48,    # BANK OF BARODA
 }
-
-# "Bank of Baroda" — the 10th stock in the user's 2026-09-07 weightage
-# snapshot. Deliberately NOT merged into BN_INDEX_WEIGHTS above: that dict
-# also drives compute_global_signal and the synthetic BankNifty index (see
-# market_data.py), and adding a "phantom" stock with no real candle data
-# would quietly dilute THOSE weighted averages (each would treat it as an
-# always-flat 3.48%-weight constituent). It's also NOT in BN_ALL_STOCKS/
-# BN_LEADER_STOCKS — no WS subscription, no confirmed vendor stock_symbol
-# (guessing "BANKBARODA" risks the exact silent-zero-data mismatch that bit
-# BankNifty/Nifty 50's own index tokens earlier). This exists ONLY so the
-# weighted red/green split's TOTAL can include it, per explicit user request
-# ("totally i given 10 stocks now") — it will always read as no-data/
-# unchanged there. If it's ever wired up as a real instrument, confirm its
-# actual stock_symbol first, then fold it into BN_ALL_STOCKS/BN_INDEX_WEIGHTS
-# properly instead of this side-channel.
-BN_UNTRACKED_WEIGHTS: Dict[str, float] = {
-    "BANKBARODA": 3.48,   # BANK OF BARODA
+_bn_confirmed_scale = 100.0 / sum(_BN_REAL_WEIGHTS_CONFIRMED_RAW.values())
+_BN_REAL_WEIGHTS = {
+    tok: round(w * _bn_confirmed_scale, 2) for tok, w in _BN_REAL_WEIGHTS_CONFIRMED_RAW.items()
 }
+_BN_REAL_WEIGHTS.update({
+    "PNB":   2.86,    # PUNJAB NATIONAL BANK — unchanged, not in the new snapshot, not rescaled (excluded from BN_INDEX_WEIGHTS_CONFIRMED)
+    "CANBK": 2.40,    # CANARA BANK — unchanged, not in the new snapshot, not rescaled (excluded from BN_INDEX_WEIGHTS_CONFIRMED)
+})
+BN_INDEX_WEIGHTS.update(_BN_REAL_WEIGHTS)
 
-# The exact 10 stocks in the user's 2026-09-07 weightage snapshot — the
-# weighted red/green split's TOTAL is computed over this set (from
-# BN_INDEX_WEIGHTS ∪ BN_UNTRACKED_WEIGHTS). PNB/CANBK are deliberately
-# excluded — the user did not re-supply weights for those two. Used by the
-# Stock Candles panel's per-bar weighted red/green split
-# (app.engine.bn_breakout.compute_weighted_red_green).
+# The 10 index members with a real, user-verified weight — the weighted
+# red/green split's TOTAL is computed over this set only (see
+# app.engine.bn_breakout.compute_weighted_red_green), and sums to exactly 100
+# thanks to the rescale above. The other 4 real members (PNB/CANBK — the user
+# did not re-supply weights for those two — and Union Bank of India/Yes Bank
+# — no weight ever supplied) are deliberately excluded, and so are all 11
+# non-index "extras" above, which have no real weight at all, only the
+# equal-weight placeholder.
 BN_INDEX_WEIGHTS_CONFIRMED = {
     "HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK",
     "FEDERALBNK", "INDUSINDBK", "AUBANK", "IDFCFIRSTB", "BANKBARODA",
@@ -218,8 +264,20 @@ BN_LOT_SIZE = 30
 # trading_symbol="NIFTY 50", WITH a space) shows the vendor's exact stockname
 # text needs the space; the previous no-space value would have silently
 # returned zero data the same way "Kotak Mahindra Bank" did for Kotak Bank.
+# A second, independent instrument-master export (2026-09-17) confirms the
+# same row again (exchange_token 99926000, trading_symbol "NIFTY 50" with the
+# space, instrument_type INDEX).
 NF_INDEX_NAME = "NIFTY 50"
 NF_INDEX_TOKEN = "NIFTY 50"
+
+# Options-underlying symbol prefix (2026-09-17, see BN_OPTION_UNDERLYING
+# above) — deliberately "NIFTY", NOT NF_INDEX_TOKEN's "NIFTY 50": real NSE
+# Nifty 50 index options trade under the plain "NIFTY" underlying symbol,
+# unlike the index/stock candle data feed's "NIFTY 50" (with the space).
+# Unverified against the live vendor feed (connection was down when this was
+# added) — if a real option subscription silently returns no ticks, suspect
+# this value first (same gotcha class as the Kotak Bank naming issue).
+NF_OPTION_UNDERLYING = "NIFTY"
 
 # The 12 highest-weighted of the 32 (by real-world NSE index weight) — drive
 # the leader-vote + volume-surge gates, same role BN_LEADER_STOCKS plays.
@@ -269,7 +327,7 @@ NF_PRICE_ALERT_ATTR: Dict[str, str] = {
     "HINDUSTAN UNILEVER":       "NF_PRICE_ALERT_PTS_HUL",
 }
 
-# All 32 stocks fetched/displayed — the 20 beyond the leaders never feed the
+# All 47 stocks fetched/displayed — the 35 beyond the leaders never feed the
 # entry decision but are kept for parity with the BN universe's own
 # "leaders + extras" shape.
 NF_ALL_STOCKS: Dict[str, str] = {
@@ -298,24 +356,80 @@ NF_ALL_STOCKS: Dict[str, str] = {
     "TATA STEEL":               "TATASTEEL",
     "SBI LIFE INSURANCE":       "SBILIFE",
     "HDFC LIFE INSURANCE":      "HDFCLIFE",
+    # Remaining Nifty 50 index constituents not previously tracked (2026-09-16,
+    # explicit user decision to add the "rest of Nifty 50" — originally filled
+    # in from general knowledge, not vendor-confirmed). As of 2026-09-17, the
+    # surviving 15 symbols were cross-checked against a user-supplied vendor
+    # instrument-master export (exchange_token/trading_symbol/
+    # instrumental_token/instrument_type columns) and are an exact match — no
+    # longer a guess for the symbol, though live/historical data flow through
+    # this specific vendor feed is still unverified beyond that (the master
+    # list only proves the identifier is valid, not that this vendor actually
+    # streams it — same caveat as BANKNIFTY/NIFTY 50's own tokens).
+    #
+    # LTIMINDTREE / NESTLE INDIA / OIL & NATURAL GAS CORP were tried and
+    # REMOVED (2026-09-17) — confirmed via direct vendor query (a live POST to
+    # the historical-data endpoint, with a known-good control stock in the
+    # same request batch to rule out a broader outage) that all three return
+    # zero candles under every stockname/symbol variant tried, over a 5-day
+    # window — a genuine coverage gap, not a naming mismatch (LTIMINDTREE
+    # wasn't even in the instrument-master export to begin with; NESTLEIND
+    # and ONGC were, so being listed there is no guarantee of real data). Same
+    # class as the confirmed-dead Maruti/Sun Pharma/Power Grid/TCS entries
+    # below — don't re-add any of these six without a fresh direct vendor
+    # query confirming they now return real bars.
+    "ADANI ENTERPRISES":        "ADANIENT",
+    "ADANI PORTS & SEZ":        "ADANIPORTS",
+    "APOLLO HOSPITALS":         "APOLLOHOSP",
+    "BAJAJ FINSERV":            "BAJAJFINSV",
+    "BHARAT ELECTRONICS":       "BEL",
+    "CIPLA":                    "CIPLA",
+    "COAL INDIA":               "COALINDIA",
+    "DR REDDYS LABORATORIES":   "DRREDDY",
+    "EICHER MOTORS":            "EICHERMOT",
+    "GRASIM INDUSTRIES":        "GRASIM",
+    "HERO MOTOCORP":            "HEROMOTOCO",   # NOT in the official current Nifty 50 list the user supplied 2026-09-17 (dropped in a reconstitution) — kept for now, unconfirmed whether to remove; see config.py's NF_ALL_STOCKS module comment
+    "HINDALCO INDUSTRIES":      "HINDALCO",
+    "SHRIRAM FINANCE":          "SHRIRAMFIN",
+    "TATA CONSUMER PRODUCTS":   "TATACONSUM",
+    "TRENT":                    "TRENT",
+    # Added 2026-09-17 against a user-supplied official Nifty 50 constituent
+    # list (50 rows: name/sector/symbol/series/ISIN) that revealed several
+    # index members this dict was missing entirely. Direct vendor query
+    # confirmed real data (218 bars, same as a healthy control) for these 3:
+    "INTERGLOBE AVIATION":      "INDIGO",
+    "JIO FINANCIAL SERVICES":   "JIOFIN",
+    "MAX HEALTHCARE INSTITUTE": "MAXHEALTH",
+    # The same list also named 5 more real members not yet added here:
+    # MARUTI/NESTLEIND/ONGC/POWERGRID/SUNPHARMA/TCS are the already-
+    # confirmed-dead six noted above (still correctly excluded); "Eternal
+    # Ltd." (the current name for the former Zomato) — vendor query timed
+    # out before a working stockname/symbol variant could be confirmed, so
+    # it's deliberately left out rather than guessed; and "Tata Motors
+    # Passenger Vehicles Ltd." (symbol TMPV) — the post-demerger index
+    # constituent — returned zero data under that name/symbol, while the
+    # pre-demerger combined "TATA MOTORS"/"TATAMOTORS" entry below still
+    # returns real, current data, so that's deliberately kept as-is rather
+    # than swapped to the technically-correct-but-vendor-dead TMPV symbol.
 }
 
-# Equal weight across all 32 (100/32) as the base — no real per-stock Nifty
-# 50 weights were originally supplied (unlike BN_INDEX_WEIGHTS), per an
-# explicit user decision. Keyed by stock_symbol, same convention as
-# BN_INDEX_WEIGHTS. Used for the weighted global-signal/contribution-analysis
-# port (app/engine/bn_breakout.py) and the synthetic Nifty 50 index candle
-# (app/services/market_data.py).
+# Equal weight across all 50 (100/50) as the base — the fallback for any
+# stock not covered by the overlay below. Keyed by stock_symbol, same
+# convention as BN_INDEX_WEIGHTS. Used for the weighted global-signal/
+# contribution-analysis port (app/engine/bn_breakout.py) and the synthetic
+# Nifty 50 index candle (app/services/market_data.py).
 NF_INDEX_WEIGHTS: Dict[str, float] = {
     token: 100.0 / len(NF_ALL_STOCKS) for token in NF_ALL_STOCKS.values()
 }
-# Overlay real Nifty 50 index weights (2026-09-07 user-supplied snapshot) for
-# the 10 constituents we now have actual numbers for — the other 22
-# NF_ALL_STOCKS entries stay at the equal-weight placeholder above until real
-# weights for them are supplied too. Still a real accuracy improvement even
-# partial: HDFC Bank's true ~10% influence was previously indistinguishable
-# from a sub-1%-weight constituent under the flat equal-weight scheme.
-_NF_INDEX_WEIGHTS_CONFIRMED_VALUES = {
+# Overlay real/approximate Nifty 50 index weights so the "Weightage
+# (confirmed stocks)" badge covers as much of the universe as possible
+# instead of falling back to the flat equal-weight placeholder above, and
+# sums to exactly 100 so the badge's denominator reads as a clean "% of the
+# real index" total rather than a partial-coverage number.
+#
+# Real, user-supplied weights (2026-09-07 snapshot) — kept exactly as given,
+# never rescaled.
+_NF_REAL_WEIGHTS = {
     "HDFCBANK":   9.97,    # HDFC BANK
     "ICICIBANK":  9.32,    # ICICI BANK
     "RELIANCE":   8.17,    # RELIANCE INDUSTRIES
@@ -327,12 +441,72 @@ _NF_INDEX_WEIGHTS_CONFIRMED_VALUES = {
     "KOTAKBANK":  2.86,    # KOTAK BANK
     "BAJFINANCE": 2.60,    # BAJAJ FINANCE
 }
+# Best-known approximate weights for the rest of the real Nifty 50
+# constituents (2026-09-16, explicit user decision — same "fill in from
+# general knowledge" risk accepted as the NF_ALL_STOCKS expansion above). NOT
+# sourced from an official NSE factsheet — the RELATIVE size of each number
+# is the meaningful part; rescaled below (proportionally, preserving those
+# relative sizes) to fill exactly the 100 - sum(_NF_REAL_WEIGHTS) budget left
+# after the real block above. If the displayed split ever looks obviously
+# wrong for one of these, suspect this number first.
+_NF_APPROX_WEIGHTS_RAW = {
+    "ITC":        3.90,    # ITC
+    "HCLTECH":    1.35,    # HCL TECHNOLOGIES
+    "HINDUNILVR": 2.10,    # HINDUSTAN UNILEVER
+    "ASIANPAINT": 1.05,    # ASIAN PAINTS
+    "TITAN":      1.15,    # TITAN
+    "WIPRO":      0.85,    # WIPRO
+    "NTPC":       1.30,    # NTPC
+    "ULTRACEMCO": 1.10,    # ULTRATECH CEMENT
+    "JSWSTEEL":   0.95,    # JSW STEEL
+    "TATAMOTORS": 1.45,    # TATA MOTORS
+    "TECHM":      0.75,    # TECH MAHINDRA
+    "BAJAJ-AUTO": 0.95,    # BAJAJ AUTO
+    "INDUSINDBK": 0.70,    # INDUSIND BANK
+    "M&M":        1.80,    # MAHINDRA & MAHINDRA
+    "TATASTEEL":  0.90,    # TATA STEEL
+    "SBILIFE":    0.90,    # SBI LIFE INSURANCE
+    "HDFCLIFE":   1.10,    # HDFC LIFE INSURANCE
+    "ADANIENT":   0.80,    # ADANI ENTERPRISES
+    "ADANIPORTS": 0.85,    # ADANI PORTS & SEZ
+    "APOLLOHOSP": 0.55,    # APOLLO HOSPITALS
+    "BAJAJFINSV": 0.95,    # BAJAJ FINSERV
+    "BEL":        0.65,    # BHARAT ELECTRONICS
+    "CIPLA":      0.60,    # CIPLA
+    "COALINDIA":  0.80,    # COAL INDIA
+    "DRREDDY":    0.60,    # DR REDDYS LABORATORIES
+    "EICHERMOT":  0.55,    # EICHER MOTORS
+    "GRASIM":     0.55,    # GRASIM INDUSTRIES
+    "HEROMOTOCO": 0.45,    # HERO MOTOCORP
+    "HINDALCO":   0.65,    # HINDALCO INDUSTRIES
+    "SHRIRAMFIN": 0.55,    # SHRIRAM FINANCE
+    "TATACONSUM": 0.55,    # TATA CONSUMER PRODUCTS
+    "TRENT":      0.65,    # TRENT
+    "INDIGO":     0.75,    # INTERGLOBE AVIATION — added 2026-09-17
+    "JIOFIN":     0.50,    # JIO FINANCIAL SERVICES — added 2026-09-17
+    "MAXHEALTH":  0.45,    # MAX HEALTHCARE INSTITUTE — added 2026-09-17
+}
+# Deliberately NOT included above: AU SMALL FINANCE BANK, FEDERAL BANK, IDFC
+# FIRST BANK, PUNJAB NATIONAL BANK, CANARA BANK — these are BN's own "extras"
+# (see NF_ALL_STOCKS comment above), not real Nifty 50 constituents, so they
+# have no genuine index weight to assign. They stay on the equal-weight
+# placeholder and are excluded from the "confirmed" badge/set below.
+# (LTIMindtree/Nestle India/ONGC needed no such placeholder-exclusion note —
+# they were removed from NF_ALL_STOCKS entirely, see above, so there's no
+# symbol left for a weight to attach to either way.)
+_nf_approx_budget = 100.0 - sum(_NF_REAL_WEIGHTS.values())
+_nf_approx_scale  = _nf_approx_budget / sum(_NF_APPROX_WEIGHTS_RAW.values())
+_NF_INDEX_WEIGHTS_CONFIRMED_VALUES = {
+    **_NF_REAL_WEIGHTS,
+    **{tok: round(w * _nf_approx_scale, 2) for tok, w in _NF_APPROX_WEIGHTS_RAW.items()},
+}
 NF_INDEX_WEIGHTS.update(_NF_INDEX_WEIGHTS_CONFIRMED_VALUES)
 
-# NF mirror of BN_INDEX_WEIGHTS_CONFIRMED above — the 10 NF_INDEX_WEIGHTS
-# keys with a real, user-supplied weight, as opposed to the other 22 still
-# on the equal-weight placeholder. Derived from the overlay dict itself so
-# the two can never drift apart.
+# NF mirror of BN_INDEX_WEIGHTS_CONFIRMED above — the NF_INDEX_WEIGHTS keys
+# with a real-or-approximated weight (see the two blocks above for which is
+# which), as opposed to the 5 non-constituent extras still on the
+# equal-weight placeholder. Derived from the overlay dict itself so the two
+# can never drift apart.
 NF_INDEX_WEIGHTS_CONFIRMED = set(_NF_INDEX_WEIGHTS_CONFIRMED_VALUES.keys())
 
 # Nifty 50 exchange lot size — a contract-spec fact, not a user tunable.
@@ -341,6 +515,14 @@ NF_LOT_SIZE = 65
 # ── Static: structural sizes (pools/buffers built once — restart to change) ──
 HIST_BATCH_SIZE   = 100   # max stocks per single historical API request
 MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
+
+# The vendor's documented output-buffer limit is ~40 symbol-interval pairs per
+# WS connection (see market_data.py). Adding the rest of the Nifty 50
+# universe (2026-09-16) pushed the combined BN+NF filter count past that cap,
+# so MarketDataService now splits filters into chunks of this size, one
+# connection per chunk, instead of a single connection. Kept a few below the
+# documented ~40 as a safety margin.
+WS_MAX_FILTERS_PER_CONN = 35
 
 # Backtest v1 is intraday/5m only — nothing in c.html holds an option position
 # across days, so positional (delivery / 1d) replay is not built.

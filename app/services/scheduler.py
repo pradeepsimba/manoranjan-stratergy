@@ -892,6 +892,7 @@ class SchedulerService:
                 "exitPremium": t.exit_premium, "pnl": t.pnl,
                 "indexPnlPoints": t.index_pnl_points, "confidence": t.confidence,
                 "currentPremium": t.current_premium, "currentIv": t.current_iv,
+                "optionSymbol": t.option_symbol, "premiumSynthetic": t.premium_synthetic,
             }
 
         active = None
@@ -916,6 +917,7 @@ class SchedulerService:
                 "bnBullish": d.bn_bullish, "bnBearish": d.bn_bearish,
                 "noTradeReason": d.no_trade_reason, "atmStrike": d.atm_strike,
                 "atmPremium": d.atm_premium, "atmIv": d.atm_iv,
+                "atmCePremium": d.atm_ce_premium, "atmPePremium": d.atm_pe_premium,
                 "cooldownOk": d.cooldown_ok, "sidewaysOk": d.sideways_ok,
                 "dirCountOk": d.dir_count_ok, "qtySurgeOk": d.qty_surge_ok,
                 "sameDirectionRequired": d.same_direction_required,
@@ -954,8 +956,7 @@ class SchedulerService:
         global_signal   = bn_breakout.compute_global_signal(column_counts, latest_by_token,
                                                              cfg.BN_INDEX_TOKEN, cfg.BN_INDEX_WEIGHTS)
         weighted_red_green = bn_breakout.compute_weighted_red_green(
-            latest_by_token, {**cfg.BN_INDEX_WEIGHTS, **cfg.BN_UNTRACKED_WEIGHTS},
-            cfg.BN_INDEX_WEIGHTS_CONFIRMED)
+            latest_by_token, cfg.BN_INDEX_WEIGHTS, cfg.BN_INDEX_WEIGHTS_CONFIRMED)
 
         # "surged" is only meaningful for the 6 leader stocks (the ones the
         # Big Trades panel shows) — computed per-bar with the exact same

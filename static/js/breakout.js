@@ -18,12 +18,16 @@ const STOCK_IDS_BN = { signal: 'global-signal-badge', banner: 'breakout-banner',
                       head: 'stock-table-head', body: 'stock-table-body',
                       srBody: 'sr-table-body', indexKey: 'BANKNIFTY',
                       barsSelect: 'stock-bars-select', ocToggle: 'show-oc-toggle',
-                      weightedRG: 'weighted-red-green' };
+                      weightedRG: 'weighted-red-green',
+                      datePicker: 'stock-date-picker', dateLiveBtn: 'stock-date-live-btn',
+                      dateStatus: 'stock-date-status', panel: 'bn' };
 const STOCK_IDS_NF = { signal: 'global-signal-badge-nf', banner: 'breakout-banner-nf',
                       head: 'stock-table-head-nf', body: 'stock-table-body-nf',
                       srBody: 'sr-table-body-nf', indexKey: 'NIFTY 50',
                       barsSelect: 'stock-bars-select-nf', ocToggle: 'show-oc-toggle-nf',
-                      weightedRG: 'weighted-red-green-nf' };
+                      weightedRG: 'weighted-red-green-nf',
+                      datePicker: 'stock-date-picker-nf', dateLiveBtn: 'stock-date-live-btn-nf',
+                      dateStatus: 'stock-date-status-nf', panel: 'nf' };
 
 // Whether each candle cell also prints its raw open/close (see
 // _candleCellHtml) — off by default, shared across both panels like
@@ -37,8 +41,8 @@ function setShowOC(checked) {
     const el = document.getElementById(id);
     if (el) el.checked = _showOC;
   });
-  if (_lastStockCandlesBn) renderStockCandles(_lastStockCandlesBn, STOCK_IDS_BN);
-  if (_lastStockCandlesNf) renderStockCandles(_lastStockCandlesNf, STOCK_IDS_NF);
+  _rerenderCurrent(STOCK_IDS_BN);
+  _rerenderCurrent(STOCK_IDS_NF);
 }
 
 // How many of each stock's most-recent bars to actually render as columns
@@ -59,8 +63,80 @@ function setStockBarsCount(val) {
     const el = document.getElementById(id);
     if (el) el.value = String(n);
   });
-  if (_lastStockCandlesBn) renderStockCandles(_lastStockCandlesBn, STOCK_IDS_BN);
-  if (_lastStockCandlesNf) renderStockCandles(_lastStockCandlesNf, STOCK_IDS_NF);
+  _rerenderCurrent(STOCK_IDS_BN);
+  _rerenderCurrent(STOCK_IDS_NF);
+}
+
+// ── Date-picker historical view ─────────────────────────────────────────
+// Lets a Stock Candles panel show one specific past calendar day instead of
+// the live rolling buffer (explicit user request, 2026-09-16). Fetches
+// GET /api/stock-candles/{bn|nf}?for_date=YYYY-MM-DD (app/api/dashboard.py)
+// — individual stocks come from the vendor's real historical archive, the
+// index row from this app's own self-recorded bn_index_bars/nf_index_bars
+// table. While a panel is date-filtered, dashboard.js's render() skips
+// feeding it live STATE_UPDATE data (see isDateFilterActive) so the
+// historical view isn't silently overwritten a second later; clicking
+// "Live" clears the filter and repaints from whatever live data is already
+// cached (may be up to ~1s stale until the next STATE_UPDATE corrects it).
+const _dateFilterActive = { bn: null, nf: null };      // null | "YYYY-MM-DD"
+let _lastHistoricalCandlesBn = null;
+let _lastHistoricalCandlesNf = null;
+
+function isDateFilterActive(panel) {
+  return !!_dateFilterActive[panel];
+}
+
+// Whichever data is CURRENTLY on screen for a panel — live or historical —
+// so the O/C toggle and bar-count selector re-render the right one instead
+// of always snapping back to live.
+function _rerenderCurrent(ids) {
+  const isNf = ids === STOCK_IDS_NF;
+  const active = isNf ? _dateFilterActive.nf : _dateFilterActive.bn;
+  const data = active
+    ? (isNf ? _lastHistoricalCandlesNf : _lastHistoricalCandlesBn)
+    : (isNf ? _lastStockCandlesNf : _lastStockCandlesBn);
+  if (data) renderStockCandles(data, ids, !active);
+}
+
+function loadStockCandlesForDate(dateStr, ids) {
+  ids = ids || STOCK_IDS_BN;
+  if (!dateStr) return;
+  const panel = ids.panel;
+  const statusEl = document.getElementById(ids.dateStatus);
+  if (statusEl) statusEl.textContent = `Loading ${dateStr}…`;
+
+  fetch(`/api/stock-candles/${panel}?for_date=${encodeURIComponent(dateStr)}`)
+    .then(r => r.json().then(body => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok) {
+        if (statusEl) statusEl.textContent = `Error: ${body.detail || 'request failed'}`;
+        return;
+      }
+      _dateFilterActive[panel] = dateStr;
+      if (panel === 'nf') _lastHistoricalCandlesNf = body.stockCandles || {};
+      else _lastHistoricalCandlesBn = body.stockCandles || {};
+      const liveBtn = document.getElementById(ids.dateLiveBtn);
+      if (liveBtn) liveBtn.style.display = '';
+      if (statusEl) {
+        const count = Object.keys(body.stockCandles || {}).length;
+        statusEl.textContent = count ? `Showing ${dateStr}` : `No data for ${dateStr}`;
+      }
+      renderStockCandles(body.stockCandles || {}, ids, false);
+    })
+    .catch(e => { if (statusEl) statusEl.textContent = `Error: ${e.message}`; });
+}
+
+function clearStockDateFilter(ids) {
+  ids = ids || STOCK_IDS_BN;
+  const panel = ids.panel;
+  _dateFilterActive[panel] = null;
+  const liveBtn = document.getElementById(ids.dateLiveBtn);
+  if (liveBtn) liveBtn.style.display = 'none';
+  const statusEl = document.getElementById(ids.dateStatus);
+  if (statusEl) statusEl.textContent = '';
+  const picker = document.getElementById(ids.datePicker);
+  if (picker) picker.value = '';
+  _rerenderCurrent(ids);
 }
 
 function renderGlobalSignal(gs, ids) {
@@ -168,14 +244,29 @@ function _colLabel(posFromNewest, n) {
   return `Prev${i}`;
 }
 
-function renderStockCandles(stockCandles, ids) {
+// "YYYY-MM-DD" -> "16 Sep", for the day-boundary column label in
+// renderStockCandles' header row.
+function _fmtColDate(iso) {
+  const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const [, m, d] = iso.split('-');
+  return `${parseInt(d, 10)} ${MON[parseInt(m, 10) - 1]}`;
+}
+
+function renderStockCandles(stockCandles, ids, cacheAsLive) {
   ids = ids || STOCK_IDS_BN;
   const head = document.getElementById(ids.head);
   const body = document.getElementById(ids.body);
   if (!head || !body || !stockCandles) return;
 
-  if (ids === STOCK_IDS_NF) _lastStockCandlesNf = stockCandles;
-  else _lastStockCandlesBn = stockCandles;
+  // cacheAsLive === false (passed by the date-picker path) keeps historical
+  // data out of the live cache, so clicking "Live" doesn't show a past day.
+  if (cacheAsLive !== false) {
+    if (ids === STOCK_IDS_NF) _lastStockCandlesNf = stockCandles;
+    else _lastStockCandlesBn = stockCandles;
+    // A live call (STATE_UPDATE) while this panel is showing a picked date:
+    // keep the cache fresh but don't repaint over the historical view.
+    if (isDateFilterActive(ids.panel)) return;
+  }
 
   const names = Object.keys(stockCandles);
   // Merge (not replace) — this fn is called once per instrument, and a
@@ -198,7 +289,9 @@ function renderStockCandles(stockCandles, ids) {
   const fullBars = Math.max(0, ...names.map(n => (stockCandles[n] || []).length));
   // Clamped to the "Last N bars" selector — the server sends up to 15 (see
   // scheduler.py's _STOCK_TABLE_BARS), this is purely a client-side view trim.
-  const maxBars = Math.min(fullBars, _stockBarsCount);
+  // A date-picker historical render (cacheAsLive === false) shows the full
+  // day unclamped — the bars-count selector only applies to the live view.
+  const maxBars = cacheAsLive === false ? fullBars : Math.min(fullBars, _stockBarsCount);
 
   // Newest-first per stock, computed once and reused for both the header's
   // per-column green/red tally and the body rows below.
@@ -227,10 +320,34 @@ function renderStockCandles(stockCandles, ids) {
   // index row, on the theory that every instrument shares the same 5m bars.
   const refBars = reversedByName[ids.indexKey] || [];
 
-  let headHtml = `<th>Stock (${names.length})</th>`;
+  // Day-wise grouping (2026-09-16, explicit user decision): columns run
+  // newest-first left-to-right, so a "Last N bars" window wide enough to
+  // reach back past today's open (N > ~75, or early in the session before
+  // today has accumulated that many bars yet) mixes in yesterday's/earlier
+  // bars with nothing distinguishing them. Mark the FIRST column of each
+  // new (older) calendar day — computed once here from the shared index-row
+  // times (refBars), reused for both the header (date label) and every
+  // stock row's cell in that same column (border only, via .day-boundary),
+  // so day boundaries stay visible without changing what data is shown.
+  const dayBoundaryAt = new Array(maxBars).fill(false);
+  {
+    let prevColDate = null;
+    for (let i = 0; i < maxBars; i++) {
+      const barTime = refBars[i] && refBars[i].startTime;
+      const curDate = barTime ? barTime.substring(0, 10) : null;
+      if (i > 0 && curDate && prevColDate && curDate !== prevColDate) dayBoundaryAt[i] = true;
+      if (curDate) prevColDate = curDate;
+    }
+  }
+
+  // "Stock (N)" should count actual stocks only — the index row (BANKNIFTY/
+  // NIFTY 50, one of `names`, rendered as its own row below) isn't a stock.
+  const stockCount = names.filter(n => n !== ids.indexKey).length;
+  let headHtml = `<th>Stock (${stockCount})</th>`;
   for (let i = 0; i < maxBars; i++) {
     const label = _colLabel(i, maxBars);
-    const t = refBars[i] && refBars[i].startTime ? refBars[i].startTime.substring(11, 16) : '00';
+    const barTime = refBars[i] && refBars[i].startTime;
+    const t = barTime ? barTime.substring(11, 16) : '00';
     // The synthetic index (see market_data.py's _update_synthetic_*_index)
     // advances reactively off live ticks with no backfill — a WS gap of any
     // length just leaves consecutive bars far apart in time with nothing to
@@ -242,7 +359,9 @@ function renderStockCandles(stockCandles, ids) {
       const gapMin = (new Date(refBars[i].startTime) - new Date(prevBar.startTime)) / 60000;
       if (gapMin > 10) gapTitle = ` title="Data gap: ${Math.round(gapMin)} min since the previous bar (likely a feed interruption)"`;
     }
-    headHtml += `<th${gapTitle}>${label} (o-c)${gapTitle ? ' ⚠' : ''}<br><span class="muted-text">${t}</span><br>` +
+    const dayCls = dayBoundaryAt[i] ? ' day-boundary' : '';
+    const dateLine = dayBoundaryAt[i] ? `<br><span class="muted-text day-date">${escHtml(_fmtColDate(barTime.substring(0, 10)))}</span>` : '';
+    headHtml += `<th${gapTitle} class="${dayCls.trim()}">${label} (o-c)${gapTitle ? ' ⚠' : ''}<br><span class="muted-text">${t}</span>${dateLine}<br>` +
       `<span class="tally-g">G:${tally[i].g}</span> <span class="tally-r">R:${tally[i].r}</span></th>`;
   }
   headHtml += '<th>BuyQtyPending</th><th>SellQtyPending</th>';
@@ -269,7 +388,7 @@ function renderStockCandles(stockCandles, ids) {
     for (let i = 0; i < maxBars; i++) {
       // Tick mark only ever on the Latest (i===0) column — "the current
       // candle just crossed its threshold", not every historical bar shown.
-      row += `<td data-col="${i}">${_candleCellHtml(bars[i], _showOC, i === 0 ? alertPts : null)}</td>`;
+      row += `<td data-col="${i}"${dayBoundaryAt[i] ? ' class="day-boundary"' : ''}>${_candleCellHtml(bars[i], _showOC, i === 0 ? alertPts : null)}</td>`;
     }
     // Latest tick's cumulative pending buy/sell qty (parsed server-side from
     // the feed's `snap` text — see market_data.py) — a live per-stock figure,
@@ -325,6 +444,7 @@ function applyStockTickPrices(prices) {
       // Which panel this row belongs to decides which threshold applies —
       // BN and NF can configure a different points value for the same stock.
       const isNf = !!row.closest(`#${STOCK_IDS_NF.body}`);
+      if (isDateFilterActive(isNf ? 'nf' : 'bn')) return;   // showing a picked date — don't overwrite with live ticks
       const alertPts = alertPtsByKey[(isNf ? nfKeyByStock : bnKeyByStock)[name]];
       const crossed = alertPts != null && Math.abs(diff) >= alertPts;
       const tick = crossed

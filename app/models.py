@@ -97,6 +97,19 @@ class BNTrade:
     index_pnl_points:  float           = 0.0     # diagnostic only — never used for settlement
     confidence:        float           = 0.0
     entry_signal:      Optional[BNSignal] = None
+    # Real-option-LTP feature (2026-09-17, live-only — see app/services/
+    # bn_trade.py and market_data.py's set_bn_option_symbol). option_symbol
+    # is the vendor instrument this trade's option leg was subscribed under
+    # at entry (e.g. "BANKNIFTY17SEP56400CE"); premium_synthetic is a
+    # one-way latch, True until the first real WS tick for that symbol
+    # arrives, after which current_premium/exit_premium use real LTP instead
+    # of the Black-Scholes value. entry_premium above is ALWAYS the
+    # Black-Scholes value regardless (no real tick can exist yet at the
+    # exact instant a trade opens — see the design discussion this was
+    # decided in). Backtest's BTPosition has no equivalent fields; this only
+    # ever applies to a live BNTrade.
+    option_symbol:      str  = ""
+    premium_synthetic:  bool = True
 
 
 # ── Nifty 50 options strategy — parallel to the BN dataclasses above, same
@@ -149,6 +162,9 @@ class NFTrade:
     index_pnl_points:  float           = 0.0
     confidence:        float           = 0.0
     entry_signal:      Optional[NFSignal] = None
+    # NF mirror of BNTrade's real-option-LTP fields above — see there.
+    option_symbol:      str  = ""
+    premium_synthetic:  bool = True
 
 
 @dataclass(slots=True)
@@ -177,8 +193,16 @@ class NFDiagnostic:
     cooldown_ms:     float            = 0.0
     market_open:     bool             = True
     atm_strike:      Optional[int]    = None
-    atm_premium:     Optional[float]  = None
+    atm_premium:     Optional[float]  = None   # kept for the (currently unused) Entry Loop Monitor UI — mirrors atm_ce_premium
     atm_iv:          Optional[float]  = None
+    # Live ATM CE/PE quote (2026-09-18, explicit user decision) — unlike
+    # atm_premium above, these are computed EVERY closed bar regardless of
+    # whether the entry gates actually pass, so the dashboard can show "what
+    # this would cost right now" even with no trade open. Still the same
+    # theoretical Black-Scholes estimate as entry_premium always was — no
+    # real option-chain data backs this (see CLAUDE.md's "Options pricing").
+    atm_ce_premium:  Optional[float]  = None
+    atm_pe_premium:  Optional[float]  = None
     cooldown_ok:      bool = True
     sideways_ok:      bool = False
     dir_count_ok:     bool = False
@@ -214,8 +238,11 @@ class BNDiagnostic:
     cooldown_ms:     float            = 0.0
     market_open:     bool             = True
     atm_strike:      Optional[int]    = None
-    atm_premium:     Optional[float]  = None
+    atm_premium:     Optional[float]  = None   # kept for the (currently unused) Entry Loop Monitor UI — mirrors atm_ce_premium
     atm_iv:          Optional[float]  = None
+    # BN mirror of NFDiagnostic's live ATM CE/PE quote fields above — see there.
+    atm_ce_premium:  Optional[float]  = None
+    atm_pe_premium:  Optional[float]  = None
     # Per-gate pass/fail, for the dashboard's Entry Loop Monitor (c.html-style
     # explicit ✔/✘ per row) — mirrors the same intermediate booleans
     # evaluate_entry already computes to build no_trade_reason/gates_clear,

@@ -31,6 +31,14 @@ def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
     st = get_state()
     st.active_trade = trade
     st.last_trade_candle = signal.bar_time
+    st.bn_option_ltp = None   # fresh — any stale value from a prior trade must not leak in
+    # Start streaming this trade's real option leg (2026-09-17) — entry_premium
+    # stays the Black-Scholes value above (no real tick can exist yet at this
+    # exact instant); current_premium/exit_premium switch to real LTP the
+    # moment the first tick for this symbol arrives (see market_data.py's
+    # _process_tick and check_tick_exit/force_close below).
+    if st.market_data_service is not None:
+        st.market_data_service.set_bn_option_symbol(trade.option_symbol, trade.option_symbol)
 
     print(
         f"[PAPER] {trade.direction} {trade.option_type} {trade.strike} @ premium "
@@ -88,6 +96,20 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
     return place_paper_order(signal, now)
 
 
+def _live_premium(trade: BNTrade, st, bs_premium: float) -> float:
+    """
+    Real-option-LTP override (2026-09-17): once trade.premium_synthetic has
+    latched False (a real WS tick for trade.option_symbol has arrived — see
+    market_data.py's _process_tick), use that real price instead of the
+    Black-Scholes value evaluate_exit always computes. Falls back to the BS
+    value if no real tick has arrived yet, or the cached LTP is somehow
+    unset — never surfaces a zero/missing premium.
+    """
+    if trade.option_symbol and not trade.premium_synthetic and st.bn_option_ltp:
+        return st.bn_option_ltp
+    return bs_premium
+
+
 def _settle(trade: BNTrade, now: datetime, exit_index_price: float,
            exit_premium: float, label: str) -> BNTrade:
     finalize_exit(trade, now, exit_index_price, exit_premium)
@@ -97,6 +119,9 @@ def _settle(trade: BNTrade, now: datetime, exit_index_price: float,
     st.active_trade = None
     st.closed_trades.append(trade)
     st.last_exit_time = now.isoformat()
+    st.bn_option_ltp = None
+    if st.market_data_service is not None:
+        st.market_data_service.set_bn_option_symbol(None, None)   # stop streaming this leg
     print(
         f"[PAPER] {label} {trade.direction} {trade.option_type} {trade.strike} @ premium "
         f"{exit_premium:.2f} | net ₹{trade.pnl:+.2f} (daily ₹{st.daily_pnl:+.2f}, "
@@ -118,13 +143,14 @@ def check_tick_exit(now: datetime, current_index_price: float,
         return None
 
     ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, bn_closes_lookback)
+    premium = _live_premium(trade, st, ev.current_premium)
     trade.current_sl = ev.new_sl
     trade.sl_stage = ev.sl_stage
-    trade.current_premium = ev.current_premium   # live mark for the ATM panel, even when not exiting
+    trade.current_premium = premium   # live mark for the ATM panel, even when not exiting
     trade.current_iv = ev.current_iv
 
     if ev.should_exit:
-        return _settle(trade, now, current_index_price, ev.current_premium, f"{ev.exit_reason} HIT")
+        return _settle(trade, now, current_index_price, premium, f"{ev.exit_reason} HIT")
     return None
 
 
@@ -138,4 +164,4 @@ def force_close(now: datetime, current_index_price: float,
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
     ev = evaluate_exit(trade, now, current_index_price, bn_closes_lookback)
-    return _settle(trade, now, current_index_price, ev.current_premium, label)
+    return _settle(trade, now, current_index_price, _live_premium(trade, st, ev.current_premium), label)

@@ -15,7 +15,14 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 import app.config as cfg
-from app.engine.nf_pricing import black_scholes, estimate_iv, get_atm_strike, get_next_expiry, time_to_expiry_years
+from app.engine.nf_pricing import (
+    black_scholes,
+    build_option_symbol,
+    estimate_iv,
+    get_atm_strike,
+    get_next_expiry,
+    time_to_expiry_years,
+)
 from app.engine.nf_signals import (
     leaders_momentum,
     nf_composite_indicator,
@@ -101,19 +108,22 @@ def evaluate_entry(
     sell_ready = gates_clear and leaders["signal"] == "SELL" and nf_ind["bearish"]
 
     signal: Optional[NFSignal] = None
-    atm_strike = atm_premium = atm_iv = None
+    # NF mirror of bn_entry_exit.evaluate_entry's live ATM CE/PE quote — see there.
+    atm_strike = atm_iv = atm_ce_premium = atm_pe_premium = None
+    atm_expiry = get_next_expiry(now)
+    if nf_close > 0:
+        atm_strike = get_atm_strike(nf_close)
+        T = time_to_expiry_years(now, atm_expiry)
+        atm_iv = estimate_iv(nf_closes_lookback)
+        atm_ce_premium = black_scholes(nf_close, atm_strike, T, cfg.NF_RISK_FREE_RATE, atm_iv, "CE")["price"]
+        atm_pe_premium = black_scholes(nf_close, atm_strike, T, cfg.NF_RISK_FREE_RATE, atm_iv, "PE")["price"]
 
     if buy_ready or sell_ready:
         direction = "BUY" if buy_ready else "SELL"
         option_type = "CE" if direction == "BUY" else "PE"
-        strike = get_atm_strike(nf_close)
-        expiry = get_next_expiry(now)
-        T = time_to_expiry_years(now, expiry)
-        iv = estimate_iv(nf_closes_lookback)
-        bs = black_scholes(nf_close, strike, T, cfg.NF_RISK_FREE_RATE, iv, option_type)
+        premium = atm_ce_premium if option_type == "CE" else atm_pe_premium
         direction_count = leaders["buy_count"] if direction == "BUY" else leaders["sell_count"]
 
-        atm_strike, atm_premium, atm_iv = strike, bs["price"], iv
         signal = NFSignal(
             direction=direction,
             entry_index_price=nf_close,
@@ -125,10 +135,10 @@ def evaluate_entry(
             leader_signal=leaders["signal"],
             bn_bull=nf_ind["bull"],
             bn_bear=nf_ind["bear"],
-            strike=strike,
-            expiry=expiry.isoformat(),
-            entry_premium=bs["price"],
-            iv_used=iv,
+            strike=atm_strike,
+            expiry=atm_expiry.isoformat(),
+            entry_premium=premium,
+            iv_used=atm_iv,
         )
         no_trade_reason = None
 
@@ -160,8 +170,10 @@ def evaluate_entry(
                                                  (now - last_exit_time).total_seconds()) * 1000.0,
         market_open=True,
         atm_strike=atm_strike,
-        atm_premium=atm_premium,
+        atm_premium=atm_ce_premium,   # kept for the (currently unused) Entry Loop Monitor UI
         atm_iv=atm_iv,
+        atm_ce_premium=atm_ce_premium,
+        atm_pe_premium=atm_pe_premium,
         cooldown_ok=cooldown_ok,
         sideways_ok=not sideways_blocked,
         dir_count_ok=max(leaders["buy_count"], leaders["sell_count"]) >= required,
@@ -239,6 +251,10 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
         target = signal.entry_index_price - cfg.NF_TARGET_POINTS
         initial_sl = signal.entry_index_price + stoploss_points
 
+    option_type = "CE" if signal.direction == "BUY" else "PE"
+    option_symbol = build_option_symbol(
+        cfg.NF_OPTION_UNDERLYING, datetime.fromisoformat(signal.expiry), signal.strike, option_type)
+
     return NFTrade(
         direction=signal.direction,
         entry_index_price=signal.entry_index_price,
@@ -246,7 +262,7 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
         target=target,
         current_sl=initial_sl,
         strike=signal.strike,
-        option_type="CE" if signal.direction == "BUY" else "PE",
+        option_type=option_type,
         expiry=signal.expiry,
         entry_premium=signal.entry_premium,
         stoploss_points=stoploss_points,
@@ -257,6 +273,7 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
         order_id=order_id,
         confidence=signal.confidence,
         entry_signal=signal,
+        option_symbol=option_symbol,
     )
 
 

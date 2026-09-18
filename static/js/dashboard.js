@@ -98,8 +98,8 @@ function render(d) {
   const nfSynBadge = document.getElementById('nf-synthetic-badge');
   if (nfSynBadge) nfSynBadge.style.display = d.nfIndexSynthetic ? '' : 'none';
 
-  renderTrade(d.activeTrade, TRADE_IDS_BN);
-  renderTrade(d.activeTradeNf, TRADE_IDS_NF);
+  renderTrade(d.activeTrade, TRADE_IDS_BN, d.entryLoop);
+  renderTrade(d.activeTradeNf, TRADE_IDS_NF, d.entryLoopNf);
   renderClosedTrades(d.closedTrades || [], d.closedTradesNf || []);
   renderEntryLoop(d.entryLoop, d.liveLeaderRows, ENTRY_IDS_BN);
   renderEntryLoop(d.entryLoopNf, d.liveLeaderRowsNf, ENTRY_IDS_NF);
@@ -112,6 +112,7 @@ function render(d) {
   // longer a separate decorative simulation, see kiteForm.js).
   if (d.funds != null) window._lastFunds = d.funds;
   window._hasActiveTradeBn = !!d.activeTrade;
+  window._hasActiveTradeNf = !!d.activeTradeNf;
   if (typeof renderGlobalSignal === 'function') {
     renderGlobalSignal(d.globalSignal);
     renderGlobalSignal(d.globalSignalNf, STOCK_IDS_NF);
@@ -149,7 +150,7 @@ function render(d) {
 const TRADE_IDS_BN = { badge: 'trade-badge', empty: 'trade-empty', card: 'trade-card' };
 const TRADE_IDS_NF = { badge: 'trade-badge-nf', empty: 'trade-empty-nf', card: 'trade-card-nf' };
 
-function renderTrade(t, ids) {
+function renderTrade(t, ids, diag) {
   ids = ids || TRADE_IDS_BN;
   const badge = document.getElementById(ids.badge);
   const empty = document.getElementById(ids.empty);
@@ -159,6 +160,20 @@ function renderTrade(t, ids) {
   if (!t) {
     badge.textContent = 'none'; badge.className = 'badge gray';
     empty.style.display = ''; card.style.display = 'none';
+    // Live ATM CE/PE quote (2026-09-18) — shown even with no trade open, so
+    // there's always a "what would this cost right now" reference. `diag`
+    // is the same entryLoop/entryLoopNf diagnostic the (currently unused)
+    // Entry Loop Monitor reads — atmCePremium/atmPePremium are computed
+    // every closed bar regardless of gates. Still a theoretical Black-
+    // Scholes estimate, not real option-chain data (see CLAUDE.md).
+    if (diag && diag.atmStrike != null) {
+      empty.innerHTML = `No active trade.<br><span class="muted-text">`
+        + `ATM ${diag.atmStrike} — CE ₹${fmt2(diag.atmCePremium)} / PE ₹${fmt2(diag.atmPePremium)}`
+        + (diag.atmIv != null ? ` (IV ${(diag.atmIv * 100).toFixed(1)}%)` : '')
+        + `</span>`;
+    } else {
+      empty.textContent = 'No active trade.';
+    }
     return;
   }
   badge.textContent = `${t.direction} ${t.optionType}`;
@@ -171,6 +186,7 @@ function renderTrade(t, ids) {
 
   const cells = [
     ['Strike', t.strike + ' ' + t.optionType],
+    ['Option Symbol', t.optionSymbol || '—'],
     ['Expiry', fmtDT(t.expiry)],
     ['Entry Index', fmt2(t.entryIndexPrice)],
     ['Current Index', fmt2(t.currentIndexPrice)],
@@ -180,11 +196,19 @@ function renderTrade(t, ids) {
     ['Confidence', t.confidence != null ? t.confidence + '%' : '—'],
     ['Entry Premium', '₹' + fmt2(t.entryPremium)],
     ['Current Premium', '₹' + fmt2(t.currentPremium)],
+    // Real-option-LTP feature (2026-09-17) — t.premiumSynthetic is a
+    // one-way latch: true until the first real WS tick for optionSymbol
+    // arrives, after which Current/Exit Premium above are real LTP, not
+    // Black-Scholes. See CLAUDE.md's "Real-option-LTP paper trading" note.
+    ['Price Source', t.premiumSynthetic ? 'Synthetic (BS)' : 'Real (LTP)'],
     ['IV Used', t.currentIv != null ? (t.currentIv * 100).toFixed(1) + '%' : '—'],
     ['Live P&L', (livePnl >= 0 ? '+' : '') + '₹' + fmt2(livePnl)],
   ];
   card.innerHTML = cells.map(([lbl, val], i) => {
-    const cls = lbl === 'SL Stage' ? stageCls : (lbl === 'Live P&L' ? pnlCls : '');
+    const cls = lbl === 'SL Stage' ? stageCls
+      : lbl === 'Live P&L' ? pnlCls
+      : lbl === 'Price Source' ? (t.premiumSynthetic ? '' : 'pnl-pos')
+      : '';
     return `<div class="trade-cell"><span class="lbl">${escHtml(lbl)}</span><span class="val ${cls}">${val}</span></div>`;
   }).join('');
 }

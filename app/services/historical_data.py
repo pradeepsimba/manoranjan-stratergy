@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date as _date
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -165,6 +166,32 @@ async def fetch_indicator_history(
     today     = datetime.now(IST).date()
     from_date = (today - timedelta(days=days_back)).isoformat()
     to_date   = (today + timedelta(days=1)).isoformat()
+    stocks    = [{"stockname": sym, "stock_symbol": tok}
+                 for sym, tok in watchlist.items()]
+    if not stocks:
+        return {}
+    data = await _fetch_all(stocks, [interval], from_date, to_date)
+    return {tok: node.get(interval, []) for tok, node in data.items()}
+
+
+async def fetch_candles_for_date(
+    watchlist:   Dict[str, str],
+    target_date: _date,
+    interval:    str = cfg.INTERVAL_5M,
+) -> Dict[str, List[Candle]]:
+    """
+    One specific calendar day's bars for each stock in `watchlist` (keyed by
+    our internal display name -> stock_symbol, same convention as
+    fetch_indicator_history). Backs the Stock Candles panel's date picker
+    (2026-09-16) — a targeted single-day fetch, unlike
+    fetch_indicator_history's rolling "last N days" window for the live
+    buffer. Only individual stocks have real vendor history at all — the
+    BankNifty/Nifty 50 index itself never does (see CLAUDE.md); callers
+    needing the index's own history for a past date must read it from this
+    app's self-recorded bn_index_bars/nf_index_bars table instead.
+    """
+    from_date = target_date.isoformat()
+    to_date   = (target_date + timedelta(days=1)).isoformat()
     stocks    = [{"stockname": sym, "stock_symbol": tok}
                  for sym, tok in watchlist.items()]
     if not stocks:

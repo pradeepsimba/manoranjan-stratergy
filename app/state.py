@@ -102,6 +102,18 @@ class AppState:
         self.nf_diagnostic:        Optional[NFDiagnostic] = None
         self.last_evaluated_bar_nf: Optional[str]     = None
 
+        # ── Real-option-LTP paper trading (2026-09-17, live-only, explicit
+        # user decision) — market_data_service self-registers here (see
+        # MarketDataService.__init__) so bn_trade.py/nf_trade.py can reach it
+        # without a circular import; not type-hinted as MarketDataService to
+        # avoid one (state.py must stay importable from market_data.py).
+        # bn_option_ltp/nf_option_ltp are the latest real tick for whichever
+        # option symbol the currently-active trade (if any) is subscribed
+        # to — see BNTrade.option_symbol/premium_synthetic in models.py.
+        self.market_data_service = None
+        self.bn_option_ltp: Optional[float] = None
+        self.nf_option_ltp: Optional[float] = None
+
     def candle_lock(self, token: str) -> threading.Lock:
         """Return (and lazily create) the per-token candle lock."""
         try:

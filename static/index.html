@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Live Bank Nifty options paper-trading dashboard">
-  <link rel="stylesheet" href="/css/dashboard.css?v=51">
+  <link rel="stylesheet" href="/css/dashboard.css?v=52">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -147,17 +147,47 @@
 <!-- ── Stat strip ──────────────────────────────────────────────────────────── -->
 <div class="stat-strip">
   <div class="stat-card" data-instr="bn">
-    <span class="stat-label">BANKNIFTY <span id="bn-synthetic-badge" class="badge yellow" style="display:none" title="Vendor isn't streaming the real BankNifty index right now — this level is approximated from the 11 constituent stocks' weighted move.">~ synthetic</span></span>
+    <span class="stat-label">BANKNIFTY <span id="bn-synthetic-badge" class="badge yellow" style="display:none" title="Vendor isn't streaming the real BankNifty index right now — this level is approximated from the 14 constituent stocks' weighted move.">~ synthetic</span></span>
     <span class="stat-value" id="stat-bnltp">—</span>
   </div>
   <div class="stat-card" data-instr="nf">
-    <span class="stat-label">NIFTY 50 <span id="nf-synthetic-badge" class="badge yellow" style="display:none" title="Vendor isn't streaming the real Nifty 50 index right now — this level is approximated from its 32 constituent stocks' weighted move.">~ synthetic</span></span>
+    <span class="stat-label">NIFTY 50 <span id="nf-synthetic-badge" class="badge yellow" style="display:none" title="Vendor isn't streaming the real Nifty 50 index right now — this level is approximated from its 50 constituent stocks' weighted move.">~ synthetic</span></span>
     <span class="stat-value" id="stat-nfltp">—</span>
   </div>
 </div>
 
 <!-- ── Main grid ───────────────────────────────────────────────────────────── -->
 <div class="main-grid">
+
+  <!-- Active Trade — the single active paper trade per instrument (at most
+       one each). Re-added 2026-09-18 after being dropped along with the old
+       Trade Dashboard panels; renderTrade() in dashboard.js already existed
+       and was a silent no-op with these DOM ids missing entirely. Includes
+       the option-symbol/real-vs-synthetic-premium fields from the
+       2026-09-17 real-option-LTP feature (see CLAUDE.md). ──────────────── -->
+  <div class="col">
+
+    <div class="panel" data-instr="bn">
+      <div class="panel-header">
+        <span class="panel-title">BankNifty Active Trade <span class="badge gray" id="trade-badge">none</span></span>
+      </div>
+      <div class="panel-body dash-body">
+        <div id="trade-empty" class="muted-text" style="padding:8px 2px;">No active trade.</div>
+        <div id="trade-card" class="trade-card" style="display:none;"></div>
+      </div>
+    </div>
+
+    <div class="panel" data-instr="nf">
+      <div class="panel-header">
+        <span class="panel-title">Nifty 50 Active Trade <span class="badge gray" id="trade-badge-nf">none</span></span>
+      </div>
+      <div class="panel-body dash-body">
+        <div id="trade-empty-nf" class="muted-text" style="padding:8px 2px;">No active trade.</div>
+        <div id="trade-card-nf" class="trade-card" style="display:none;"></div>
+      </div>
+    </div>
+
+  </div>
 
   <!-- BankNifty + Nifty 50 Stock Candles — shown side by side (each its own
        table), both hidden/shown together only by the "Nifty 50" filter above
@@ -178,6 +208,11 @@
             <option value="25">Last 25 bars</option>
             <option value="50">Last 50 bars</option>
           </select>
+          <input type="date" class="field-input" id="stock-date-picker" style="width:auto;display:inline-block"
+            onchange="loadStockCandlesForDate(this.value, STOCK_IDS_BN)" title="Show a specific date's candle data">
+          <button class="btn-mini" id="stock-date-live-btn" style="display:none"
+            onclick="clearStockDateFilter(STOCK_IDS_BN)" title="Return to live data">↺ Live</button>
+          <span class="muted-text" id="stock-date-status"></span>
           <label class="oc-toggle-label" title="Print each cell's raw open/close values for verification">
             <input type="checkbox" id="show-oc-toggle" onchange="setShowOC(this.checked)"> O/C
           </label>
@@ -218,6 +253,11 @@
             <option value="25">Last 25 bars</option>
             <option value="50">Last 50 bars</option>
           </select>
+          <input type="date" class="field-input" id="stock-date-picker-nf" style="width:auto;display:inline-block"
+            onchange="loadStockCandlesForDate(this.value, STOCK_IDS_NF)" title="Show a specific date's candle data">
+          <button class="btn-mini" id="stock-date-live-btn-nf" style="display:none"
+            onclick="clearStockDateFilter(STOCK_IDS_NF)" title="Return to live data">↺ Live</button>
+          <span class="muted-text" id="stock-date-status-nf"></span>
           <label class="oc-toggle-label" title="Print each cell's raw open/close values for verification">
             <input type="checkbox" id="show-oc-toggle-nf" onchange="setShowOC(this.checked)"> O/C
           </label>
@@ -254,10 +294,10 @@
           border:1px solid var(--edge-soft,#444);">Logout</a>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="/js/util.js?v=49"></script>
-<script src="/js/breakout.js?v=49"></script>
+<script src="/js/breakout.js?v=53"></script>
 <script src="/js/qtyAudit.js?v=49"></script>
 <script src="/js/kiteForm.js?v=49"></script>
 <script src="/js/alerts.js?v=50"></script>
-<script src="/js/dashboard.js?v=49"></script>
+<script src="/js/dashboard.js?v=50"></script>
 </body>
 </html>
