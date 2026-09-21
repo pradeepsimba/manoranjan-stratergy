@@ -2,14 +2,22 @@ from __future__ import annotations
 
 """
 Shared Nifty 50 entry/exit decision core — mechanical mirror of
-bn_entry_exit.py, called identically by the live scheduler (no backtest
-wiring yet — see CLAUDE.md/plan notes on this pass's scope). Reads cfg.NF_*
-instead of cfg.BN_*, uses nf_signals.py/nf_pricing.py, produces
-NFSignal/NFTrade/NFDiagnostic instead of the BN dataclasses.
+bn_entry_exit.py (REWRITTEN 2026-09-21 alongside it — see there for the
+full rationale). Reads cfg.NF_*/SCALP_WINDOW*/SCALP_MAX_TRADES_PER_DAY
+instead of cfg.BN_*, uses nf_pricing.py, produces NFSignal/NFTrade/
+NFDiagnostic instead of the BN dataclasses. Trading-window and
+max-trades/day guardrails are SHARED across both instruments (one set of
+limits — see config.py), not duplicated per instrument.
+
+nf_signals.py (the sideways/momentum/leader-vote/composite-indicator gates
+this replaced) was fully DELETED 2026-09-21, same as bn_signals.py — see
+bn_entry_exit.py's module docstring. Unlike BN_SAME_DIRECTION_REQUIRED, NF's
+own version had no other reader (no NF equivalent of signal_study.py
+exists), so it's gone entirely, not kept for any standalone tool.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -19,168 +27,171 @@ from app.engine.nf_pricing import (
     black_scholes,
     build_weekly_option_symbol,
     estimate_iv,
-    get_atm_strike,
+    get_itm_strike,
     get_next_expiry,
     time_to_expiry_years,
 )
-from app.engine.nf_signals import (
-    leaders_momentum,
-    nf_composite_indicator,
-    sideways_range,
-    strong_momentum,
-)
+from app.engine.scalp_signals import compute_basket_reading
+from app.engine.wobi import compute_wobi, synthetic_depth
 from app.models import NFDiagnostic, NFSignal, NFTrade, Candle, PositionStatus
 
 
 def _stock_qty_threshold(name: str) -> float:
-    """NF mirror of bn_entry_exit._stock_qty_threshold."""
+    """UNRELATED to the scalp strategy — see bn_entry_exit._stock_qty_threshold."""
     attr = cfg.NF_QTY_THRESHOLD_ATTR.get(name)
     base = getattr(cfg, attr) if attr else 10_000
     return base * cfg.NF_QTY_INTERVAL_MULTIPLIER
 
 
 def _leader_qty_surge(leader_recent: Dict[str, List[Candle]]) -> Dict[str, bool]:
+    """UNRELATED to the scalp strategy — see bn_entry_exit._leader_qty_surge."""
     out: Dict[str, bool] = {}
     for name, candles in leader_recent.items():
         out[name] = bool(candles) and candles[-1].volume >= _stock_qty_threshold(name)
     return out
 
 
-def _confidence(direction_count: int, strong_qty_count: int, n_leaders: int) -> float:
-    if n_leaders <= 0:
-        return 0.0
-    return round((direction_count / n_leaders) * 50.0 + (strong_qty_count / n_leaders) * 50.0)
+def _in_trading_window(now: datetime) -> bool:
+    """Shared risk guardrail — see bn_entry_exit._in_trading_window."""
+    t = now.time()
+    w1 = (time(cfg.SCALP_WINDOW1_START_HOUR, cfg.SCALP_WINDOW1_START_MIN)
+          <= t <= time(cfg.SCALP_WINDOW1_END_HOUR, cfg.SCALP_WINDOW1_END_MIN))
+    w2 = (time(cfg.SCALP_WINDOW2_START_HOUR, cfg.SCALP_WINDOW2_START_MIN)
+          <= t <= time(cfg.SCALP_WINDOW2_END_HOUR, cfg.SCALP_WINDOW2_END_MIN))
+    return w1 or w2
 
 
 def evaluate_entry(
     now: datetime,
     nf_recent_candles: List[Candle],
     nf_closes_lookback: np.ndarray,
-    leader_recent: Dict[str, List[Candle]],
+    basket_candles: Dict[str, List[Candle]],
     last_exit_time: Optional[datetime] = None,
+    trades_today: int = 0,
 ) -> Tuple[Optional[NFSignal], NFDiagnostic]:
-    """NF mirror of bn_entry_exit.evaluate_entry — see there for the detailed gate walkthrough."""
-    required = cfg.NF_SAME_DIRECTION_REQUIRED
-    n_leaders = len(leader_recent)
-    leader_last = {name: (candles[-1] if candles else None) for name, candles in leader_recent.items()}
-
+    """NF mirror of bn_entry_exit.evaluate_entry — see there for the full gate walkthrough."""
     nf_bar_time = nf_recent_candles[-1].start_time if nf_recent_candles else ""
     nf_close = nf_recent_candles[-1].close if nf_recent_candles else 0.0
 
     no_trade_reason: Optional[str] = None
+
     cooldown_ok = True
     if last_exit_time is not None:
         elapsed = (now - last_exit_time).total_seconds()
-        if elapsed < cfg.NF_ENTRY_COOLDOWN_S:
+        if elapsed < cfg.NF_SCALP_COOLDOWN_S:
             cooldown_ok = False
-            no_trade_reason = f"Cooldown {cfg.NF_ENTRY_COOLDOWN_S - elapsed:.0f}s remaining"
+            no_trade_reason = f"Cooldown {cfg.NF_SCALP_COOLDOWN_S - elapsed:.0f}s remaining"
 
-    if len(nf_recent_candles) < 2:
-        no_trade_reason = no_trade_reason or "Insufficient Nifty 50 candles"
+    window_ok = _in_trading_window(now)
+    if no_trade_reason is None and not window_ok:
+        no_trade_reason = "Outside scalp trading window (09:45-11:15 / 13:45-14:45 IST)"
 
-    rng = sideways_range(nf_closes_lookback, bars=5)
-    sideways_blocked = rng < cfg.NF_SIDEWAYS_RANGE_MIN
-    if no_trade_reason is None and sideways_blocked:
-        no_trade_reason = f"Sideways: range {rng:.1f} < {cfg.NF_SIDEWAYS_RANGE_MIN}"
+    max_trades_ok = trades_today < cfg.SCALP_MAX_TRADES_PER_DAY
+    if no_trade_reason is None and not max_trades_ok:
+        no_trade_reason = f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached"
 
-    momentum = strong_momentum(nf_recent_candles) if len(nf_recent_candles) >= 2 else {"ok": False, "reason": "Insufficient candles"}
-    if no_trade_reason is None and not momentum["ok"]:
-        no_trade_reason = momentum["reason"]
+    name_by_token = {tok: name for name, tok in cfg.NF_ALL_STOCKS.items()}
+    reading = compute_basket_reading(cfg.NF_SCALP_BASKET, basket_candles, name_by_token, now.date())
+    threshold = cfg.NF_SCALP_SCORE_THRESHOLD
 
-    leaders = leaders_momentum(leader_last)
-    if no_trade_reason is None and leaders["signal"] == "Nobuysell":
-        no_trade_reason = leaders["reason"]
+    score_buy_ok = reading.score >= threshold
+    score_sell_ok = reading.score <= -threshold
+    if no_trade_reason is None and not (score_buy_ok or score_sell_ok):
+        no_trade_reason = f"Basket score {reading.score:+.3f} within ±{threshold}"
+    elif no_trade_reason is None and not reading.top2_direction_ok:
+        no_trade_reason = f"Top-2 ({', '.join(n for n in reading.top2_names if n)}) not confirming direction"
 
-    qty_surge = _leader_qty_surge(leader_recent)
-    strong_qty_count = sum(1 for v in qty_surge.values() if v)
-    if no_trade_reason is None and strong_qty_count < required:
-        no_trade_reason = f"Only {strong_qty_count}/{n_leaders} leaders show volume surge (need {required})"
+    gates_clear = cooldown_ok and window_ok and max_trades_ok
+    buy_ready = gates_clear and score_buy_ok and reading.top2_direction_ok
+    sell_ready = gates_clear and score_sell_ok and reading.top2_direction_ok
 
-    nf_ind = nf_composite_indicator(nf_closes_lookback, leader_recent)
-    if no_trade_reason is None and leaders["signal"] == "BUY" and not nf_ind["bullish"]:
-        no_trade_reason = "NF composite indicator not bullish"
-    if no_trade_reason is None and leaders["signal"] == "SELL" and not nf_ind["bearish"]:
-        no_trade_reason = "NF composite indicator not bearish"
-
-    gates_clear = (cooldown_ok and not sideways_blocked and momentum["ok"]
-                   and strong_qty_count >= required)
-    buy_ready = gates_clear and leaders["signal"] == "BUY" and nf_ind["bullish"]
-    sell_ready = gates_clear and leaders["signal"] == "SELL" and nf_ind["bearish"]
+    itm_iv: Optional[float] = None
+    itm_ce_strike = itm_pe_strike = None
+    itm_ce_premium = itm_pe_premium = None
+    itm_expiry = get_next_expiry(now)
+    if nf_close > 0:
+        T = time_to_expiry_years(now, itm_expiry)
+        itm_iv = estimate_iv(nf_closes_lookback)
+        itm_ce_strike = get_itm_strike(nf_close, "CE", cfg.NF_ITM_OFFSET_POINTS)
+        itm_pe_strike = get_itm_strike(nf_close, "PE", cfg.NF_ITM_OFFSET_POINTS)
+        itm_ce_premium = black_scholes(nf_close, itm_ce_strike, T, cfg.NF_RISK_FREE_RATE, itm_iv, "CE")["price"]
+        itm_pe_premium = black_scholes(nf_close, itm_pe_strike, T, cfg.NF_RISK_FREE_RATE, itm_iv, "PE")["price"]
 
     signal: Optional[NFSignal] = None
-    # NF mirror of bn_entry_exit.evaluate_entry's live ATM CE/PE quote — see there.
-    atm_strike = atm_iv = atm_ce_premium = atm_pe_premium = None
-    atm_expiry = get_next_expiry(now)
-    if nf_close > 0:
-        atm_strike = get_atm_strike(nf_close)
-        T = time_to_expiry_years(now, atm_expiry)
-        atm_iv = estimate_iv(nf_closes_lookback)
-        atm_ce_premium = black_scholes(nf_close, atm_strike, T, cfg.NF_RISK_FREE_RATE, atm_iv, "CE")["price"]
-        atm_pe_premium = black_scholes(nf_close, atm_strike, T, cfg.NF_RISK_FREE_RATE, atm_iv, "PE")["price"]
-
-    if buy_ready or sell_ready:
+    wobi_value: Optional[float] = None
+    if (buy_ready or sell_ready) and nf_close > 0:
         direction = "BUY" if buy_ready else "SELL"
         option_type = "CE" if direction == "BUY" else "PE"
-        premium = atm_ce_premium if option_type == "CE" else atm_pe_premium
-        direction_count = leaders["buy_count"] if direction == "BUY" else leaders["sell_count"]
+        strike = itm_ce_strike if option_type == "CE" else itm_pe_strike
+        premium = itm_ce_premium if option_type == "CE" else itm_pe_premium
 
-        signal = NFSignal(
-            direction=direction,
-            entry_index_price=nf_close,
-            bar_time=nf_bar_time,
-            confidence=_confidence(direction_count, strong_qty_count, n_leaders),
-            green=leaders["buy_count"],
-            red=leaders["sell_count"],
-            strong_qty=strong_qty_count,
-            leader_signal=leaders["signal"],
-            bn_bull=nf_ind["bull"],
-            bn_bear=nf_ind["bear"],
-            strike=atm_strike,
-            expiry=atm_expiry.isoformat(),
-            entry_premium=premium,
-            iv_used=atm_iv,
-        )
-        no_trade_reason = None
+        depth = synthetic_depth(cfg.NF_LOT_SIZE, itm_iv, reading.score,
+                                seed=f"NF{option_type}{strike}:{nf_bar_time}")
+        wobi_value = compute_wobi(depth)
+        wobi_ok = wobi_value > cfg.NF_WOBI_MIN_RATIO
+
+        if wobi_ok:
+            signal = NFSignal(
+                direction=direction,
+                entry_index_price=nf_close,
+                bar_time=nf_bar_time,
+                confidence=round(min(100.0, abs(reading.score) / threshold * 50.0), 1),
+                green=0, red=0, strong_qty=0,
+                leader_signal=direction,
+                bn_bull=0.0, bn_bear=0.0,
+                strike=strike,
+                expiry=itm_expiry.isoformat(),
+                entry_premium=premium,
+                iv_used=itm_iv,
+                basket_score=reading.score,
+                wobi=wobi_value,
+            )
+        else:
+            no_trade_reason = f"W-OBI {wobi_value:.2f} ≤ {cfg.NF_WOBI_MIN_RATIO} (path not clear)"
 
     diagnostic = NFDiagnostic(
         time=nf_bar_time,
         bn_ltp=nf_close,
-        green=leaders["buy_count"],
-        red=leaders["sell_count"],
-        strong_qty=strong_qty_count,
-        leader_rows=[{"stock": name, "open": c.open if c else None, "close": c.close if c else None,
-                      "volume": c.volume if c else None, "surged": qty_surge.get(name, False)}
-                     for name, c in leader_last.items()],
-        leader_signal=leaders["signal"],
-        sideways_range=rng,
-        momentum_ok=momentum["ok"],
-        momentum_reason=momentum["reason"],
-        rsi=nf_ind["rsi"],
-        macd_dir=nf_ind["macd_dir"],
-        macd_val=nf_ind["macd_val"],
-        ema_bullish=nf_ind["ema_bullish"],
-        ema_bearish=nf_ind["ema_bearish"],
-        bn_bull=nf_ind["bull"],
-        bn_bear=nf_ind["bear"],
-        bn_bullish=nf_ind["bullish"],
-        bn_bearish=nf_ind["bearish"],
+        green=0, red=0, strong_qty=0,
+        leader_rows=[
+            {"stock": leg.name, "weight": round(leg.weight, 4),
+             "vwap": round(leg.vwap, 2) if leg.vwap is not None else None,
+             "ltp": leg.ltp,
+             "deviationPct": round(leg.deviation_pct, 4) if leg.deviation_pct is not None else None,
+             "open": None, "close": leg.ltp, "volume": None, "surged": False}
+            for leg in reading.legs
+        ],
+        leader_signal=(signal.direction if signal is not None else "Nobuysell"),
         no_trade_reason=no_trade_reason,
         candle_close_ok=True,
-        cooldown_ms=0.0 if cooldown_ok else max(0.0, cfg.NF_ENTRY_COOLDOWN_S -
+        cooldown_ms=0.0 if cooldown_ok else max(0.0, cfg.NF_SCALP_COOLDOWN_S -
                                                  (now - last_exit_time).total_seconds()) * 1000.0,
         market_open=True,
-        atm_strike=atm_strike,
-        atm_premium=atm_ce_premium,   # kept for the (currently unused) Entry Loop Monitor UI
-        atm_iv=atm_iv,
-        atm_ce_premium=atm_ce_premium,
-        atm_pe_premium=atm_pe_premium,
+        atm_strike=itm_ce_strike if reading.score >= 0 else itm_pe_strike,
+        atm_premium=itm_ce_premium,
+        atm_iv=itm_iv,
+        atm_ce_premium=itm_ce_premium,
+        atm_pe_premium=itm_pe_premium,
         cooldown_ok=cooldown_ok,
-        sideways_ok=not sideways_blocked,
-        dir_count_ok=max(leaders["buy_count"], leaders["sell_count"]) >= required,
-        qty_surge_ok=strong_qty_count >= required,
-        same_direction_required=required,
+        sideways_ok=True,
+        dir_count_ok=score_buy_ok or score_sell_ok,
+        qty_surge_ok=True,
+        same_direction_required=0,
         gates_clear=gates_clear,
-        entry_ready=buy_ready or sell_ready,
+        entry_ready=signal is not None,
+        basket_score=round(reading.score, 4),
+        score_threshold=threshold,
+        top2_ok=reading.top2_direction_ok,
+        top2_names=[n for n in reading.top2_names if n],
+        wobi=wobi_value,
+        wobi_min_ratio=cfg.NF_WOBI_MIN_RATIO,
+        window_ok=window_ok,
+        trades_today=trades_today,
+        max_trades_today=cfg.SCALP_MAX_TRADES_PER_DAY,
+        itm_offset_points=cfg.NF_ITM_OFFSET_POINTS,
+        target_rs=cfg.NF_SCALP_TARGET_RS,
+        stop_rs=cfg.NF_SCALP_STOP_RS,
+        time_stop_s=cfg.NF_SCALP_TIME_STOP_S,
     )
     return signal, diagnostic
 
@@ -198,58 +209,42 @@ class ExitEvaluation:
 
 
 def evaluate_exit(trade: NFTrade, now: datetime, current_index_price: float,
-                  nf_closes_lookback: np.ndarray) -> ExitEvaluation:
-    """NF mirror of bn_entry_exit.evaluate_exit — reads risk params off the trade, not cfg."""
-    entry  = trade.entry_index_price
-    target = trade.target
-    sl     = trade.current_sl
-    stage  = trade.sl_stage
-
-    if trade.direction == "BUY":
-        pnl_pts = current_index_price - entry
-        if pnl_pts >= trade.trail_trigger:
-            candidate = current_index_price - trade.trail_distance
-            if candidate > sl:
-                sl, stage = candidate, "Trail"
-        elif pnl_pts >= trade.breakeven_trigger:
-            if entry > sl:
-                sl, stage = entry, "Breakeven"
-        should_exit = current_index_price >= target or current_index_price <= sl
-        exit_reason = "TARGET" if current_index_price >= target else ("STOP" if should_exit else None)
-    else:
-        pnl_pts = entry - current_index_price
-        if pnl_pts >= trade.trail_trigger:
-            candidate = current_index_price + trade.trail_distance
-            if candidate < sl:
-                sl, stage = candidate, "Trail"
-        elif pnl_pts >= trade.breakeven_trigger:
-            if entry < sl:
-                sl, stage = entry, "Breakeven"
-        should_exit = current_index_price <= target or current_index_price >= sl
-        exit_reason = "TARGET" if current_index_price <= target else ("STOP" if should_exit else None)
-
+                  nf_closes_lookback: np.ndarray,
+                  live_premium_override: Optional[float] = None) -> ExitEvaluation:
+    """NF mirror of bn_entry_exit.evaluate_exit — see there for the full lifecycle walkthrough."""
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(nf_closes_lookback)
     bs = black_scholes(current_index_price, trade.strike, T, cfg.NF_RISK_FREE_RATE, iv, trade.option_type)
+    premium = live_premium_override if live_premium_override is not None else bs["price"]
+
+    entry_time = datetime.fromisoformat(trade.entry_time)
+    elapsed_s = (now - entry_time).total_seconds()
+
+    should_exit = False
+    exit_reason: Optional[str] = None
+    settle_premium = premium
+    if premium >= trade.target:
+        should_exit, exit_reason = True, "TARGET"
+    elif premium <= trade.current_sl:
+        should_exit, exit_reason = True, "STOP"
+    elif elapsed_s >= trade.time_stop_s:
+        should_exit, exit_reason = True, "TIME_SCRATCH"
+        settle_premium = max(0.0, premium - cfg.NF_SCALP_SCRATCH_SLIPPAGE_RS)
 
     return ExitEvaluation(
-        new_sl=sl, sl_stage=stage,
-        current_premium=bs["price"], current_iv=iv,
-        current_delta=bs["delta"], current_theta=bs["theta"],
+        new_sl=trade.current_sl, sl_stage=trade.sl_stage,
+        current_premium=settle_premium if should_exit else premium,
+        current_iv=iv, current_delta=bs["delta"], current_theta=bs["theta"],
         should_exit=should_exit, exit_reason=exit_reason,
     )
 
 
 def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") -> NFTrade:
-    """NF mirror of bn_entry_exit.open_trade_from_signal — freezes cfg.NF_* risk params at entry."""
-    stoploss_points = cfg.NF_STOPLOSS_POINTS
-    if signal.direction == "BUY":
-        target = signal.entry_index_price + cfg.NF_TARGET_POINTS
-        initial_sl = signal.entry_index_price - stoploss_points
-    else:
-        target = signal.entry_index_price - cfg.NF_TARGET_POINTS
-        initial_sl = signal.entry_index_price + stoploss_points
+    """NF mirror of bn_entry_exit.open_trade_from_signal."""
+    target_rs = cfg.NF_SCALP_TARGET_RS
+    stop_rs = cfg.NF_SCALP_STOP_RS
+    time_stop_s = cfg.NF_SCALP_TIME_STOP_S
 
     option_type = "CE" if signal.direction == "BUY" else "PE"
     option_symbol = build_weekly_option_symbol(
@@ -259,16 +254,17 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
         direction=signal.direction,
         entry_index_price=signal.entry_index_price,
         entry_time=now.isoformat(),
-        target=target,
-        current_sl=initial_sl,
+        target=signal.entry_premium + target_rs,
+        current_sl=signal.entry_premium - stop_rs,
         strike=signal.strike,
         option_type=option_type,
         expiry=signal.expiry,
         entry_premium=signal.entry_premium,
-        stoploss_points=stoploss_points,
-        breakeven_trigger=cfg.NF_BREAKEVEN_TRIGGER,
-        trail_trigger=cfg.NF_TRAIL_TRIGGER,
-        trail_distance=cfg.NF_TRAIL_DISTANCE,
+        target_rs=target_rs,
+        stop_rs=stop_rs,
+        time_stop_s=time_stop_s,
+        basket_score_at_entry=signal.basket_score,
+        wobi_at_entry=signal.wobi,
         lot_size=cfg.NF_LOT_SIZE,
         order_id=order_id,
         confidence=signal.confidence,

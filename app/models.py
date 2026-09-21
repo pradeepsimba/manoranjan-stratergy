@@ -61,10 +61,12 @@ class BNSignal:
     leader_signal:     str            # "BUY" | "SELL" | "Nobuysell"
     bn_bull:           float         # composite indicator bull score
     bn_bear:           float         # composite indicator bear score
-    strike:            int            # ATM strike at signal time
-    expiry:            str            # ISO datetime of the option's weekly expiry
+    strike:            int            # deep-ITM strike at signal time (2026-09-21 — was ATM)
+    expiry:            str            # ISO datetime of the option's expiry
     entry_premium:     float          # theoretical Black-Scholes premium at signal
     iv_used:           float          # realized-vol estimate used for the premium
+    basket_score:      float = 0.0    # Top-8 weighted-basket composite score that fired this signal
+    wobi:              float = 0.0    # W-OBI value that cleared the execution filter
 
 
 @dataclass(slots=True)   # the single active trade — at most one at a time
@@ -72,18 +74,42 @@ class BNTrade:
     direction:    str             # "BUY" | "SELL"
     entry_index_price: float
     entry_time:   str
-    target:       float           # absolute BankNifty index price, frozen at entry
-    current_sl:   float           # absolute BankNifty index price — ratchets over time
+    # target/current_sl are now absolute OPTION PREMIUM levels (₹), not
+    # BankNifty index prices — see the 2026-09-21 scalp-strategy rewrite
+    # (bn_entry_exit.evaluate_exit). Frozen at entry: target = entry_premium
+    # + target_rs, current_sl = entry_premium - stop_rs; current_sl never
+    # ratchets for this strategy (no breakeven/trailing — hard bracket +
+    # time-stop only), but the field is kept mutable/named as-is for
+    # BTPosition duck-typing compatibility (see CLAUDE.md's "shared decision
+    # core" convention — evaluate_exit reads these same field names off
+    # either dataclass).
+    target:       float
+    current_sl:   float
     strike:       int
     option_type:  str             # "CE" | "PE"
     expiry:       str             # ISO datetime
     entry_premium: float
     # Risk parameters frozen from cfg AT ENTRY — a live Settings change must
     # never retroactively alter an already-open trade's SL/target economics.
+    # breakeven_trigger/trail_trigger/trail_distance are VESTIGIAL for this
+    # strategy (no ratcheting stop any more) — kept, always 0.0, purely so
+    # evaluate_exit can stay duck-type-compatible with any code that still
+    # constructs a trade the old way; stoploss_points is likewise unused in
+    # favor of stop_rs below (see "Static: Scalping strategy" in config.py).
     stoploss_points:   float = 0.0
     breakeven_trigger: float = 0.0
     trail_trigger:     float = 0.0
     trail_distance:    float = 0.0
+    # 12-second execution lifecycle — frozen from cfg.BN_SCALP_TARGET_RS/
+    # STOP_RS/TIME_STOP_S at entry, same "no retroactive Settings change"
+    # rule as every other frozen risk param above.
+    target_rs:         float = 0.0
+    stop_rs:            float = 0.0
+    time_stop_s:        float = 0.0
+    # Diagnostic snapshot of what fired this trade — never used for
+    # settlement, purely for the dashboard/trade log.
+    basket_score_at_entry: float = 0.0
+    wobi_at_entry:         float = 0.0
     lot_size:     int             = 30
     order_id:     str             = ""
     sl_stage:     str             = "Initial"   # "Initial" | "Breakeven" | "Trail"
@@ -132,6 +158,8 @@ class NFSignal:
     expiry:            str
     entry_premium:     float
     iv_used:           float
+    basket_score:      float = 0.0
+    wobi:              float = 0.0
 
 
 @dataclass(slots=True)   # the single active Nifty 50 trade — at most one at a time
@@ -139,16 +167,21 @@ class NFTrade:
     direction:    str
     entry_index_price: float
     entry_time:   str
-    target:       float
-    current_sl:   float
+    target:       float           # absolute PREMIUM level (₹) — see BNTrade's comment above
+    current_sl:   float           # absolute PREMIUM level (₹)
     strike:       int
     option_type:  str
     expiry:       str
     entry_premium: float
     stoploss_points:   float = 0.0
-    breakeven_trigger: float = 0.0
-    trail_trigger:     float = 0.0
-    trail_distance:    float = 0.0
+    breakeven_trigger: float = 0.0   # vestigial — see BNTrade
+    trail_trigger:     float = 0.0   # vestigial — see BNTrade
+    trail_distance:    float = 0.0   # vestigial — see BNTrade
+    target_rs:             float = 0.0
+    stop_rs:               float = 0.0
+    time_stop_s:           float = 0.0
+    basket_score_at_entry: float = 0.0
+    wobi_at_entry:         float = 0.0
     lot_size:     int             = 65
     order_id:     str             = ""
     sl_stage:     str             = "Initial"
@@ -210,6 +243,24 @@ class NFDiagnostic:
     same_direction_required: int = 0
     gates_clear:      bool = False
     entry_ready:      bool = False
+    # ── Top-8 weighted-basket scalp strategy (2026-09-21) — leader_rows above
+    # is now populated with each basket leg's {stock, weight, vwap, ltp,
+    # deviationPct} instead of {open, close, volume, surged} (see
+    # nf_entry_exit.evaluate_entry) — same key names kept where the shape
+    # overlaps, for the dashboard's existing table renderer.
+    basket_score:      float = 0.0
+    score_threshold:   float = 0.0
+    top2_ok:           bool  = False
+    top2_names:        List[str] = field(default_factory=list)
+    wobi:              Optional[float] = None
+    wobi_min_ratio:    float = 0.0
+    window_ok:         bool  = True
+    trades_today:      int   = 0
+    max_trades_today:  int   = 0
+    itm_offset_points:  float = 0.0
+    target_rs:          float = 0.0
+    stop_rs:            float = 0.0
+    time_stop_s:        float = 0.0
 
 
 @dataclass(slots=True)   # rebuilt every ~100ms tick for the dashboard's "why didn't it fire" panel
@@ -254,3 +305,17 @@ class BNDiagnostic:
     same_direction_required: int = 0
     gates_clear:      bool = False
     entry_ready:      bool = False
+    # BN mirror of NFDiagnostic's Top-8 weighted-basket scalp fields above.
+    basket_score:      float = 0.0
+    score_threshold:   float = 0.0
+    top2_ok:           bool  = False
+    top2_names:        List[str] = field(default_factory=list)
+    wobi:              Optional[float] = None
+    wobi_min_ratio:    float = 0.0
+    window_ok:         bool  = True
+    trades_today:      int   = 0
+    max_trades_today:  int   = 0
+    itm_offset_points:  float = 0.0
+    target_rs:          float = 0.0
+    stop_rs:            float = 0.0
+    time_stop_s:        float = 0.0

@@ -1,24 +1,35 @@
 from __future__ import annotations
 
 """
-Backtest replay engine for the Bank Nifty options strategy.
+Backtest replay engine for the Bank Nifty scalp strategy.
 
-Steps each trading day 5-minute bar by bar, driving the SAME
-evaluate_entry/evaluate_exit functions the live scheduler calls (this repo's
-hard convention — live and backtest share one strategy core). Intraday-only:
-a fresh Portfolio per day (single active trade), EOD square-off; days run in
-parallel since they're independent. c.html's own runBacktest() is a confirmed
-empty stub, so there is no reference backtest behavior to preserve fidelity
-with — see fills.resolve_index_touch for the one deliberate improvement this
-engine makes over a literal (close-only) port of checkExit.
+Steps each trading day 5-minute bar by bar, driving the SAME evaluate_entry
+function the live scheduler calls (this repo's hard convention — live and
+backtest share one strategy core for the ENTRY decision). c.html's own
+runBacktest() is a confirmed empty stub, so there is no reference backtest
+behavior to preserve fidelity with.
 
-Anti-look-ahead guarantees:
+*** BACKTEST FIDELITY LIMITATION (2026-09-21 scalp-strategy rewrite) ***
+The live strategy's exit lifecycle is a hard 12-SECOND window
+(BN_SCALP_TIME_STOP_S) — this repo has no historical market data anywhere
+at sub-5-minute granularity (only 5m OHLC bars, see CLAUDE.md's "Options
+pricing"/"Self-recorded BankNifty history" notes), so a 12-second lifecycle
+cannot be faithfully replayed here. Rather than fabricate a falsely-precise
+simulation, _try_exit below resolves each position using the entry bar's
+IMMEDIATE NEXT bar's OHLC-implied premium range (a coarse proxy for "did
+target/stop get touched sometime in the ~5 minutes after entry" — see
+fills.resolve_premium_touch's own docstring) and forces a TIME_SCRATCH at
+that bar's close if neither was touched, since 12 seconds has by then long
+since elapsed relative to a 5-minute bar regardless. This still exercises
+the real evaluate_entry signal-quality/frequency logic end-to-end, but
+treat any backtest ₹ P&L or win-rate number from this specific strategy as
+a rough proxy, not a faithful simulation of the real sub-bar lifecycle —
+that would need 1-minute-or-finer historical data this repo doesn't have.
+
+Anti-look-ahead guarantees (still fully intact for the entry decision):
   * An entry decision at bar t only sees bars [.. t]; the option's IV/T are
     computed from that same bar's timestamp and closes [.. t].
   * A position opened at bar t is only eligible to exit on bars > t.
-  * SL/target touch resolution uses gap-at-open + intrabar high/low computed
-    from bar t alone; ratcheting for the NEXT bar uses bar t's close — never
-    a bar the replay hasn't reached yet.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -28,37 +39,34 @@ from typing import Dict, List, Optional, Tuple
 import app.config as cfg
 from app.backtest.data import SymbolSeries, load_backtest_data
 from app.backtest.fills import (
-    resolve_index_touch,
+    resolve_premium_touch,
     slip_buy_premium,
     slip_sell_premium,
 )
 from app.backtest.metrics import compute_metrics
 from app.backtest.portfolio import BTPosition, Portfolio
-from app.engine.bn_entry_exit import evaluate_entry, evaluate_exit
+from app.engine.bn_entry_exit import evaluate_entry
 from app.engine.bn_pricing import black_scholes, estimate_iv, time_to_expiry_years
 from app.models import Candle
-
-_LEADER_HISTORY_BARS = 25   # covers both pattern (last 3) and qty-avg (last 20) window
 
 
 def _slice_recent(ss: SymbolSeries, gidx: int, n: int) -> List[Candle]:
     return ss.series[max(0, gidx - n + 1): gidx + 1]
 
 
-def _leader_recent_at(stocks: Dict[str, SymbolSeries], day: str, tm: str) -> Dict[str, List[Candle]]:
+def _basket_recent_at(stocks: Dict[str, SymbolSeries], day: str, tm: str) -> Dict[str, List[Candle]]:
     """
-    2026-09-19: iterates cfg.BN_ALL_STOCKS (all 14 real NIFTY BANK members),
-    not just the 6 leaders — evaluate_entry's rewritten rule votes across
-    all 14 (see bn_entry_exit.py), and data.py already loads history for
-    all of BN_ALL_STOCKS, so nothing else needs to change here. Keeping
-    this at just the 6 leaders would silently cap the vote below
-    BN_SAME_DIRECTION_REQUIRED (9) and backtest would never fire at all.
+    2026-09-21: builds the TOKEN-keyed candle dict evaluate_entry now wants
+    (cfg.BN_SCALP_BASKET's 8 tokens only, not the 14-stock BN_ALL_STOCKS
+    universe the old leader-vote rule needed) — untrimmed (full available
+    history up to gidx) since session_vwap needs every bar from the day's
+    open, same as the live scheduler's own basket_candles build.
     """
     out: Dict[str, List[Candle]] = {}
-    for name, token in cfg.BN_ALL_STOCKS.items():
+    for token in cfg.BN_SCALP_BASKET:
         ss = stocks.get(token)
         idx = ss.at.get(day, {}).get(tm) if ss else None
-        out[name] = _slice_recent(ss, idx, _LEADER_HISTORY_BARS) if idx is not None else []
+        out[token] = ss.series[:idx + 1] if (ss and idx is not None) else []
     return out
 
 
@@ -67,30 +75,25 @@ def _open_position(signal, now: datetime, gidx: int) -> BTPosition:
     bn_entry_exit.open_trade_from_signal but returns the backtest's own
     BTPosition dataclass (the live/backtest split every dataclass in this
     repo already has — see Position vs BTPosition in the deleted equity engine)."""
-    stoploss_points = cfg.BN_STOPLOSS_POINTS
-    if signal.direction == "BUY":
-        target = signal.entry_index_price + cfg.BN_TARGET_POINTS
-        initial_sl = signal.entry_index_price - stoploss_points
-    else:
-        target = signal.entry_index_price - cfg.BN_TARGET_POINTS
-        initial_sl = signal.entry_index_price + stoploss_points
+    target_rs = cfg.BN_SCALP_TARGET_RS
+    stop_rs = cfg.BN_SCALP_STOP_RS
+    time_stop_s = cfg.BN_SCALP_TIME_STOP_S
 
     return BTPosition(
         direction=signal.direction,
         entry_time=now.isoformat(),
         entry_index_price=signal.entry_index_price,
         entry_gidx=gidx,
-        target=target,
-        current_sl=initial_sl,
+        target=signal.entry_premium + target_rs,
+        current_sl=signal.entry_premium - stop_rs,
         sl_stage="Initial",
         strike=signal.strike,
         option_type="CE" if signal.direction == "BUY" else "PE",
         expiry=signal.expiry,
         entry_premium=signal.entry_premium,
-        stoploss_points=stoploss_points,
-        breakeven_trigger=cfg.BN_BREAKEVEN_TRIGGER,
-        trail_trigger=cfg.BN_TRAIL_TRIGGER,
-        trail_distance=cfg.BN_TRAIL_DISTANCE,
+        target_rs=target_rs, stop_rs=stop_rs, time_stop_s=time_stop_s,
+        basket_score_at_entry=signal.basket_score,
+        wobi_at_entry=signal.wobi,
         lot_size=cfg.BN_LOT_SIZE,
         confidence=signal.confidence,
         iv_used=signal.iv_used,
@@ -99,44 +102,51 @@ def _open_position(signal, now: datetime, gidx: int) -> BTPosition:
 
 def _try_exit(port: Portfolio, bn_ss: SymbolSeries, gidx: int,
              slippage_bps: float) -> None:
+    """See this module's docstring for the backtest-fidelity limitation
+    this approximates around (a 12s live lifecycle vs 5m historical bars)."""
     pos = port.active
     if pos is None or gidx <= pos.entry_gidx:
         return
     bar = bn_ss.series[gidx]
     now = datetime.fromisoformat(bar.start_time)
 
-    touch = resolve_index_touch(pos.direction, pos.current_sl, pos.target, bar)
+    lookback = bn_ss.closes[max(0, gidx - cfg.BN_IV_LOOKBACK_BARS):gidx + 1]
+    iv = estimate_iv(lookback)
+    expiry_dt = datetime.fromisoformat(pos.expiry)
+    T = time_to_expiry_years(now, expiry_dt)
+
+    def _premium(index_price: float) -> float:
+        return black_scholes(index_price, pos.strike, T, cfg.BN_RISK_FREE_RATE, iv, pos.option_type)["price"]
+
+    p_open = _premium(bar.open)
+    p_a, p_b = _premium(bar.high), _premium(bar.low)
+    p_hi, p_lo = max(p_a, p_b), min(p_a, p_b)   # CE rises with index, PE falls — max/min sidesteps the branch
+
+    touch = resolve_premium_touch(pos.current_sl, pos.target, p_open, p_hi, p_lo)
     if touch is not None:
-        exit_index_price, outcome = touch
-        lookback = bn_ss.closes[max(0, gidx - cfg.BN_IV_LOOKBACK_BARS):gidx + 1]
-        iv = estimate_iv(lookback)
-        expiry_dt = datetime.fromisoformat(pos.expiry)
-        T = time_to_expiry_years(now, expiry_dt)
-        bs = black_scholes(exit_index_price, pos.strike, T, cfg.BN_RISK_FREE_RATE, iv, pos.option_type)
-        exit_premium = slip_sell_premium(bs["price"], slippage_bps)
-        port.close_position(now, exit_index_price, exit_premium, outcome)
+        exit_premium_raw, outcome = touch
+        exit_premium = slip_sell_premium(exit_premium_raw, slippage_bps)
+        port.close_position(now, bar.close, exit_premium, outcome)
         return
 
-    # No touch this bar — ratchet trailing/breakeven off THIS bar's close for
-    # the NEXT bar's check (evaluate_exit's should_exit is ignored here: our
-    # own gap/intrabar-aware resolve_index_touch above is authoritative).
-    closes_lookback = bn_ss.closes[max(0, gidx - cfg.BN_INDICATOR_LOOKBACK_BARS):gidx + 1]
-    ev = evaluate_exit(pos, now, bar.close, closes_lookback)
-    pos.current_sl = ev.new_sl
-    pos.sl_stage = ev.sl_stage
+    # Neither touched within this bar's premium range — force the scratch
+    # exit at this bar's own close (see the module docstring).
+    exit_premium = slip_sell_premium(max(0.0, _premium(bar.close) - cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS), slippage_bps)
+    port.close_position(now, bar.close, exit_premium, "TIME_SCRATCH")
 
 
 def _try_entry(port: Portfolio, bn_ss: SymbolSeries, stocks: Dict[str, SymbolSeries],
                gidx: int, day: str, tm: str, slippage_bps: float) -> None:
     if port.active is not None:
         return
-    bn_recent = _slice_recent(bn_ss, gidx, max(20, cfg.BN_ATR_PERIOD + 5))
+    bn_recent = _slice_recent(bn_ss, gidx, 5)   # only bn_recent[-1] is read now — see scheduler.py's mirror comment
     bn_closes_lookback = bn_ss.closes[max(0, gidx - cfg.BN_INDICATOR_LOOKBACK_BARS):gidx + 1]
-    leader_recent = _leader_recent_at(stocks, day, tm)
+    basket_recent = _basket_recent_at(stocks, day, tm)
 
     now = datetime.fromisoformat(bn_ss.series[gidx].start_time)
+    trades_today = len(port.trades) + (1 if port.active is not None else 0)
     signal, _diag = evaluate_entry(now, bn_recent, bn_closes_lookback,
-                                   leader_recent, port.last_exit_time)
+                                   basket_recent, port.last_exit_time, trades_today)
     if signal is None:
         return
     signal.entry_premium = slip_buy_premium(signal.entry_premium, slippage_bps)

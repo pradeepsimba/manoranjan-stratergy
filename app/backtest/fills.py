@@ -51,6 +51,48 @@ def resolve_index_touch(direction: str, sl_level: float, target_level: float,
     return None
 
 
+# ── Option-premium touch resolution (2026-09-21 scalp-strategy rewrite) ────
+
+def resolve_premium_touch(sl_level: float, target_level: float,
+                          premium_open: float, premium_high: float,
+                          premium_low: float) -> Optional[Tuple[float, str]]:
+    """
+    Generic touch resolution on a PREMIUM range, gap-at-open + intrabar
+    aware — same convention as resolve_index_touch above, generalized off
+    an already-direction-normalized level series instead of the underlying
+    index specifically. This strategy's target/stop are always "premium up
+    = win, premium down = loss" regardless of CE/PE (see
+    bn_entry_exit.evaluate_exit), so there is only ONE branch here, unlike
+    resolve_index_touch's BUY/SELL split. STOP wins a same-bar tie (assume
+    the adverse move came first).
+
+    Caller computes premium_high/premium_low from Black-Scholes at the
+    bar's index high/low (max/min of the two, since a CE's premium rises
+    with the index and a PE's falls — see engine.py's _try_exit) — this
+    function only ever compares against already-resolved levels.
+
+    KNOWN LIMITATION: this strategy's real lifecycle is a hard 12-SECOND
+    window (BN_SCALP_TIME_STOP_S/NF_SCALP_TIME_STOP_S); this repo has no
+    historical data at sub-5-minute granularity anywhere (see CLAUDE.md).
+    A 5m bar's OHLC-implied premium range is therefore a coarse proxy for
+    "did target/stop get touched sometime in this window", not a faithful
+    reconstruction of what happened in the specific first 12 seconds after
+    entry — engine.py's _try_exit documents the resulting approximation
+    (effectively: resolve on the FIRST bar after entry, via this touch
+    check, else a forced TIME_SCRATCH at that bar's close since 12s has by
+    then long since elapsed relative to the bar).
+    """
+    if premium_open <= sl_level:
+        return sl_level, "STOP"
+    if premium_open >= target_level:
+        return target_level, "TARGET"
+    if premium_low <= sl_level:
+        return sl_level, "STOP"
+    if premium_high >= target_level:
+        return target_level, "TARGET"
+    return None
+
+
 # ── Option premium slippage ───────────────────────────────────────────────────
 
 def slip_buy_premium(premium: float, bps: float) -> float:

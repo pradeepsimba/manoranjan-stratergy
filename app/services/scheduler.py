@@ -344,31 +344,42 @@ class SchedulerService:
         if not closed_bn_candles:
             return
 
-        bn_recent = closed_bn_candles[-max(20, cfg.BN_ATR_PERIOD + 5):]
+        # evaluate_entry only reads bn_recent_candles[-1] now (the scalp
+        # strategy's basket/ITM/W-OBI pipeline needs just the just-closed
+        # bar's own time/close) — a small fixed tail, not the old momentum
+        # gate's cfg.BN_ATR_PERIOD-sized window (that gate, and the constant,
+        # are gone — see the 2026-09-21 removal of bn_signals.py).
+        bn_recent = closed_bn_candles[-5:]
         closes = np.fromiter((c.close for c in closed_bn_candles), np.float64, len(closed_bn_candles))
         bn_closes_lookback = closes[-cfg.BN_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.BN_INDICATOR_LOOKBACK_BARS else closes
 
-        # 2026-09-19, explicit user decision: BN's entry vote is now over
-        # ALL 14 real NIFTY BANK stocks (cfg.BN_ALL_STOCKS), not just the 6
-        # leaders — see bn_entry_exit.evaluate_entry's rewritten rule.
-        leader_recent = {}
-        for name, token in cfg.BN_ALL_STOCKS.items():
+        # 2026-09-21, explicit user decision: BN's entry now reads only the
+        # Top-8 weighted-basket tokens (cfg.BN_SCALP_BASKET), not the full
+        # 14-stock BN_ALL_STOCKS universe the old leader-vote rule needed.
+        # Full history (not trimmed to _LEADER_HISTORY_BARS) — session VWAP
+        # needs every bar from today's open, and 8 tokens x <=300 bars is
+        # trivial once per bar close.
+        basket_candles = {}
+        for token in cfg.BN_SCALP_BASKET:
             with st.candle_lock(token):
                 candles = list(st.candles_5m.get(token, []))
-            closed = [c for c in candles if c.start_time < new_bar_time]
-            leader_recent[name] = closed[-_LEADER_HISTORY_BARS:]
+            basket_candles[token] = [c for c in candles if c.start_time < new_bar_time]
 
         last_exit_time = (datetime.fromisoformat(st.last_exit_time)
                           if st.last_exit_time else None)
         now = _now()
         signal, diagnostic = evaluate_entry(now, bn_recent, bn_closes_lookback,
-                                            leader_recent, last_exit_time)
+                                            basket_candles, last_exit_time, st.bn_trades_today)
         st.bn_diagnostic = diagnostic
 
         if signal is None or signal.bar_time == st.last_trade_candle:
             return
 
-        trade = bn_trade.place_paper_order(signal, now)
+        try:
+            trade = bn_trade.place_paper_order(signal, now)
+        except ValueError as e:
+            print(f"BN order rejected: {e}")
+            return
         try:
             await self._db.save_position(trade, instrument="BANKNIFTY")
         except Exception as e:
@@ -417,28 +428,35 @@ class SchedulerService:
         if not closed_nf_candles:
             return
 
-        nf_recent = closed_nf_candles[-max(20, cfg.NF_ATR_PERIOD + 5):]
+        nf_recent = closed_nf_candles[-5:]   # see the BN mirror's comment above
         closes = np.fromiter((c.close for c in closed_nf_candles), np.float64, len(closed_nf_candles))
         nf_closes_lookback = closes[-cfg.NF_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.NF_INDICATOR_LOOKBACK_BARS else closes
 
-        leader_recent = {}
-        for name, token in cfg.NF_LEADER_STOCKS.items():
+        # 2026-09-21: Top-8 weighted-basket tokens (cfg.NF_SCALP_BASKET),
+        # not the 12-stock NF_LEADER_STOCKS the old rule used — see the BN
+        # mirror in _tick_entries above for why the full history is passed
+        # untrimmed.
+        basket_candles = {}
+        for token in cfg.NF_SCALP_BASKET:
             with st.candle_lock(token):
                 candles = list(st.candles_5m.get(token, []))
-            closed = [c for c in candles if c.start_time < new_bar_time]
-            leader_recent[name] = closed[-_LEADER_HISTORY_BARS:]
+            basket_candles[token] = [c for c in candles if c.start_time < new_bar_time]
 
         last_exit_time = (datetime.fromisoformat(st.last_exit_time_nf)
                           if st.last_exit_time_nf else None)
         now = _now()
         signal, diagnostic = nf_evaluate_entry(now, nf_recent, nf_closes_lookback,
-                                               leader_recent, last_exit_time)
+                                               basket_candles, last_exit_time, st.nf_trades_today)
         st.nf_diagnostic = diagnostic
 
         if signal is None or signal.bar_time == st.last_trade_candle_nf:
             return
 
-        trade = nf_trade.place_paper_order(signal, now)
+        try:
+            trade = nf_trade.place_paper_order(signal, now)
+        except ValueError as e:
+            print(f"NF order rejected: {e}")
+            return
         try:
             await self._db.save_position(trade, instrument="NIFTY50")
         except Exception as e:
@@ -520,6 +538,18 @@ class SchedulerService:
                       if r.get("status") in ("OPEN", "CLOSED") else PositionStatus.OPEN)
             is_nf = r.get("instrument") == "NIFTY50"
             cls = NFTrade if is_nf else BNTrade
+            # DB never persisted target_rs/stop_rs/time_stop_s (no columns
+            # for them — the scalp lifecycle is new, 2026-09-21). A restored
+            # OPEN trade backfills them from the CURRENT cfg defaults as a
+            # best-effort recovery value (same "restart loses the exact
+            # frozen-at-entry number" caveat this repo's own restart-
+            # recovery already had for breakeven/trail before this rewrite)
+            # — critically, NOT left at the dataclass default of 0.0, which
+            # would make time_stop_s=0 force an immediate TIME_SCRATCH exit
+            # on the very next tick after recovery.
+            time_stop_s = cfg.NF_SCALP_TIME_STOP_S if is_nf else cfg.BN_SCALP_TIME_STOP_S
+            target_rs   = cfg.NF_SCALP_TARGET_RS   if is_nf else cfg.BN_SCALP_TARGET_RS
+            stop_rs     = cfg.NF_SCALP_STOP_RS     if is_nf else cfg.BN_SCALP_STOP_RS
             trade = cls(
                 direction=str(r.get("direction") or "BUY"),
                 entry_index_price=_f(r.get("entry_price")),
@@ -530,6 +560,7 @@ class SchedulerService:
                 option_type=str(r.get("option_type") or "CE"),
                 expiry=str(r.get("expiry") or ""),
                 entry_premium=_f(r.get("entry_premium")),
+                target_rs=target_rs, stop_rs=stop_rs, time_stop_s=time_stop_s,
                 lot_size=int(r.get("quantity") or (cfg.NF_LOT_SIZE if is_nf else cfg.BN_LOT_SIZE)),
                 order_id=str(r.get("order_id") or ""),
                 status=status,
@@ -542,19 +573,23 @@ class SchedulerService:
                 st.daily_pnl += trade.pnl   # shared account — every closed trade nets into the one daily_pnl
                 if is_nf:
                     st.closed_trades_nf.append(trade)
+                    st.nf_trades_today += 1   # counts toward SCALP_MAX_TRADES_PER_DAY across a restart too
                     if trade.exit_time:
                         st.last_exit_time_nf = trade.exit_time
                 else:
                     st.closed_trades.append(trade)
+                    st.bn_trades_today += 1
                     if trade.exit_time:
                         st.last_exit_time = trade.exit_time
             else:
                 if is_nf:
                     st.active_trade_nf = trade
                     st.last_trade_candle_nf = trade.entry_time[:16]
+                    st.nf_trades_today += 1
                 else:
                     st.active_trade = trade
                     st.last_trade_candle = trade.entry_time[:16]
+                    st.bn_trades_today += 1
 
         print(
             f"=== RECOVERY: restored BN {'1 open' if st.active_trade else '0 open'}/"
@@ -689,12 +724,14 @@ class SchedulerService:
         st.last_exit_time = None
         st.last_evaluated_bar = None
         st.bn_diagnostic = None
+        st.bn_trades_today = 0
         st.active_trade_nf = None
         st.closed_trades_nf.clear()
         st.last_trade_candle_nf = None
         st.last_exit_time_nf = None
         st.last_evaluated_bar_nf = None
         st.nf_diagnostic = None
+        st.nf_trades_today = 0
         st.daily_pnl = 0.0
         st.ltp.clear()
         # Re-fetch each stock's history right away (2026-09-16, explicit user
@@ -946,6 +983,8 @@ class SchedulerService:
                 "indexPnlPoints": t.index_pnl_points, "confidence": t.confidence,
                 "currentPremium": t.current_premium, "currentIv": t.current_iv,
                 "optionSymbol": t.option_symbol, "premiumSynthetic": t.premium_synthetic,
+                "targetRs": t.target_rs, "stopRs": t.stop_rs, "timeStopS": t.time_stop_s,
+                "basketScoreAtEntry": t.basket_score_at_entry, "wobiAtEntry": t.wobi_at_entry,
             }
 
         active = None
@@ -977,6 +1016,16 @@ class SchedulerService:
                 "gatesClear": d.gates_clear, "entryReady": d.entry_ready,
                 "marketOpen": d.market_open, "candleCloseOk": d.candle_close_ok,
                 "noActiveTrade": no_active_trade,
+                # Top-8 weighted-basket scalp strategy (2026-09-21) — see
+                # bn_entry_exit.evaluate_entry / config.py's "Static: Scalping
+                # strategy" block.
+                "basketScore": d.basket_score, "scoreThreshold": d.score_threshold,
+                "top2Ok": d.top2_ok, "top2Names": d.top2_names,
+                "wobi": d.wobi, "wobiMinRatio": d.wobi_min_ratio,
+                "windowOk": d.window_ok, "tradesToday": d.trades_today,
+                "maxTradesToday": d.max_trades_today,
+                "itmOffsetPoints": d.itm_offset_points,
+                "targetRs": d.target_rs, "stopRs": d.stop_rs, "timeStopS": d.time_stop_s,
             }
 
         diag = _diag_dict(st.bn_diagnostic, active_trade is None) if st.bn_diagnostic is not None else None

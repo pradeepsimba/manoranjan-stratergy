@@ -22,17 +22,28 @@ class BTPosition:
     entry_time:   str
     entry_index_price: float
     entry_gidx:   int          # index into the BN series (exit only after this)
-    target:       float
-    current_sl:   float
+    target:       float        # absolute PREMIUM level (₹) — see BNTrade's comment in models.py
+    current_sl:   float        # absolute PREMIUM level (₹)
     sl_stage:     str
     strike:       int
     option_type:  str
     expiry:       str
     entry_premium: float
-    stoploss_points:   float
-    breakeven_trigger: float
-    trail_trigger:     float
-    trail_distance:    float
+    # stoploss_points/breakeven_trigger/trail_trigger/trail_distance are
+    # vestigial (2026-09-21 scalp-strategy rewrite — no ratcheting stop any
+    # more) — kept at 0.0 purely for field-name parity with BNTrade, which
+    # evaluate_exit relies on (this repo's "shared decision core" duck-
+    # typing convention — see CLAUDE.md). target_rs/stop_rs/time_stop_s are
+    # the real frozen-at-entry risk params now.
+    stoploss_points:   float = 0.0
+    breakeven_trigger: float = 0.0
+    trail_trigger:     float = 0.0
+    trail_distance:    float = 0.0
+    target_rs:             float = 0.0
+    stop_rs:               float = 0.0
+    time_stop_s:           float = 0.0
+    basket_score_at_entry: float = 0.0
+    wobi_at_entry:         float = 0.0
     lot_size:     int = 30
     confidence:   float = 0.0
     iv_used:      float = 0.0
@@ -89,7 +100,10 @@ class Portfolio:
         gross      = sell_value - buy_value
         costs      = round_trip_costs_options(buy_value, sell_value)
         net        = gross - costs
-        risk       = pos.stoploss_points * pos.lot_size
+        # R-multiple risk denominator is now stop_rs (the frozen premium-₹
+        # stop distance), not the old index-points stoploss_points — see
+        # BTPosition's comment above.
+        risk       = pos.stop_rs * pos.lot_size
         r_mult     = (net / risk) if risk > 0 else 0.0
 
         self.daily_pnl += net

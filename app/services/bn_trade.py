@@ -16,7 +16,7 @@ import numpy as np
 
 import app.config as cfg
 from app.engine.bn_entry_exit import ExitEvaluation, evaluate_exit, finalize_exit, open_trade_from_signal
-from app.engine.bn_pricing import black_scholes, estimate_iv, get_atm_strike, get_next_expiry, time_to_expiry_years
+from app.engine.bn_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
 from app.models import BNSignal, BNTrade, PositionStatus
 from app.state import get_state
 
@@ -24,13 +24,24 @@ _order_seq = itertools.count(1)
 
 
 def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
-    """Open the single active trade from a fired BNSignal. Returns it (already added to AppState)."""
+    """
+    Open the single active trade from a fired BNSignal. Returns it (already
+    added to AppState). Re-checks the SCALP_MAX_TRADES_PER_DAY guardrail
+    here too (not just inside evaluate_entry) so it truly caps every
+    executed trade regardless of origin — including place_manual_order
+    below, which bypasses evaluate_entry's gates entirely (a human
+    decision, not an algo signal) but must not bypass this risk limit.
+    """
+    st = get_state()
+    if st.bn_trades_today >= cfg.SCALP_MAX_TRADES_PER_DAY:
+        raise ValueError(f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached")
+
     order_id = f"BN-{now.strftime('%H%M%S')}-{next(_order_seq)}"
     trade = open_trade_from_signal(signal, now, order_id)
 
-    st = get_state()
     st.active_trade = trade
     st.last_trade_candle = signal.bar_time
+    st.bn_trades_today += 1
     st.bn_option_ltp = None   # fresh — any stale value from a prior trade must not leak in
     # Start streaming this trade's real option leg (2026-09-17) — entry_premium
     # stays the Black-Scholes value above (no real tick can exist yet at this
@@ -85,7 +96,11 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
 
     spot = st.bn_index_ltp
     option_type = "CE" if direction == "BUY" else "PE"
-    strike = get_atm_strike(spot)
+    # Deep-ITM, same strike selection the algo strategy uses (2026-09-21) —
+    # a manual order shares the same premium-based target/stop economics
+    # (BN_SCALP_TARGET_RS/STOP_RS), which only make sense on a similarly
+    # deep-ITM contract, not an ATM one with very different premium scale.
+    strike = get_itm_strike(spot, option_type, cfg.BN_ITM_OFFSET_POINTS)
     expiry = get_next_expiry(now)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(lookback)
@@ -100,18 +115,22 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
     return place_paper_order(signal, now)
 
 
-def _live_premium(trade: BNTrade, st, bs_premium: float) -> float:
+def _live_premium_override(trade: BNTrade, st) -> Optional[float]:
     """
     Real-option-LTP override (2026-09-17): once trade.premium_synthetic has
     latched False (a real WS tick for trade.option_symbol has arrived — see
-    market_data.py's _process_tick), use that real price instead of the
-    Black-Scholes value evaluate_exit always computes. Falls back to the BS
-    value if no real tick has arrived yet, or the cached LTP is somehow
-    unset — never surfaces a zero/missing premium.
+    market_data.py's _process_tick), this returns that real price so the
+    CALLER can pass it into evaluate_exit's live_premium_override param —
+    computed BEFORE evaluate_exit runs (2026-09-21, alongside the premium-
+    based target/stop rewrite) so the real tick drives the EXIT DECISION
+    itself, not just the post-hoc display value the old index-points exit
+    could get away with (that decision never depended on premium at all).
+    None when no real tick has arrived yet — evaluate_exit's own
+    Black-Scholes fallback covers that case.
     """
     if trade.option_symbol and not trade.premium_synthetic and st.bn_option_ltp:
         return st.bn_option_ltp
-    return bs_premium
+    return None
 
 
 def _settle(trade: BNTrade, now: datetime, exit_index_price: float,
@@ -146,15 +165,15 @@ def check_tick_exit(now: datetime, current_index_price: float,
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
 
-    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, bn_closes_lookback)
-    premium = _live_premium(trade, st, ev.current_premium)
+    override = _live_premium_override(trade, st)
+    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, bn_closes_lookback, override)
     trade.current_sl = ev.new_sl
     trade.sl_stage = ev.sl_stage
-    trade.current_premium = premium   # live mark for the ATM panel, even when not exiting
+    trade.current_premium = ev.current_premium   # live mark for the ATM panel, even when not exiting
     trade.current_iv = ev.current_iv
 
     if ev.should_exit:
-        return _settle(trade, now, current_index_price, premium, f"{ev.exit_reason} HIT")
+        return _settle(trade, now, current_index_price, ev.current_premium, f"{ev.exit_reason} HIT")
     return None
 
 
@@ -167,5 +186,6 @@ def force_close(now: datetime, current_index_price: float,
     trade = st.active_trade
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
-    ev = evaluate_exit(trade, now, current_index_price, bn_closes_lookback)
-    return _settle(trade, now, current_index_price, _live_premium(trade, st, ev.current_premium), label)
+    override = _live_premium_override(trade, st)
+    ev = evaluate_exit(trade, now, current_index_price, bn_closes_lookback, override)
+    return _settle(trade, now, current_index_price, ev.current_premium, label)

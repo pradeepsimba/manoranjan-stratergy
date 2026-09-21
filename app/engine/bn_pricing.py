@@ -37,6 +37,20 @@ def get_atm_strike(spot: float) -> int:
     return int(round(spot / 100.0) * 100)
 
 
+def get_itm_strike(spot: float, option_type: str, offset: float) -> int:
+    """
+    Deep-ITM strike, `offset` points away from spot on the side that keeps
+    the contract in-the-money — CE: spot - offset (a strike below spot is
+    ITM for a call); PE: spot + offset (a strike above spot is ITM for a
+    put) — then rounded to the nearest real 100-point strike via
+    get_atm_strike. `offset` (cfg.BN_ITM_OFFSET_POINTS, default 300 — ~3
+    strikes) is large relative to the 100-point step, so round-to-nearest
+    never flips which side of spot the result lands on.
+    """
+    raw = (spot - offset) if option_type == "CE" else (spot + offset)
+    return get_atm_strike(raw)
+
+
 def build_monthly_option_symbol(underlying: str, expiry: datetime, strike: int, option_type: str) -> str:
     """
     Real vendor MONTHLY option-instrument symbol, e.g. "BANKNIFTY26SEP56400CE"

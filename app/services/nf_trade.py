@@ -16,7 +16,7 @@ import numpy as np
 
 import app.config as cfg
 from app.engine.nf_entry_exit import ExitEvaluation, evaluate_exit, finalize_exit, open_trade_from_signal
-from app.engine.nf_pricing import black_scholes, estimate_iv, get_atm_strike, get_next_expiry, time_to_expiry_years
+from app.engine.nf_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
 from app.models import NFSignal, NFTrade, PositionStatus
 from app.state import get_state
 
@@ -24,13 +24,22 @@ _order_seq = itertools.count(1)
 
 
 def place_paper_order(signal: NFSignal, now: datetime) -> NFTrade:
-    """Open the single active NF trade from a fired NFSignal. Returns it (already added to AppState)."""
+    """
+    Open the single active NF trade from a fired NFSignal. Returns it
+    (already added to AppState). See bn_trade.place_paper_order for why
+    the SCALP_MAX_TRADES_PER_DAY guardrail is re-checked here too, not
+    just inside evaluate_entry.
+    """
+    st = get_state()
+    if st.nf_trades_today >= cfg.SCALP_MAX_TRADES_PER_DAY:
+        raise ValueError(f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached")
+
     order_id = f"NF-{now.strftime('%H%M%S')}-{next(_order_seq)}"
     trade = open_trade_from_signal(signal, now, order_id)
 
-    st = get_state()
     st.active_trade_nf = trade
     st.last_trade_candle_nf = signal.bar_time
+    st.nf_trades_today += 1
     st.nf_option_ltp = None   # fresh — any stale value from a prior trade must not leak in
     # NF mirror of bn_trade.place_paper_order's real-option-LTP wiring —
     # stockname is the underlying's plain name ("NIFTY"), not the option
@@ -64,7 +73,9 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
 
     spot = st.nf_index_ltp
     option_type = "CE" if direction == "BUY" else "PE"
-    strike = get_atm_strike(spot)
+    # Deep-ITM, same strike selection the algo strategy uses — see
+    # bn_trade.place_manual_order's equivalent comment.
+    strike = get_itm_strike(spot, option_type, cfg.NF_ITM_OFFSET_POINTS)
     expiry = get_next_expiry(now)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(lookback)
@@ -79,11 +90,11 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
     return place_paper_order(signal, now)
 
 
-def _live_premium(trade: NFTrade, st, bs_premium: float) -> float:
-    """NF mirror of bn_trade._live_premium."""
+def _live_premium_override(trade: NFTrade, st) -> Optional[float]:
+    """NF mirror of bn_trade._live_premium_override."""
     if trade.option_symbol and not trade.premium_synthetic and st.nf_option_ltp:
         return st.nf_option_ltp
-    return bs_premium
+    return None
 
 
 def _settle(trade: NFTrade, now: datetime, exit_index_price: float,
@@ -114,15 +125,15 @@ def check_tick_exit(now: datetime, current_index_price: float,
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
 
-    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, nf_closes_lookback)
-    premium = _live_premium(trade, st, ev.current_premium)
+    override = _live_premium_override(trade, st)
+    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, nf_closes_lookback, override)
     trade.current_sl = ev.new_sl
     trade.sl_stage = ev.sl_stage
-    trade.current_premium = premium
+    trade.current_premium = ev.current_premium
     trade.current_iv = ev.current_iv
 
     if ev.should_exit:
-        return _settle(trade, now, current_index_price, premium, f"{ev.exit_reason} HIT")
+        return _settle(trade, now, current_index_price, ev.current_premium, f"{ev.exit_reason} HIT")
     return None
 
 
@@ -134,5 +145,6 @@ def force_close(now: datetime, current_index_price: float,
     trade = st.active_trade_nf
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
-    ev = evaluate_exit(trade, now, current_index_price, nf_closes_lookback)
-    return _settle(trade, now, current_index_price, _live_premium(trade, st, ev.current_premium), label)
+    override = _live_premium_override(trade, st)
+    ev = evaluate_exit(trade, now, current_index_price, nf_closes_lookback, override)
+    return _settle(trade, now, current_index_price, ev.current_premium, label)

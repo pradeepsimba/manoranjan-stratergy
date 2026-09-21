@@ -335,6 +335,15 @@ NF_PRICE_ALERT_ATTR: Dict[str, str] = {
 # "leaders + extras" shape.
 NF_ALL_STOCKS: Dict[str, str] = {
     **NF_LEADER_STOCKS,
+    # Re-added 2026-09-21 for the Top-8 weighted-basket scalp strategy (see
+    # "Static: Scalping strategy" below) — the user's own basket spec names
+    # TCS explicitly. Previously swapped OUT for HCL Technologies (2026-07
+    # era comment on NF_LEADER_STOCKS above) after a direct vendor query
+    # found zero data under any stockname/symbol variant at the time; if
+    # that's still true, TCS's VWAP/score will just sit at None/0 weight
+    # contribution — the same "missing candle -> skipped" tolerance every
+    # other stock in this universe already has, not a crash.
+    "TATA CONSULTANCY SERVICES": "TCS",
     "BAJAJ FINANCE":            "BAJFINANCE",
     "ASIAN PAINTS":             "ASIANPAINT",
     "TITAN":                    "TITAN",   # was "TITAN COMPANY" — vendor returned zero candles for that stockname; "TITAN" itself matches (same gotcha class as Kotak/HCL Tech above)
@@ -453,6 +462,8 @@ _NF_REAL_WEIGHTS = {
 # after the real block above. If the displayed split ever looks obviously
 # wrong for one of these, suspect this number first.
 _NF_APPROX_WEIGHTS_RAW = {
+    "TCS":        3.50,    # TATA CONSULTANCY SERVICES — re-added 2026-09-21, see NF_ALL_STOCKS above;
+                           # approximate like every other value in this block (not an NSE factsheet figure)
     "ITC":        3.90,    # ITC
     "HCLTECH":    1.35,    # HCL TECHNOLOGIES
     "HINDUNILVR": 2.10,    # HINDUSTAN UNILEVER
@@ -550,29 +561,26 @@ SCAN_START_HOUR,  SCAN_START_MIN  = 9,  30   # entries allowed from here
 CUTOFF_HOUR,      CUTOFF_MIN      = 15, 0    # no new entries after this
 SESSION_END_HOUR, SESSION_END_MIN = 15, 30   # terminate session
 
-# ── Static: BN Strategy. BN_SIDEWAYS_RANGE_MIN/BN_MOMENTUM_THRESHOLD/
-# BN_ATR_PERIOD below are now UNUSED by bn_entry_exit.evaluate_entry —
-# its sideways-range/momentum/volume-surge/composite-indicator gate
-# sequence was replaced entirely on 2026-09-19 (explicit user decision)
-# with a much simpler rule (see BN_SAME_DIRECTION_REQUIRED below); kept
-# here rather than deleted only because BN_QTY_THRESHOLD_ATTR-driven
-# _leader_qty_surge/_stock_qty_threshold (bn_entry_exit.py) still use the
-# qty-threshold constants further below for an unrelated, purely
-# informational "surged" annotation on the stockCandles payload.
-BN_SIDEWAYS_RANGE_MIN      = 12.0   # min 5-bar BankNifty close range to trade — UNUSED, see above
-BN_MOMENTUM_THRESHOLD      = 28.0   # fixed 5m momentum threshold (points) — UNUSED, see above
-BN_ATR_PERIOD               = 10    # UNUSED, see above
-# Entry condition (2026-09-19, explicit user decision, REPLACES the prior
-# multi-gate sequence entirely): of the 14 real NIFTY BANK stocks
-# (cfg.BN_ALL_STOCKS), at least this many must close the SAME direction
-# (green or red) on the just-closed 5m bar to fire BUY/SELL. See
-# bn_entry_exit.evaluate_entry.
-BN_SAME_DIRECTION_REQUIRED  = 9     # of 14 real NIFTY BANK stocks must agree
-BN_ENTRY_COOLDOWN_S         = 60    # no new entry within this long of the last exit
+# ── Static: BN Strategy.
+#
+# BN_SAME_DIRECTION_REQUIRED is the ONLY survivor of the old (2026-09-19)
+# leader-vote rule and the (2026-07-era) sideways-range/momentum/volume-
+# surge/composite-indicator gate sequence before it — both fully REMOVED
+# 2026-09-21 alongside app/engine/bn_signals.py/nf_signals.py (which
+# implemented them) once the Top-8 weighted-basket scalp strategy replaced
+# bn_entry_exit.evaluate_entry entirely (see "Static: Scalping strategy"
+# below). It survives ONLY because app/backtest/signal_study.py — a
+# standalone historical-analysis tool, entirely separate from the live/
+# backtest trading engine, never called by evaluate_entry/evaluate_exit —
+# still reads it for its own "what would the old leader-vote rule have
+# done" study. If signal_study.py is ever removed too, this can go with it.
+BN_SAME_DIRECTION_REQUIRED  = 9     # of 14 real NIFTY BANK stocks must agree — signal_study.py only, see above
 
 # BN Strategy — per-stock volume-surge thresholds, compared against each
 # leader's latest 5m bar volume (see BN_QTY_THRESHOLD_ATTR above and
-# bn_entry_exit._leader_qty_surge). Calibrated 2026-07-27 from ~15 live
+# bn_entry_exit._leader_qty_surge) — an unrelated, purely informational
+# "surged" annotation on the stockCandles payload's Big Trades panel, NOT
+# part of the trading decision. Calibrated 2026-07-27 from ~15 live
 # bars/stock (~1.5x each stock's observed average bar volume, so a genuine
 # spike is needed to fire, not every bar):
 #   HDFC ~37.5k avg -> 55k | ICICI ~32.3k avg -> 48k | AXIS ~18.7k avg -> 28k
@@ -585,37 +593,21 @@ BN_QTY_THRESHOLD_KOTAK      = 43_000.0
 BN_QTY_THRESHOLD_INDUSIND   = 16_500.0
 BN_QTY_INTERVAL_MULTIPLIER  = 1.0
 
-# BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring) —
-# UNUSED by bn_entry_exit.evaluate_entry since the 2026-09-19 rewrite (see
-# BN_SAME_DIRECTION_REQUIRED above); kept only in case this gate is ever
-# reintroduced as a secondary filter.
+# Sizes the IV-estimate lookback window (app.engine.bn_pricing.estimate_iv
+# is fed a slice of this many closes — see scheduler.py/backtest/data.py/
+# backtest/engine.py) and backtest's warmup-days calculation. Originally
+# sized for the now-removed composite RSI/MACD/EMA indicator gate's own
+# convergence requirement (hence the name) — repurposed, not dead, so it
+# stays; the RSI/EMA/MACD/pattern-score constants that gate actually used
+# were removed with bn_signals.py itself.
 BN_INDICATOR_LOOKBACK_BARS = 200
-BN_RSI_PERIOD          = 14
-BN_EMA_FAST            = 20
-BN_EMA_SLOW            = 50
-BN_MACD_FAST           = 12
-BN_MACD_SLOW           = 26
-BN_RSI_BULL_LEVEL      = 58
-BN_RSI_BEAR_LEVEL      = 42
-BN_RSI_OVERBOUGHT      = 72
-BN_RSI_OVERSOLD        = 28
-BN_EMA_EXTENSION_PCT   = 1.2
-BN_SCORE_MIN           = 2.0
-BN_SCORE_MARGIN        = 0.9
 
-# BN Risk — target/stop/trailing on the underlying BankNifty index (points).
-# Target/stop changed 2026-09-19 (explicit user decision, alongside the
-# BN_SAME_DIRECTION_REQUIRED entry-condition rewrite above) from 35/18 to a
-# much tighter 1/10 — a deliberately asymmetric risk-reward the user chose.
-# BN_BREAKEVEN_TRIGGER/BN_TRAIL_TRIGGER below are now effectively inert as a
-# side effect (they're larger than the 1pt target, so target/stop always
-# resolves the trade first) — left unchanged since only target/stop were
-# asked for; harmless, not a bug.
-BN_TARGET_POINTS      = 1.0
-BN_STOPLOSS_POINTS    = 10.0
-BN_BREAKEVEN_TRIGGER  = 12.0
-BN_TRAIL_TRIGGER      = 18.0
-BN_TRAIL_DISTANCE     = 12.0
+# BN Risk — starting paper-account balance. The old index-points target/
+# stop/breakeven/trail constants (BN_TARGET_POINTS etc.) were removed
+# 2026-09-21 alongside the scalp-strategy rewrite — see BN_SCALP_TARGET_RS/
+# STOP_RS/TIME_STOP_S under "Static: Scalping strategy" below, which are
+# premium-₹-denominated, not index-points, and frozen into the trade the
+# same way these used to be.
 BN_STARTING_FUNDS     = 100_000.0   # ₹ — seeds the persisted funds balance once
 
 # BN Options Pricing — synthetic Black-Scholes premium, no real option data
@@ -639,22 +631,20 @@ BN_COST_SEBI_PCT       = 0.000001    # SEBI turnover fee
 # Tick-wise engine
 TICK_EVAL_INTERVAL_MS = 100
 
-# ── Static: NF (Nifty 50) Strategy — parallel to the BN block above. Point-
-# based thresholds (sideways/momentum/target/stop/breakeven/trail) start
-# scaled down ~0.45x from BN's own calibrated values, matching Nifty 50
-# trading at roughly 0.45x BankNifty's spot level (~25,000 vs ~55,000) — a
-# starting point only, same "recalibrate from live bars" caveat as BN's own
-# qty thresholds. Dimensionless gates (RSI/EMA/MACD periods, score levels)
-# reuse BN's exact defaults — those don't scale with spot price.
-NF_SIDEWAYS_RANGE_MIN      = 6.0    # min 5-bar Nifty 50 close range to trade
-NF_MOMENTUM_THRESHOLD      = 13.0   # fixed 5m momentum threshold (points)
-NF_ATR_PERIOD               = 10
-NF_SAME_DIRECTION_REQUIRED  = 6     # of 12 leaders must agree
-NF_ENTRY_COOLDOWN_S         = 60
+# ── Static: NF (Nifty 50) Strategy — parallel to the BN block above.
+#
+# The old sideways-range/momentum/leader-vote/volume-surge/composite-
+# indicator gate sequence (NF_SIDEWAYS_RANGE_MIN, NF_MOMENTUM_THRESHOLD,
+# NF_ATR_PERIOD, NF_SAME_DIRECTION_REQUIRED, NF_ENTRY_COOLDOWN_S, and the
+# RSI/EMA/MACD/score constants below) was fully REMOVED 2026-09-21 alongside
+# nf_signals.py (which implemented it) — see BN's equivalent comment above.
+# Unlike BN_SAME_DIRECTION_REQUIRED, NF's own version had no other reader
+# (no NF equivalent of signal_study.py exists), so it's gone with the rest.
 
 # NF Strategy — per-stock volume-surge thresholds. PLACEHOLDER values — no
 # live volume data yet for these stocks on this feed; calibrate the same way
-# BN's own thresholds were (see BN_QTY_THRESHOLD_* comment above).
+# BN's own thresholds were (see BN_QTY_THRESHOLD_* comment above). Same
+# "informational stockCandles annotation, not the trading decision" caveat.
 NF_QTY_THRESHOLD_HDFC       = 55_000.0
 NF_QTY_THRESHOLD_RELIANCE   = 40_000.0
 NF_QTY_THRESHOLD_ICICI      = 48_000.0
@@ -669,27 +659,10 @@ NF_QTY_THRESHOLD_SBI        = 18_000.0
 NF_QTY_THRESHOLD_HUL        = 15_000.0
 NF_QTY_INTERVAL_MULTIPLIER  = 1.0
 
-# NF Strategy — composite indicator gate (same dimensionless defaults as BN)
+# IV-estimate lookback window sizing — see BN_INDICATOR_LOOKBACK_BARS's
+# comment above (repurposed the same way, not dead).
 NF_INDICATOR_LOOKBACK_BARS = 200
-NF_RSI_PERIOD          = 14
-NF_EMA_FAST            = 20
-NF_EMA_SLOW            = 50
-NF_MACD_FAST           = 12
-NF_MACD_SLOW           = 26
-NF_RSI_BULL_LEVEL      = 58
-NF_RSI_BEAR_LEVEL      = 42
-NF_RSI_OVERBOUGHT      = 72
-NF_RSI_OVERSOLD        = 28
-NF_EMA_EXTENSION_PCT   = 1.2
-NF_SCORE_MIN           = 2.0
-NF_SCORE_MARGIN        = 0.9
 
-# NF Risk — target/stop/trailing on the underlying Nifty 50 index (points)
-NF_TARGET_POINTS      = 16.0
-NF_STOPLOSS_POINTS    = 8.0
-NF_BREAKEVEN_TRIGGER  = 5.5
-NF_TRAIL_TRIGGER      = 8.0
-NF_TRAIL_DISTANCE     = 5.5
 # No NF_STARTING_FUNDS — BN and NF share one paper account balance
 # (st.funds), seeded once from BN_STARTING_FUNDS; see scheduler._load_funds.
 
@@ -709,6 +682,145 @@ NF_COST_STT_SELL_PCT   = 0.001
 NF_COST_TXN_PCT        = 0.0005
 NF_COST_GST_PCT        = 0.18
 NF_COST_SEBI_PCT       = 0.000001
+
+# ── Static: Scalping strategy — Top-8 weighted-basket VWAP momentum + deep-
+# ITM strike + weighted-order-book-imbalance (W-OBI) execution filter + a
+# 12-second target/stop/time-scratch lifecycle. REPLACES the leader-vote/
+# composite-indicator entry condition and the index-points target/stop
+# above for BOTH instruments (2026-09-21, explicit user decision) — see
+# app/engine/bn_entry_exit.py / nf_entry_exit.py's rewritten evaluate_entry/
+# evaluate_exit. bn_signals.py/nf_signals.py and the BN_SIDEWAYS_RANGE_MIN-
+# style constants above are left in place, unused, per this repo's existing
+# revert-safety convention (see the 2026-09-19 BN rewrite's own comments).
+#
+# Fully simulated, live AND backtest — no real broker/order-routing or
+# option order-book connection exists anywhere in this repo (see
+# app/engine/wobi.py's module docstring for why W-OBI is a documented
+# synthetic proxy, not real market depth, and CLAUDE.md's "Options pricing"
+# note for why strike/premium always were synthetic Black-Scholes too).
+#
+# Following the 2026-09-09 "remove all except threshold" precedent (see
+# this file's own module docstring + settings.py's), every value below is a
+# plain STATIC attribute, not a Settings-page dynamic tunable — restart-only
+# to change, same as everything else in this file (e.g. BN_STARTING_FUNDS
+# above).
+
+def _top_n_basket(weights: Dict[str, float], n: int) -> Dict[str, float]:
+    """Top `n` tokens by index weight, renormalized to sum to 1.0."""
+    top = sorted(weights.items(), key=lambda kv: -kv[1])[:n]
+    total = sum(w for _, w in top)
+    return {tok: w / total for tok, w in top}
+
+
+SCALP_BASKET_SIZE = 8
+
+# Top 8 of each index's own already-researched weight table (BN_INDEX_WEIGHTS/
+# NF_INDEX_WEIGHTS above — see their own "real weights" provenance comments),
+# renormalized to sum to 1.0 over just these 8. Restricted to
+# BN_INDEX_WEIGHTS_CONFIRMED/NF_INDEX_WEIGHTS_CONFIRMED FIRST — ranking over
+# the raw weight dicts directly would let an unconfirmed stock's flat
+# equal-weight PLACEHOLDER (e.g. Union Bank of India/Yes Bank at BankNifty's
+# 100/14=7.14%, since neither has ever had a real weight supplied — see
+# BN_INDEX_WEIGHTS_CONFIRMED's own comment above) outrank a real, smaller,
+# CONFIRMED weight (IndusInd Bank 6.28%, AU Small Finance Bank 5.55%) —
+# caught by inspection when this ranked Union Bank/Yes Bank into BN's top 8
+# ahead of both. For Nifty 50 this reproduces the user-supplied basket
+# almost exactly (HDFC Bank/Reliance/ICICI/Bharti Airtel/TCS/ITC/L&T/SBI all
+# rank in the real top 8); computed programmatically (not hand-copied) so a
+# future weight-table correction flows through automatically instead of
+# silently drifting out of sync.
+BN_SCALP_BASKET: Dict[str, float] = _top_n_basket(
+    {tok: w for tok, w in BN_INDEX_WEIGHTS.items() if tok in BN_INDEX_WEIGHTS_CONFIRMED},
+    SCALP_BASKET_SIZE)
+NF_SCALP_BASKET: Dict[str, float] = _top_n_basket(
+    {tok: w for tok, w in NF_INDEX_WEIGHTS.items() if tok in NF_INDEX_WEIGHTS_CONFIRMED},
+    SCALP_BASKET_SIZE)
+
+# Composite momentum score threshold (%, weighted sum of each basket leg's
+# (ltp-vwap)/vwap*100 — see app/engine/scalp_signals.compute_basket_reading).
+# Score is a small percentage (basket legs rarely deviate >0.5% from session
+# VWAP intraday), so this is deliberately a small number, not points.
+BN_SCALP_SCORE_THRESHOLD = 0.08
+NF_SCALP_SCORE_THRESHOLD = 0.08
+
+# Deep-ITM offset (points) from spot — CE: spot - offset, PE: spot + offset
+# (app/engine/bn_pricing.get_itm_strike / nf_pricing.get_itm_strike). NF's
+# 150 is the user-specified value (~3 strikes ITM at Nifty 50's real
+# 50-point strike step); BN's 300 is this repo's own equivalent for
+# BankNifty's real 100-point strike step (~3 strikes ITM the same way) —
+# BankNifty has no source-of-truth value for this the way NF's does.
+#
+# TESTED 2026-09-21 against this repo's own black_scholes (IV floor 0.20,
+# realistic T out to BankNifty's real ~30-day monthly cycle / NF's ~7-day
+# weekly one): NEITHER offset reliably clears delta > 0.75 except very
+# close to expiry — typical delta at these offsets runs ~0.58-0.72
+# depending on days-to-expiry, only crossing 0.75 within a day or so of
+# expiry. This is an explicit, confirmed user decision to keep both
+# offsets as-is anyway (treating "delta > 0.75" as an aspirational target
+# consistent with "a few strikes ITM," not a hard runtime guarantee) —
+# see the code-review conversation this was confirmed in. To actually
+# force delta > 0.75 across the full cycle would need a MUCH deeper
+# offset (roughly BN~1200+, NF~500+ per that same test), which was
+# considered too far from real strike liquidity to be worth it.
+BN_ITM_OFFSET_POINTS = 300.0
+NF_ITM_OFFSET_POINTS = 150.0
+
+# W-OBI execution filter minimum ratio — see app/engine/wobi.py. Same
+# formula and threshold for BOTH CE and PE entries: W-OBI is computed on
+# the CHOSEN option's OWN synthetic depth (not the underlying's), and for
+# either option type a bid-heavy top-2 book is what "path of least
+# resistance" means for someone about to go long that specific contract.
+BN_WOBI_MIN_RATIO = 2.5
+NF_WOBI_MIN_RATIO = 2.5
+
+# 12-second execution lifecycle — target/stop are on the OPTION PREMIUM
+# (₹), not the underlying index, and apply identically regardless of
+# CE/PE: either way this strategy is LONG one option leg, so "premium up
+# ₹target = win, premium down ₹stop = loss" needs no direction branching
+# (unlike the old index-points target/stop, which did). See
+# bn_entry_exit.evaluate_exit / nf_entry_exit.evaluate_exit.
+BN_SCALP_TARGET_RS   = 2.75   # user spec: ₹2.50–3.00 — midpoint
+BN_SCALP_STOP_RS     = 2.00
+NF_SCALP_TARGET_RS   = 2.75
+NF_SCALP_STOP_RS     = 2.00
+
+# Hard time-stop (seconds) — if neither target nor stop is touched first,
+# force a scratch exit the instant this elapses. Checked every
+# TICK_EVAL_INTERVAL_MS (100ms) tick against (now - trade.entry_time), NOT
+# a separate asyncio.sleep(12)-based task — see the handover note on why:
+# short version, the existing 100ms tick loop already re-evaluates every
+# open trade ~120x within a 12s window, so a second concurrent timer task
+# racing to mutate the SAME st.active_trade/st.active_trade_nf (this
+# engine's hard "at most one active trade" invariant, see CLAUDE.md) would
+# only add risk, not precision.
+BN_SCALP_TIME_STOP_S = 12.0
+NF_SCALP_TIME_STOP_S = 12.0
+
+# Marketable-exit slippage (₹) modeled on a forced time-scratch — "cancel
+# the resting passive target order and fire a marketable limit exit (Bid-1
+# tick)" crosses the spread, so the fill is a little worse than the
+# last-marked premium. Same idea as the existing (index-side) SLIPPAGE_BPS
+# backtest convention, just premium-denominated here since that's what this
+# strategy's exit is denominated in.
+BN_SCALP_SCRATCH_SLIPPAGE_RS = 0.10
+NF_SCALP_SCRATCH_SLIPPAGE_RS = 0.10
+
+# Cooldown between scalp trades — much shorter than the old (now-removed)
+# 60s BN_ENTRY_COOLDOWN_S/NF_ENTRY_COOLDOWN_S, since a trade now resolves
+# in ~12s, not minutes.
+BN_SCALP_COOLDOWN_S = 15.0
+NF_SCALP_COOLDOWN_S = 15.0
+
+# ── Risk guardrails (shared by BOTH instruments — one set of limits, not a
+# separate pair per instrument): trading windows + a hard cap on executed
+# trades/day, enforced inside evaluate_entry for the algo path and again
+# inside bn_trade.place_paper_order/nf_trade.place_paper_order (covers the
+# manual-order path too — see there) so nothing can exceed it either way.
+SCALP_WINDOW1_START_HOUR, SCALP_WINDOW1_START_MIN = 9, 45
+SCALP_WINDOW1_END_HOUR,   SCALP_WINDOW1_END_MIN   = 11, 15
+SCALP_WINDOW2_START_HOUR, SCALP_WINDOW2_START_MIN = 13, 45
+SCALP_WINDOW2_END_HOUR,   SCALP_WINDOW2_END_MIN   = 14, 45
+SCALP_MAX_TRADES_PER_DAY = 5
 
 # ── Dynamic tunables — hard defaults. Only BN/NF Alerts remain here (2026-
 # 09-09, explicit user decision "remove all except threshold") — everything

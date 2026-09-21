@@ -67,6 +67,11 @@ class AppState:
         # ── Latest entry-loop diagnostic ("why didn't it fire") for the dashboard ─
         self.bn_diagnostic: Optional[BNDiagnostic] = None
         self.last_evaluated_bar: Optional[str]     = None   # dedupe: one eval per closed bar
+        # Scalp strategy (2026-09-21) risk guardrail: trades OPENED today,
+        # for cfg.SCALP_MAX_TRADES_PER_DAY — reset every EOD alongside
+        # closed_trades. Shared trading-window guardrail needs no state
+        # (pure function of wall-clock time — see bn_entry_exit._in_trading_window).
+        self.bn_trades_today: int = 0
 
         # ── Live-price ticker push (100ms delta broadcast) ────────────────────
         self.dirty_ticks_push: set = set()
@@ -101,6 +106,7 @@ class AppState:
         self.last_exit_time_nf:    Optional[str]      = None
         self.nf_diagnostic:        Optional[NFDiagnostic] = None
         self.last_evaluated_bar_nf: Optional[str]     = None
+        self.nf_trades_today: int = 0   # NF mirror of bn_trades_today above
 
         # ── Real-option-LTP paper trading (2026-09-17, live-only, explicit
         # user decision) — market_data_service self-registers here (see
