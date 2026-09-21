@@ -37,38 +37,53 @@ def get_atm_strike(spot: float) -> int:
     return int(round(spot / 100.0) * 100)
 
 
-def build_option_symbol(underlying: str, expiry: datetime, strike: int, option_type: str) -> str:
+def build_monthly_option_symbol(underlying: str, expiry: datetime, strike: int, option_type: str) -> str:
     """
-    Real vendor option-instrument symbol for a given underlying/expiry/
-    strike/type, e.g. "BANKNIFTY17SEP56400CE" — feeds the real-option-LTP
-    paper-trading feature (2026-09-17, explicit user decision; live only,
-    never called from backtest). Format (UNDERLYING + zero-padded day-of-
-    month + 3-letter uppercase month, no year digit + strike + CE/PE) is
-    inferred from a user-supplied vendor instrument-master export, NOT
-    independently confirmed against the live feed (the vendor's REST
-    endpoint was unreachable — connection timeout — when this was built).
-    If a subscribed option symbol never produces a real tick, suspect this
-    format first (same gotcha class as the Kotak Bank naming issue) —
-    reusable by both bn_entry_exit.py (cfg.BN_OPTION_UNDERLYING) and
-    nf_entry_exit.py (cfg.NF_OPTION_UNDERLYING, via nf_pricing.py's re-export).
+    Real vendor MONTHLY option-instrument symbol, e.g. "BANKNIFTY26SEP56400CE"
+    — UNDERLYING + 2-digit year + 3-letter uppercase month + strike + CE/PE,
+    with NO day-of-month: a monthly contract's expiry day is implied/fixed
+    (see get_next_expiry below), so NSE's real trading-symbol convention
+    omits it entirely. Used for BankNifty, which NSE restricted to monthly/
+    quarterly expiry only (discontinuing weekly contracts, effective
+    2025-09-01 — see CLAUDE.md's "External dependencies" note and
+    get_next_expiry below). Feeds the real-option-LTP paper-trading feature
+    (2026-09-17/19, explicit user decision; live only, never called from
+    backtest) — matches a real 2026-09-18 example row from a user-supplied
+    vendor instrument-master export ("BANKNIFTY26SEP22300CE" — "26" is the
+    YEAR there, not a day, a mis-read corrected 2026-09-19) but is still
+    NOT independently confirmed against the live feed for a CURRENT
+    contract — if a subscribed symbol never produces a real tick, suspect
+    this format first (same gotcha class as the Kotak Bank naming issue).
     """
-    return f"{underlying}{expiry.strftime('%d%b').upper()}{strike}{option_type}"
+    return f"{underlying}{expiry.strftime('%y%b').upper()}{strike}{option_type}"
 
 
 def get_next_expiry(now: datetime) -> datetime:
     """
-    Next weekly Thursday 15:30 IST. If `now` IS a Thursday past 15:30, the
-    week's expiry has already happened intraday — roll to next week's.
+    BankNifty's real expiry: MONTHLY, on the LAST TUESDAY of the month,
+    15:30 IST — NSE discontinued BankNifty weekly options and moved the
+    monthly/quarterly expiry day from Thursday to Tuesday, both effective
+    2025-09-01 (confirmed via web search 2026-09-19; see CLAUDE.md). If the
+    current month's last Tuesday has already passed (the date is past, or
+    it's today but past 15:30), rolls to next month's last Tuesday.
     """
     if now.tzinfo is None:
         now = now.replace(tzinfo=IST)
-    weekday = now.weekday()          # Mon=0 .. Sun=6; Thursday=3
-    days_until = (3 - weekday) % 7
-    expiry = (now + timedelta(days=days_until)).replace(
-        hour=15, minute=30, second=0, microsecond=0)
-    if days_until == 0 and now > expiry:
-        expiry += timedelta(days=7)
+    expiry = _last_tuesday_of_month(now.year, now.month)
+    if now > expiry:
+        year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+        expiry = _last_tuesday_of_month(year, month)
     return expiry
+
+
+def _last_tuesday_of_month(year: int, month: int) -> datetime:
+    """15:30 IST on the last Tuesday of (year, month)."""
+    first_of_next = (datetime(year + 1, 1, 1, tzinfo=IST) if month == 12
+                     else datetime(year, month + 1, 1, tzinfo=IST))
+    last_day = first_of_next - timedelta(days=1)
+    offset = (last_day.weekday() - 1) % 7   # Tuesday = 1
+    last_tue = last_day - timedelta(days=offset)
+    return last_tue.replace(hour=15, minute=30, second=0, microsecond=0)
 
 
 def time_to_expiry_years(now: datetime, expiry: datetime) -> float:

@@ -61,6 +61,16 @@
     .trade-cell .val { font-size: 14px; font-weight: 700; color: var(--txt); }
     @media (max-width: 640px) { .trade-card { grid-template-columns: repeat(2, 1fr); } }
 
+    /* Live ATM CE/PE watchlist (2026-09-18) — label and price sit close
+       together, NOT spread to the row's far edge (that was .gate-row's
+       space-between layout, meant for a full-width gate list, not a
+       compact price quote). */
+    .atm-watch-row {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 3px 0; font-size: 12px; color: var(--txt-2);
+    }
+    .atm-watch-row .val { font-weight: 700; color: var(--txt); }
+
     /* Entry loop diagnostics */
     .entry-summary {
       padding: 8px; border-radius: var(--r-sm); text-align: center;
@@ -172,8 +182,33 @@
         <span class="panel-title">BankNifty Active Trade <span class="badge gray" id="trade-badge">none</span></span>
       </div>
       <div class="panel-body dash-body">
+        <!-- Live ATM CE/PE watchlist (2026-09-18) — real market LTP for the
+             current at-the-money strike, independent of trade state; see
+             CLAUDE.md's "Live ATM CE/PE watchlist" note. -->
+        <div id="atm-watch"></div>
+
         <div id="trade-empty" class="muted-text" style="padding:8px 2px;">No active trade.</div>
         <div id="trade-card" class="trade-card" style="display:none;"></div>
+
+        <!-- Kite-style manual order form — restored 2026-09-18 (was previously
+             removed along with the old Trade Dashboard panel; kiteForm.js's
+             logic survived untouched, only this markup was missing). Places/
+             closes the SAME st.active_trade the automated strategy uses —
+             see CLAUDE.md's "Kite-style manual-order form" note. ────────── -->
+        <div class="kite-toggle-row">
+          <button class="kite-toggle buy active" id="kite-buy" onclick="kiteSetType('BUY', KITE_IDS_BN)">BUY (CE)</button>
+          <button class="kite-toggle sell" id="kite-sell" onclick="kiteSetType('SELL', KITE_IDS_BN)">SELL (PE)</button>
+        </div>
+        <div class="kite-form">
+          <label class="field-label">Avail. Funds
+            <input class="field-input" id="kite-funds" readonly>
+          </label>
+        </div>
+        <div class="kite-actions">
+          <button class="btn-run" id="kite-submit-btn" onclick="kiteSubmitOrder(KITE_IDS_BN)">Submit</button>
+          <button class="btn-mini" onclick="manualExit(KITE_IDS_BN)">Exit</button>
+        </div>
+        <div class="kite-status" id="kite-status"></div>
       </div>
     </div>
 
@@ -182,8 +217,65 @@
         <span class="panel-title">Nifty 50 Active Trade <span class="badge gray" id="trade-badge-nf">none</span></span>
       </div>
       <div class="panel-body dash-body">
+        <!-- NF mirror of the BankNifty live ATM watchlist above. -->
+        <div id="atm-watch-nf"></div>
+
         <div id="trade-empty-nf" class="muted-text" style="padding:8px 2px;">No active trade.</div>
         <div id="trade-card-nf" class="trade-card" style="display:none;"></div>
+
+        <!-- NF mirror of the BankNifty manual order form above — new
+             2026-09-18, no prior version existed (NF had no manual-order
+             backend before this). -->
+        <div class="kite-toggle-row">
+          <button class="kite-toggle buy active" id="kite-buy-nf" onclick="kiteSetType('BUY', KITE_IDS_NF)">BUY (CE)</button>
+          <button class="kite-toggle sell" id="kite-sell-nf" onclick="kiteSetType('SELL', KITE_IDS_NF)">SELL (PE)</button>
+        </div>
+        <div class="kite-form">
+          <label class="field-label">Avail. Funds
+            <input class="field-input" id="kite-funds-nf" readonly>
+          </label>
+        </div>
+        <div class="kite-actions">
+          <button class="btn-run" id="kite-submit-btn-nf" onclick="kiteSubmitOrder(KITE_IDS_NF)">Submit</button>
+          <button class="btn-mini" onclick="manualExit(KITE_IDS_NF)">Exit</button>
+        </div>
+        <div class="kite-status" id="kite-status-nf"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Today's Trades — re-added 2026-09-19 after being dropped along with
+       the old Trade Dashboard panels; renderClosedTrades() in dashboard.js
+       already existed and was a silent no-op with these DOM ids missing
+       entirely (same pattern as the Active Trade panel / Kite form
+       earlier). Merges closedTrades (BN) + closedTradesNf into one table,
+       filtered by the SAME Both/BankNifty/Nifty 50 selector as everything
+       else — no data-instr attribute needed on the panel itself, the
+       filtering happens inside renderClosedTrades. ─────────────────────── -->
+  <div class="col">
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Today's Trades <span class="badge gray" id="closed-count">0</span></span>
+        <div>
+          <button class="dash-toggle" data-target="closed-trades-body" onclick="toggleSection(this)">▼</button>
+        </div>
+      </div>
+      <div class="panel-body dash-body" id="closed-trades-body">
+        <div class="tbl-wrap">
+          <table class="cardify">
+            <thead>
+              <tr>
+                <th>Instr</th><th>Dir</th><th>Option</th><th>Entry Time</th><th>Exit Time</th>
+                <th>Entry Idx</th><th>Exit Idx</th><th>Entry Prem</th><th>Exit Prem</th><th>Outcome</th><th>P&amp;L ₹</th>
+              </tr>
+            </thead>
+            <tbody id="closed-tbody">
+              <tr><td colspan="11" class="empty-cell">No trades yet today</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -296,8 +388,8 @@
 <script src="/js/util.js?v=49"></script>
 <script src="/js/breakout.js?v=53"></script>
 <script src="/js/qtyAudit.js?v=49"></script>
-<script src="/js/kiteForm.js?v=49"></script>
+<script src="/js/kiteForm.js?v=50"></script>
 <script src="/js/alerts.js?v=50"></script>
-<script src="/js/dashboard.js?v=50"></script>
+<script src="/js/dashboard.js?v=53"></script>
 </body>
 </html>

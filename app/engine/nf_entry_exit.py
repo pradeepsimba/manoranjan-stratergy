@@ -17,7 +17,7 @@ import numpy as np
 import app.config as cfg
 from app.engine.nf_pricing import (
     black_scholes,
-    build_option_symbol,
+    build_weekly_option_symbol,
     estimate_iv,
     get_atm_strike,
     get_next_expiry,
@@ -252,7 +252,7 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
         initial_sl = signal.entry_index_price + stoploss_points
 
     option_type = "CE" if signal.direction == "BUY" else "PE"
-    option_symbol = build_option_symbol(
+    option_symbol = build_weekly_option_symbol(
         cfg.NF_OPTION_UNDERLYING, datetime.fromisoformat(signal.expiry), signal.strike, option_type)
 
     return NFTrade(

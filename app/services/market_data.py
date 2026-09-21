@@ -78,6 +78,14 @@ class MarketDataService:
         # only spun up once a trade actually needs it.
         self._bn_option: Optional[tuple] = None   # (stock_symbol, stockname) or None
         self._nf_option: Optional[tuple] = None
+        # Live ATM CE/PE watchlist (2026-09-18) — a SECOND pair of slots on
+        # this same dedicated connection, independent of _bn_option/
+        # _nf_option above: those track one trade's strike, FROZEN at entry;
+        # these track whatever the CURRENT live ATM strike is, set by
+        # SchedulerService._tick_atm_watch every time it changes, regardless
+        # of whether a trade is open. Each holds (ce_symbol, pe_symbol).
+        self._bn_atm_watch: Optional[tuple] = None
+        self._nf_atm_watch: Optional[tuple] = None
         self._option_task: Optional[asyncio.Task] = None
         self._option_filters: list = []
         # stock_symbol (token) -> this app's own internal ALL-CAPS display
@@ -141,21 +149,66 @@ class MarketDataService:
         self._nf_option = (stock_symbol, stockname) if stock_symbol else None
         self._resync_option_connection()
 
+    # ── Live ATM CE/PE watchlist ─────────────────────────────────────────────
+    # Called by SchedulerService._tick_atm_watch whenever the live ATM strike
+    # changes (not every tick — only on an actual change). Unlike
+    # set_bn_option_symbol above, this always resets the cached LTPs to None
+    # — a strike change means the PREVIOUS strike's price is no longer
+    # relevant, and holding onto it would show a stale/wrong-strike price
+    # until the new strike's first real tick arrives.
+
+    def set_bn_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str]) -> None:
+        self._bn_atm_watch = (ce_symbol, pe_symbol) if (ce_symbol and pe_symbol) else None
+        self.state.bn_atm_ce_symbol = ce_symbol
+        self.state.bn_atm_pe_symbol = pe_symbol
+        self.state.bn_atm_ce_ltp = None
+        self.state.bn_atm_pe_ltp = None
+        self._resync_option_connection()
+
+    def set_nf_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str]) -> None:
+        self._nf_atm_watch = (ce_symbol, pe_symbol) if (ce_symbol and pe_symbol) else None
+        self.state.nf_atm_ce_symbol = ce_symbol
+        self.state.nf_atm_pe_symbol = pe_symbol
+        self.state.nf_atm_ce_ltp = None
+        self.state.nf_atm_pe_ltp = None
+        self._resync_option_connection()
+
     def _resync_option_connection(self) -> None:
         """
         Recomputes the option connection's desired filter set from
-        _bn_option/_nf_option and, if it actually changed, tears down and
-        reconnects that one dedicated connection with the new set. The
-        vendor's LIVE_FEED_INIT protocol only has an observed "subscribe at
-        connect time" shape (no separate incremental-subscribe message), so
-        a reconnect is the only way to change what this connection streams —
-        acceptable since trades open/close far less often than ticks arrive.
+        _bn_option/_nf_option/_bn_atm_watch/_nf_atm_watch and, if it actually
+        changed, tears down and reconnects that one dedicated connection
+        with the new set. The vendor's LIVE_FEED_INIT protocol only has an
+        observed "subscribe at connect time" shape (no separate incremental-
+        subscribe message), so a reconnect is the only way to change what
+        this connection streams — acceptable since trades open/close far
+        less often than ticks arrive.
+
+        CONFIRMED 2026-09-18 (after two earlier rounds of testing wrongly
+        concluded this vendor carries no option data at all): options here
+        are 1-MINUTE only, not 5m like everything else in this app — a
+        `"interval": "5m"` request for an option symbol silently returns
+        nothing, at both the REST and WS layer, which is exactly what
+        produced that wrong conclusion. `stockname` for an option is the
+        underlying's plain name ("NIFTY"/"BANKNIFTY" — cfg.BN_OPTION_
+        UNDERLYING/NF_OPTION_UNDERLYING), confirmed from the vendor's own
+        echoed tick data — NOT the option symbol itself repeated.
         """
         pairs = [p for p in (self._bn_option, self._nf_option) if p]
         merged = {}
         for sym, name in pairs:
             merged[sym] = name   # dedupe — harmless if BN/NF ever pick the identical symbol
-        new_filters = [{"stock_symbol": sym, "stockname": name, "interval": "5m"}
+        # ATM watchlist entries are (ce_symbol, pe_symbol) pairs, not
+        # (stock_symbol, stockname) like _bn_option/_nf_option above.
+        if self._bn_atm_watch:
+            ce, pe = self._bn_atm_watch
+            merged[ce] = cfg.BN_OPTION_UNDERLYING
+            merged[pe] = cfg.BN_OPTION_UNDERLYING
+        if self._nf_atm_watch:
+            ce, pe = self._nf_atm_watch
+            merged[ce] = cfg.NF_OPTION_UNDERLYING
+            merged[pe] = cfg.NF_OPTION_UNDERLYING
+        new_filters = [{"stock_symbol": sym, "stockname": name, "interval": "1m"}
                        for sym, name in merged.items()]
         if new_filters == self._option_filters:
             return
@@ -277,23 +330,42 @@ class MarketDataService:
     def _process_tick(self, n: dict) -> None:
         symbol    = n.get("stock_symbol", "")
         interval  = n.get("interval",     "")
-        if not symbol or interval != "5m":
+        if not symbol:
             return
 
-        # Real-option-LTP dynamic subscription (2026-09-17) — an option tick
-        # never touches candles_5m/ltp (those are documented as "the fixed
-        # BN/NF stock universe only"); it only updates whichever active
-        # trade's option_symbol it matches (see set_bn_option_symbol/
-        # set_nf_option_symbol above), refreshing that trade's live price
-        # mark and flipping its one-way premium_synthetic latch. Checked
-        # before the qty/candle-construction work below, which would be
-        # wasted effort for a tick outside the fixed universe.
+        # Real-option-LTP dynamic subscription (2026-09-17) + live ATM CE/PE
+        # watchlist (2026-09-18) — neither ever touches candles_5m/ltp (those
+        # are documented as "the fixed BN/NF stock universe only"); each just
+        # updates whichever option/watch symbol it matches (see
+        # set_bn_option_symbol/set_nf_option_symbol and set_bn_atm_watch/
+        # set_nf_atm_watch above). The active-trade match also flips that
+        # trade's one-way premium_synthetic latch; the watchlist match is a
+        # plain live cache (no latch — it's not tied to a specific trade, so
+        # there's nothing to "freeze the entry value of"). Checked before the
+        # 5m-only gate below and before the qty/candle-construction work,
+        # which would be wasted effort for a tick outside the fixed universe.
+        #
+        # CONFIRMED 2026-09-18: this vendor streams options at 1-MINUTE
+        # granularity ONLY, not 5m like everything else here — the original
+        # version of this method required interval == "5m" unconditionally
+        # BEFORE this symbol-match check even ran, which silently discarded
+        # every real option tick and produced two rounds of (wrong)
+        # "this vendor has no option data at all" testing before the actual
+        # cause was found. Options ticks are always "1m" — checked explicitly
+        # so a future vendor protocol quirk can't silently disable this path
+        # the same way again.
         st = self.state
         active_bn = st.active_trade
         active_nf = st.active_trade_nf
         is_bn_opt = active_bn is not None and active_bn.option_symbol and symbol == active_bn.option_symbol
         is_nf_opt = active_nf is not None and active_nf.option_symbol and symbol == active_nf.option_symbol
-        if is_bn_opt or is_nf_opt:
+        is_bn_atm_ce = st.bn_atm_ce_symbol and symbol == st.bn_atm_ce_symbol
+        is_bn_atm_pe = st.bn_atm_pe_symbol and symbol == st.bn_atm_pe_symbol
+        is_nf_atm_ce = st.nf_atm_ce_symbol and symbol == st.nf_atm_ce_symbol
+        is_nf_atm_pe = st.nf_atm_pe_symbol and symbol == st.nf_atm_pe_symbol
+        if is_bn_opt or is_nf_opt or is_bn_atm_ce or is_bn_atm_pe or is_nf_atm_ce or is_nf_atm_pe:
+            if interval != "1m":
+                return
             ltp = 0.0
             if "ltp" in n:
                 ltp_raw = str(n["ltp"])
@@ -309,6 +381,13 @@ class MarketDataService:
                 if is_nf_opt:
                     st.nf_option_ltp = ltp
                     active_nf.premium_synthetic = False
+                if is_bn_atm_ce: st.bn_atm_ce_ltp = ltp
+                if is_bn_atm_pe: st.bn_atm_pe_ltp = ltp
+                if is_nf_atm_ce: st.nf_atm_ce_ltp = ltp
+                if is_nf_atm_pe: st.nf_atm_pe_ltp = ltp
+            return
+
+        if interval != "5m":
             return
 
         # Real per-trade quantity, embedded as "...qty N..." inside the

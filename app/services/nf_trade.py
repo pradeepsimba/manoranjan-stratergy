@@ -32,9 +32,11 @@ def place_paper_order(signal: NFSignal, now: datetime) -> NFTrade:
     st.active_trade_nf = trade
     st.last_trade_candle_nf = signal.bar_time
     st.nf_option_ltp = None   # fresh — any stale value from a prior trade must not leak in
-    # NF mirror of bn_trade.place_paper_order's real-option-LTP wiring.
+    # NF mirror of bn_trade.place_paper_order's real-option-LTP wiring —
+    # stockname is the underlying's plain name ("NIFTY"), not the option
+    # symbol repeated (see bn_trade.py's comment for why).
     if st.market_data_service is not None:
-        st.market_data_service.set_nf_option_symbol(trade.option_symbol, trade.option_symbol)
+        st.market_data_service.set_nf_option_symbol(trade.option_symbol, cfg.NF_OPTION_UNDERLYING)
 
     print(
         f"[PAPER][NF] {trade.direction} {trade.option_type} {trade.strike} @ premium "

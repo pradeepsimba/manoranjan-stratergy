@@ -86,11 +86,12 @@ BN_INDEX_NAME = "BANKNIFTY"
 BN_INDEX_TOKEN = "BANKNIFTY"   # was "NIFTY BANK", before that "26009" — both unconfirmed guesses
 
 # Options-underlying symbol prefix used to build a real option instrument
-# symbol (e.g. "BANKNIFTY17SEP56400CE") for the paper-trading engine's real-
-# LTP feature (2026-09-17, explicit user decision — see app/engine/
-# bn_pricing.build_option_symbol). Same as BN_INDEX_TOKEN for BankNifty, but
-# kept as its own constant since NF's equivalent (NF_OPTION_UNDERLYING,
-# below) deliberately differs from NF_INDEX_TOKEN.
+# symbol (e.g. "BANKNIFTY26SEP56400CE" — monthly, no day; see app/engine/
+# bn_pricing.build_monthly_option_symbol) for the paper-trading engine's
+# real-LTP feature (2026-09-17, explicit user decision). Same as
+# BN_INDEX_TOKEN for BankNifty, but kept as its own constant since NF's
+# equivalent (NF_OPTION_UNDERLYING, below) deliberately differs from
+# NF_INDEX_TOKEN.
 BN_OPTION_UNDERLYING = BN_INDEX_TOKEN
 
 # The 6 stocks that actually drive the trade decision (leader-vote + BN
@@ -274,9 +275,11 @@ NF_INDEX_TOKEN = "NIFTY 50"
 # above) — deliberately "NIFTY", NOT NF_INDEX_TOKEN's "NIFTY 50": real NSE
 # Nifty 50 index options trade under the plain "NIFTY" underlying symbol,
 # unlike the index/stock candle data feed's "NIFTY 50" (with the space).
-# Unverified against the live vendor feed (connection was down when this was
-# added) — if a real option subscription silently returns no ticks, suspect
-# this value first (same gotcha class as the Kotak Bank naming issue).
+# Confirmed correct 2026-09-19 against a real user-supplied example symbol
+# ("NIFTY2692223250PE" — see app/engine/nf_pricing.build_weekly_option_symbol)
+# — but this vendor's feed still doesn't stream any option data at all under
+# that (or any other) symbol, confirmed via direct WS/REST probing the same
+# day; see CLAUDE.md's "Real-option-LTP paper trading" note.
 NF_OPTION_UNDERLYING = "NIFTY"
 
 # The 12 highest-weighted of the 32 (by real-world NSE index weight) — drive
@@ -547,12 +550,24 @@ SCAN_START_HOUR,  SCAN_START_MIN  = 9,  30   # entries allowed from here
 CUTOFF_HOUR,      CUTOFF_MIN      = 15, 0    # no new entries after this
 SESSION_END_HOUR, SESSION_END_MIN = 15, 30   # terminate session
 
-# ── Static: BN Strategy — sideways / momentum / leader-vote / volume-surge
-# gates. Same 2026-09-09 move-to-static as session timings above.
-BN_SIDEWAYS_RANGE_MIN      = 12.0   # min 5-bar BankNifty close range to trade
-BN_MOMENTUM_THRESHOLD      = 28.0   # fixed 5m momentum threshold (points)
-BN_ATR_PERIOD               = 10
-BN_SAME_DIRECTION_REQUIRED  = 3     # of 6 leaders must agree
+# ── Static: BN Strategy. BN_SIDEWAYS_RANGE_MIN/BN_MOMENTUM_THRESHOLD/
+# BN_ATR_PERIOD below are now UNUSED by bn_entry_exit.evaluate_entry —
+# its sideways-range/momentum/volume-surge/composite-indicator gate
+# sequence was replaced entirely on 2026-09-19 (explicit user decision)
+# with a much simpler rule (see BN_SAME_DIRECTION_REQUIRED below); kept
+# here rather than deleted only because BN_QTY_THRESHOLD_ATTR-driven
+# _leader_qty_surge/_stock_qty_threshold (bn_entry_exit.py) still use the
+# qty-threshold constants further below for an unrelated, purely
+# informational "surged" annotation on the stockCandles payload.
+BN_SIDEWAYS_RANGE_MIN      = 12.0   # min 5-bar BankNifty close range to trade — UNUSED, see above
+BN_MOMENTUM_THRESHOLD      = 28.0   # fixed 5m momentum threshold (points) — UNUSED, see above
+BN_ATR_PERIOD               = 10    # UNUSED, see above
+# Entry condition (2026-09-19, explicit user decision, REPLACES the prior
+# multi-gate sequence entirely): of the 14 real NIFTY BANK stocks
+# (cfg.BN_ALL_STOCKS), at least this many must close the SAME direction
+# (green or red) on the just-closed 5m bar to fire BUY/SELL. See
+# bn_entry_exit.evaluate_entry.
+BN_SAME_DIRECTION_REQUIRED  = 9     # of 14 real NIFTY BANK stocks must agree
 BN_ENTRY_COOLDOWN_S         = 60    # no new entry within this long of the last exit
 
 # BN Strategy — per-stock volume-surge thresholds, compared against each
@@ -570,7 +585,10 @@ BN_QTY_THRESHOLD_KOTAK      = 43_000.0
 BN_QTY_THRESHOLD_INDUSIND   = 16_500.0
 BN_QTY_INTERVAL_MULTIPLIER  = 1.0
 
-# BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring)
+# BN Strategy — composite indicator gate (RSI/MACD/EMA/pattern scoring) —
+# UNUSED by bn_entry_exit.evaluate_entry since the 2026-09-19 rewrite (see
+# BN_SAME_DIRECTION_REQUIRED above); kept only in case this gate is ever
+# reintroduced as a secondary filter.
 BN_INDICATOR_LOOKBACK_BARS = 200
 BN_RSI_PERIOD          = 14
 BN_EMA_FAST            = 20
@@ -585,9 +603,16 @@ BN_EMA_EXTENSION_PCT   = 1.2
 BN_SCORE_MIN           = 2.0
 BN_SCORE_MARGIN        = 0.9
 
-# BN Risk — target/stop/trailing on the underlying BankNifty index (points)
-BN_TARGET_POINTS      = 35.0
-BN_STOPLOSS_POINTS    = 18.0
+# BN Risk — target/stop/trailing on the underlying BankNifty index (points).
+# Target/stop changed 2026-09-19 (explicit user decision, alongside the
+# BN_SAME_DIRECTION_REQUIRED entry-condition rewrite above) from 35/18 to a
+# much tighter 1/10 — a deliberately asymmetric risk-reward the user chose.
+# BN_BREAKEVEN_TRIGGER/BN_TRAIL_TRIGGER below are now effectively inert as a
+# side effect (they're larger than the 1pt target, so target/stop always
+# resolves the trade first) — left unchanged since only target/stop were
+# asked for; harmless, not a bug.
+BN_TARGET_POINTS      = 1.0
+BN_STOPLOSS_POINTS    = 10.0
 BN_BREAKEVEN_TRIGGER  = 12.0
 BN_TRAIL_TRIGGER      = 18.0
 BN_TRAIL_DISTANCE     = 12.0

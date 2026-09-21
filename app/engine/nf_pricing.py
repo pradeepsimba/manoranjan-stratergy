@@ -1,30 +1,81 @@
 from __future__ import annotations
 
 """
-Nifty 50 options pricing — parallel to bn_pricing.py. Strike/expiry/Black-
-Scholes math is instrument-agnostic (spot, strike, time-to-expiry, rate, IV
-in; premium/greeks out), so those functions are reused directly from
-bn_pricing.py rather than copied. Only estimate_iv reads instrument-specific
-cfg (NF_IV_* instead of BN_IV_*), so it's the only function duplicated here.
+Nifty 50 options pricing — parallel to bn_pricing.py. Black-Scholes math is
+instrument-agnostic (spot, strike, time-to-expiry, rate, IV in; premium/
+greeks out), so those functions are reused directly from bn_pricing.py
+rather than copied. estimate_iv reads instrument-specific cfg (NF_IV_*
+instead of BN_IV_*), so it's duplicated here — and, as of 2026-09-19,
+get_next_expiry/the option-symbol builder are ALSO no longer shared: NSE's
+real expiry rules genuinely diverged between the two indices (see below),
+so reusing one function for both would be wrong for at least one of them,
+not just redundant.
 """
 
 import math
+from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
 import app.config as cfg
 from app.engine.bn_pricing import (  # noqa: F401 — re-exported for nf_entry_exit.py
     black_scholes,
-    build_option_symbol,
     get_atm_strike,
-    get_next_expiry,
     normal_cdf,
     time_to_expiry_years,
 )
 
+IST = ZoneInfo("Asia/Kolkata")
+
 _BARS_PER_DAY = 75
 _TRADING_DAYS_PER_YEAR = 252
+
+# Single-character month code NSE's real weekly-option trading symbols use
+# in place of a 3-letter month name (1-9 for Jan-Sep, O/N/D for Oct/Nov/Dec)
+# — confirmed 2026-09-19 against a real user-supplied example symbol
+# ("NIFTY2692223250PE" = year 26, month code "9" for September, day 22,
+# strike 23250, PE).
+_WEEKLY_MONTH_CODE = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
+                      7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"}
+
+
+def build_weekly_option_symbol(underlying: str, expiry: datetime, strike: int, option_type: str) -> str:
+    """
+    Real vendor WEEKLY option-instrument symbol, e.g. "NIFTY2692223250PE" —
+    UNDERLYING + 2-digit year + single-char month code (see
+    _WEEKLY_MONTH_CODE) + 2-digit day + strike + CE/PE. Used for Nifty 50,
+    which still has weekly expiry (moved from Thursday to Tuesday — see
+    get_next_expiry below). Confirmed 2026-09-19 against a real user-
+    supplied example symbol — unlike bn_pricing.build_monthly_option_symbol,
+    which remains unconfirmed against the live feed for a current contract.
+    Feeds the real-option-LTP paper-trading feature (2026-09-17, explicit
+    user decision; live only, never called from backtest).
+    """
+    month_code = _WEEKLY_MONTH_CODE[expiry.month]
+    return f"{underlying}{expiry.strftime('%y')}{month_code}{expiry.strftime('%d')}{strike}{option_type}"
+
+
+def get_next_expiry(now: datetime) -> datetime:
+    """
+    Nifty 50's real expiry: WEEKLY, next Tuesday 15:30 IST — NSE moved this
+    from Thursday, effective 2025-09-01 (confirmed via web search
+    2026-09-19; see CLAUDE.md). If `now` IS a Tuesday past 15:30, that
+    week's expiry has already happened intraday — roll to next week's.
+    Deliberately NOT shared with bn_pricing.get_next_expiry any more —
+    BankNifty's real cycle diverged to monthly (see there); reusing one
+    function for both would silently be wrong for whichever one changed.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST)
+    weekday = now.weekday()          # Mon=0 .. Sun=6; Tuesday=1
+    days_until = (1 - weekday) % 7
+    expiry = (now + timedelta(days=days_until)).replace(
+        hour=15, minute=30, second=0, microsecond=0)
+    if days_until == 0 and now > expiry:
+        expiry += timedelta(days=7)
+    return expiry
 
 
 def estimate_iv(closes: np.ndarray, manual_override: Optional[float] = None) -> float:

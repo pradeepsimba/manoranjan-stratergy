@@ -225,6 +225,31 @@ async def manual_exit_nf() -> Dict[str, Any]:
     return {"orderId": closed.order_id, "exitPremium": closed.exit_premium, "pnl": closed.pnl}
 
 
+# ── Reset the shared paper account (2026-09-19, explicit user decision) ────
+# Resets funds back to cfg.BN_STARTING_FUNDS and today's shared daily_pnl to
+# 0 — a manual "fresh start" for the paper account, distinct from the
+# automatic EOD reset (scheduler._run_eod also zeroes daily_pnl every day
+# regardless). Does NOT touch closed_trades/closed_trades_nf (today's trade
+# history) or the DB's positions table — only the funds/pnl COUNTERS, so
+# past trades remain visible for review. Refuses while a trade is open on
+# either instrument, since resetting funds under an open position would
+# make its eventual settlement land against the wrong baseline.
+@router.post("/api/reset-funds")
+async def reset_funds() -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    st = get_state()
+    if st.active_trade is not None or st.active_trade_nf is not None:
+        raise HTTPException(400, "Exit the active trade(s) before resetting funds.")
+    st.funds = cfg.BN_STARTING_FUNDS
+    st.daily_pnl = 0.0
+    try:
+        await _db.set_app_settings({BN_FUNDS_KEY: st.funds})
+    except Exception as e:
+        raise HTTPException(500, f"Funds reset in memory but DB persist failed: {e}")
+    return {"funds": st.funds, "dailyPnl": st.daily_pnl}
+
+
 # ── Live prices ───────────────────────────────────────────────────────────────
 
 @router.get("/api/prices")

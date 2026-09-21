@@ -5,23 +5,24 @@ Shared Bank Nifty entry/exit decision core — called identically by the live
 scheduler and the backtest replay loop (this repo's hard convention: live and
 backtest must share one strategy core).
 
-Ported from c.html's checkTradeEntry/checkExit, with one deliberate
-deviation (see CLAUDE.md-style callout inline):
+Originally ported from c.html's checkTradeEntry/checkExit (sideways-range +
+momentum + leader-vote + volume-surge + RSI/MACD/EMA composite-indicator
+gates). evaluate_entry's CONDITION was replaced entirely on 2026-09-19
+(explicit user decision) with a much simpler rule — see its docstring below
+— but evaluate_exit/open_trade_from_signal/finalize_exit (target/stop/
+breakeven/trailing management) are UNCHANGED c.html ports; only how a trade
+gets OPENED changed, not how an open trade is managed.
+
+One deliberate deviation from c.html retained from the original port:
   * No JS "pending signal" pre-qualification latch — the caller is expected
     to invoke evaluate_entry exactly once per newly-closed 5m bar (wall-clock
     bar-close detection lives in the caller), which achieves the same
     "fire right at candle close" outcome without extra state to keep in sync.
 
-The "strong quantity" gate is a literal port of c.html's fixed absolute
-per-stock STOCK_QTY_THRESHOLD table (now dynamic Settings-page tunables,
-see cfg.BN_QTY_THRESHOLD_ATTR / config._DEFAULTS' BN_QTY_THRESHOLD_* keys),
-compared against Candle.last_qty — the real per-trade quantity the vendor's
-current protocol embeds in each tick's `quote` text (parsed in
-market_data.py's _process_tick). An earlier vendor protocol had no such
-field at all (only cumulative 5m bar volume, hundreds of thousands — wildly
-mismatched against these tens/hundreds-scale thresholds), which made this
-gate a permanently-satisfied no-op; that limitation no longer applies now
-that a real per-trade qty field exists (confirmed 2026-07-23).
+_leader_qty_surge/_stock_qty_threshold below are NOT part of evaluate_entry
+any more — they're kept only because scheduler.py separately uses them to
+annotate the (informational, non-decision) stockCandles payload's "surged"
+flag for the leader stocks.
 """
 
 from dataclasses import dataclass
@@ -33,17 +34,11 @@ import numpy as np
 import app.config as cfg
 from app.engine.bn_pricing import (
     black_scholes,
-    build_option_symbol,
+    build_monthly_option_symbol,
     estimate_iv,
     get_atm_strike,
     get_next_expiry,
     time_to_expiry_years,
-)
-from app.engine.bn_signals import (
-    bn_composite_indicator,
-    leaders_momentum,
-    sideways_range,
-    strong_momentum,
 )
 from app.models import BNDiagnostic, BNSignal, BNTrade, Candle, PositionStatus
 
@@ -82,13 +77,6 @@ def _leader_qty_surge(leader_recent: Dict[str, List[Candle]]) -> Dict[str, bool]
     return out
 
 
-def _confidence(direction_count: int, strong_qty_count: int, n_leaders: int) -> float:
-    """Port of c.html's calculateConfidence — 50% weight each on leader-vote and qty-surge breadth."""
-    if n_leaders <= 0:
-        return 0.0
-    return round((direction_count / n_leaders) * 50.0 + (strong_qty_count / n_leaders) * 50.0)
-
-
 def evaluate_entry(
     now: datetime,
     bn_recent_candles: List[Candle],
@@ -97,15 +85,26 @@ def evaluate_entry(
     last_exit_time: Optional[datetime] = None,
 ) -> Tuple[Optional[BNSignal], BNDiagnostic]:
     """
-    Evaluate ONE just-closed BankNifty 5m bar for an entry. The caller must
-    ensure this bar hasn't already been evaluated and that no trade is
-    currently active — this function only decides "would this bar fire?".
+    Evaluate ONE just-closed BankNifty 5m bar for an entry.
 
-    Returns (signal, diagnostic). signal is None when no direction fires;
-    diagnostic always carries the full gate breakdown for the dashboard.
+    Simplified rule (2026-09-19, explicit user decision — REPLACES the
+    prior sideways-range + momentum + per-leader volume-surge + RSI/MACD/
+    EMA composite-indicator gate sequence entirely): if at least
+    cfg.BN_SAME_DIRECTION_REQUIRED (default 9) of the 14 real NIFTY BANK
+    stocks (`leader_recent`, now built by the caller from cfg.BN_ALL_STOCKS,
+    not just the 6 leaders) closed green on the just-closed bar, fire BUY
+    (long ATM Call); same count red fires SELL (long ATM Put). Target/stop
+    are cfg.BN_TARGET_POINTS/BN_STOPLOSS_POINTS as always (now 1/10 points
+    respectively) — only the ENTRY condition changed, not how exits work.
+
+    The caller must ensure this bar hasn't already been evaluated and that
+    no trade is currently active — this function only decides "would this
+    bar fire?". Returns (signal, diagnostic); signal is None when nothing
+    fires. Cooldown is the only gate retained from before (a basic entry-
+    rate-limit, not part of the "condition" being replaced).
     """
     required = cfg.BN_SAME_DIRECTION_REQUIRED
-    n_leaders = len(leader_recent)
+    n_stocks = len(leader_recent)
     leader_last = {name: (candles[-1] if candles else None) for name, candles in leader_recent.items()}
 
     bn_bar_time = bn_recent_candles[-1].start_time if bn_recent_candles else ""
@@ -119,41 +118,21 @@ def evaluate_entry(
             cooldown_ok = False
             no_trade_reason = f"Cooldown {cfg.BN_ENTRY_COOLDOWN_S - elapsed:.0f}s remaining"
 
-    if len(bn_recent_candles) < 2:
+    if len(bn_recent_candles) < 1:
         no_trade_reason = no_trade_reason or "Insufficient BankNifty candles"
 
-    rng = sideways_range(bn_closes_lookback, bars=5)
-    sideways_blocked = rng < cfg.BN_SIDEWAYS_RANGE_MIN
-    if no_trade_reason is None and sideways_blocked:
-        no_trade_reason = f"Sideways: range {rng:.1f} < {cfg.BN_SIDEWAYS_RANGE_MIN}"
+    green_count = sum(1 for c in leader_last.values() if c and c.close > c.open)
+    red_count = sum(1 for c in leader_last.values() if c and c.close < c.open)
 
-    momentum = strong_momentum(bn_recent_candles) if len(bn_recent_candles) >= 2 else {"ok": False, "reason": "Insufficient candles"}
-    if no_trade_reason is None and not momentum["ok"]:
-        no_trade_reason = momentum["reason"]
+    if no_trade_reason is None and max(green_count, red_count) < required:
+        no_trade_reason = f"Only {max(green_count, red_count)}/{n_stocks} stocks agree (need {required})"
 
-    leaders = leaders_momentum(leader_last)
-    if no_trade_reason is None and leaders["signal"] == "Nobuysell":
-        no_trade_reason = leaders["reason"]
-
-    qty_surge = _leader_qty_surge(leader_recent)
-    strong_qty_count = sum(1 for v in qty_surge.values() if v)
-    if no_trade_reason is None and strong_qty_count < required:
-        no_trade_reason = f"Only {strong_qty_count}/{n_leaders} leaders show volume surge (need {required})"
-
-    bn_ind = bn_composite_indicator(bn_closes_lookback, leader_recent)
-    if no_trade_reason is None and leaders["signal"] == "BUY" and not bn_ind["bullish"]:
-        no_trade_reason = "BN composite indicator not bullish"
-    if no_trade_reason is None and leaders["signal"] == "SELL" and not bn_ind["bearish"]:
-        no_trade_reason = "BN composite indicator not bearish"
-
-    gates_clear = (cooldown_ok and not sideways_blocked and momentum["ok"]
-                   and strong_qty_count >= required)
-    buy_ready = gates_clear and leaders["signal"] == "BUY" and bn_ind["bullish"]
-    sell_ready = gates_clear and leaders["signal"] == "SELL" and bn_ind["bearish"]
+    buy_ready = cooldown_ok and green_count >= required
+    sell_ready = cooldown_ok and red_count >= required
 
     signal: Optional[BNSignal] = None
     # Live ATM CE/PE quote — computed unconditionally, regardless of whether
-    # the gates above actually pass (2026-09-18, explicit user decision), so
+    # the vote above actually fires (2026-09-18, explicit user decision), so
     # the dashboard can show "what this would cost right now" even with no
     # trade open and no signal about to fire. Cheap: Black-Scholes is
     # closed-form, this runs once per closed bar either way.
@@ -170,19 +149,19 @@ def evaluate_entry(
         direction = "BUY" if buy_ready else "SELL"
         option_type = "CE" if direction == "BUY" else "PE"
         premium = atm_ce_premium if option_type == "CE" else atm_pe_premium
-        direction_count = leaders["buy_count"] if direction == "BUY" else leaders["sell_count"]
+        direction_count = green_count if direction == "BUY" else red_count
 
         signal = BNSignal(
             direction=direction,
             entry_index_price=bn_close,
             bar_time=bn_bar_time,
-            confidence=_confidence(direction_count, strong_qty_count, n_leaders),
-            green=leaders["buy_count"],
-            red=leaders["sell_count"],
-            strong_qty=strong_qty_count,
-            leader_signal=leaders["signal"],
-            bn_bull=bn_ind["bull"],
-            bn_bear=bn_ind["bear"],
+            confidence=round(direction_count / n_stocks * 100.0) if n_stocks else 0.0,
+            green=green_count,
+            red=red_count,
+            strong_qty=0,
+            leader_signal=direction,
+            bn_bull=0.0,
+            bn_bear=0.0,
             strike=atm_strike,
             expiry=atm_expiry.isoformat(),
             entry_premium=premium,
@@ -193,25 +172,13 @@ def evaluate_entry(
     diagnostic = BNDiagnostic(
         time=bn_bar_time,
         bn_ltp=bn_close,
-        green=leaders["buy_count"],
-        red=leaders["sell_count"],
-        strong_qty=strong_qty_count,
+        green=green_count,
+        red=red_count,
+        strong_qty=0,
         leader_rows=[{"stock": name, "open": c.open if c else None, "close": c.close if c else None,
-                      "volume": c.volume if c else None, "surged": qty_surge.get(name, False)}
+                      "volume": c.volume if c else None, "surged": False}
                      for name, c in leader_last.items()],
-        leader_signal=leaders["signal"],
-        sideways_range=rng,
-        momentum_ok=momentum["ok"],
-        momentum_reason=momentum["reason"],
-        rsi=bn_ind["rsi"],
-        macd_dir=bn_ind["macd_dir"],
-        macd_val=bn_ind["macd_val"],
-        ema_bullish=bn_ind["ema_bullish"],
-        ema_bearish=bn_ind["ema_bearish"],
-        bn_bull=bn_ind["bull"],
-        bn_bear=bn_ind["bear"],
-        bn_bullish=bn_ind["bullish"],
-        bn_bearish=bn_ind["bearish"],
+        leader_signal="BUY" if buy_ready else ("SELL" if sell_ready else "Nobuysell"),
         no_trade_reason=no_trade_reason,
         candle_close_ok=True,
         cooldown_ms=0.0 if cooldown_ok else max(0.0, cfg.BN_ENTRY_COOLDOWN_S -
@@ -223,11 +190,11 @@ def evaluate_entry(
         atm_ce_premium=atm_ce_premium,
         atm_pe_premium=atm_pe_premium,
         cooldown_ok=cooldown_ok,
-        sideways_ok=not sideways_blocked,
-        dir_count_ok=max(leaders["buy_count"], leaders["sell_count"]) >= required,
-        qty_surge_ok=strong_qty_count >= required,
+        sideways_ok=True,   # no longer a real gate — see the function docstring
+        dir_count_ok=max(green_count, red_count) >= required,
+        qty_surge_ok=True,  # no longer a real gate — see the function docstring
         same_direction_required=required,
-        gates_clear=gates_clear,
+        gates_clear=cooldown_ok,
         entry_ready=buy_ready or sell_ready,
     )
     return signal, diagnostic
@@ -317,7 +284,7 @@ def open_trade_from_signal(signal: BNSignal, now: datetime, order_id: str = "") 
     # Real vendor option symbol this trade's leg will be subscribed under
     # (live-only real-LTP feature — see BNTrade.option_symbol in models.py).
     # Harmless to compute unconditionally: backtest never reads this field.
-    option_symbol = build_option_symbol(
+    option_symbol = build_monthly_option_symbol(
         cfg.BN_OPTION_UNDERLYING, datetime.fromisoformat(signal.expiry), signal.strike, option_type)
 
     return BNTrade(

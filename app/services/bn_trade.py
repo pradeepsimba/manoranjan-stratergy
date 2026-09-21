@@ -38,7 +38,11 @@ def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
     # moment the first tick for this symbol arrives (see market_data.py's
     # _process_tick and check_tick_exit/force_close below).
     if st.market_data_service is not None:
-        st.market_data_service.set_bn_option_symbol(trade.option_symbol, trade.option_symbol)
+        # stockname is the underlying's plain name ("BANKNIFTY"), NOT the
+        # option symbol repeated — confirmed 2026-09-18 from the vendor's
+        # own echoed tick data (also: options are 1m-only, handled inside
+        # market_data.py's _resync_option_connection).
+        st.market_data_service.set_bn_option_symbol(trade.option_symbol, cfg.BN_OPTION_UNDERLYING)
 
     print(
         f"[PAPER] {trade.direction} {trade.option_type} {trade.strike} @ premium "

@@ -114,6 +114,24 @@ class AppState:
         self.bn_option_ltp: Optional[float] = None
         self.nf_option_ltp: Optional[float] = None
 
+        # ── Live ATM CE/PE watchlist (2026-09-18, explicit user decision) —
+        # separate from bn_option_ltp/nf_option_ltp above: THAT tracks one
+        # specific trade's FROZEN strike (set at entry, never changes for
+        # that trade's lifetime); THIS tracks whatever the CURRENT live ATM
+        # strike is (recomputed continuously off bn_index_ltp/nf_index_ltp
+        # by SchedulerService._tick_atm_watch), regardless of whether a
+        # trade is open. Symbols are set by MarketDataService.set_bn_atm_
+        # watch/set_nf_atm_watch; LTPs are filled in by _process_tick the
+        # same way as bn_option_ltp/nf_option_ltp.
+        self.bn_atm_ce_symbol: Optional[str] = None
+        self.bn_atm_pe_symbol: Optional[str] = None
+        self.bn_atm_ce_ltp: Optional[float] = None
+        self.bn_atm_pe_ltp: Optional[float] = None
+        self.nf_atm_ce_symbol: Optional[str] = None
+        self.nf_atm_pe_symbol: Optional[str] = None
+        self.nf_atm_ce_ltp: Optional[float] = None
+        self.nf_atm_pe_ltp: Optional[float] = None
+
     def candle_lock(self, token: str) -> threading.Lock:
         """Return (and lazily create) the per-token candle lock."""
         try:

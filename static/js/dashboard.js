@@ -100,6 +100,8 @@ function render(d) {
 
   renderTrade(d.activeTrade, TRADE_IDS_BN, d.entryLoop);
   renderTrade(d.activeTradeNf, TRADE_IDS_NF, d.entryLoopNf);
+  renderAtmWatch(d.bnAtmWatch, TRADE_IDS_BN);
+  renderAtmWatch(d.nfAtmWatch, TRADE_IDS_NF);
   renderClosedTrades(d.closedTrades || [], d.closedTradesNf || []);
   renderEntryLoop(d.entryLoop, d.liveLeaderRows, ENTRY_IDS_BN);
   renderEntryLoop(d.entryLoopNf, d.liveLeaderRowsNf, ENTRY_IDS_NF);
@@ -147,8 +149,27 @@ function render(d) {
 // rendering logic can also target the Nifty 50 panel's own DOM nodes,
 // instead of duplicating each function body.
 
-const TRADE_IDS_BN = { badge: 'trade-badge', empty: 'trade-empty', card: 'trade-card' };
-const TRADE_IDS_NF = { badge: 'trade-badge-nf', empty: 'trade-empty-nf', card: 'trade-card-nf' };
+const TRADE_IDS_BN = { badge: 'trade-badge', empty: 'trade-empty', card: 'trade-card', atmWatch: 'atm-watch' };
+const TRADE_IDS_NF = { badge: 'trade-badge-nf', empty: 'trade-empty-nf', card: 'trade-card-nf', atmWatch: 'atm-watch-nf' };
+
+// Live ATM CE/PE watchlist (2026-09-18, explicit user decision) — the REAL
+// market LTP for whatever the current at-the-money strike is, independent
+// of whether a trade is open (see CLAUDE.md's "Live ATM CE/PE watchlist"
+// note and market_data.py's set_bn_atm_watch/set_nf_atm_watch). Always
+// visible, unlike the Black-Scholes quote in renderTrade()'s empty state
+// below, which is a theoretical fallback shown only when no trade is open.
+function renderAtmWatch(watch, ids) {
+  ids = ids || TRADE_IDS_BN;
+  const el = document.getElementById(ids.atmWatch);
+  if (!el) return;
+  if (!watch || watch.strike == null) { el.innerHTML = ''; return; }
+  const ceVal = watch.ceLtp != null ? `₹${fmt2(watch.ceLtp)}` : '— (waiting for live tick)';
+  const peVal = watch.peLtp != null ? `₹${fmt2(watch.peLtp)}` : '— (waiting for live tick)';
+  el.innerHTML = `
+    <div class="atm-watch-row"><span class="lbl">ATM ${watch.strike} CE — ${escHtml(watch.ceSymbol || '')}</span><span class="val">${ceVal}</span></div>
+    <div class="atm-watch-row"><span class="lbl">ATM ${watch.strike} PE — ${escHtml(watch.peSymbol || '')}</span><span class="val">${peVal}</span></div>
+  `;
+}
 
 function renderTrade(t, ids, diag) {
   ids = ids || TRADE_IDS_BN;

@@ -46,8 +46,16 @@ def _slice_recent(ss: SymbolSeries, gidx: int, n: int) -> List[Candle]:
 
 
 def _leader_recent_at(stocks: Dict[str, SymbolSeries], day: str, tm: str) -> Dict[str, List[Candle]]:
+    """
+    2026-09-19: iterates cfg.BN_ALL_STOCKS (all 14 real NIFTY BANK members),
+    not just the 6 leaders — evaluate_entry's rewritten rule votes across
+    all 14 (see bn_entry_exit.py), and data.py already loads history for
+    all of BN_ALL_STOCKS, so nothing else needs to change here. Keeping
+    this at just the 6 leaders would silently cap the vote below
+    BN_SAME_DIRECTION_REQUIRED (9) and backtest would never fire at all.
+    """
     out: Dict[str, List[Candle]] = {}
-    for name, token in cfg.BN_LEADER_STOCKS.items():
+    for name, token in cfg.BN_ALL_STOCKS.items():
         ss = stocks.get(token)
         idx = ss.at.get(day, {}).get(tm) if ss else None
         out[name] = _slice_recent(ss, idx, _LEADER_HISTORY_BARS) if idx is not None else []

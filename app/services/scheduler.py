@@ -24,9 +24,13 @@ import numpy as np
 import app.config as cfg
 from app.engine import bn_breakout
 from app.engine.bn_entry_exit import _leader_qty_surge, _stock_qty_threshold, evaluate_entry
+from app.engine.bn_pricing import build_monthly_option_symbol, get_atm_strike
+from app.engine.bn_pricing import get_next_expiry as bn_get_next_expiry
 from app.engine.nf_entry_exit import _leader_qty_surge as _nf_leader_qty_surge
 from app.engine.nf_entry_exit import _stock_qty_threshold as _nf_stock_qty_threshold
 from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
+from app.engine.nf_pricing import build_weekly_option_symbol
+from app.engine.nf_pricing import get_next_expiry as nf_get_next_expiry
 from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase
 from app.services import bn_trade, nf_trade, price_alerts
 from app.services.historical_data import fetch_indicator_history
@@ -93,6 +97,11 @@ class SchedulerService:
         # settings are dynamic), so premarket/EOD must self-deduplicate by date.
         self._premarket_date: str | None = None
         self._eod_date:       str | None = None
+        # Live ATM CE/PE watchlist (2026-09-18) — last strike the watch was
+        # set to, so _tick_atm_watch only touches the WS subscription when
+        # the strike actually changes, not every 100ms tick.
+        self._bn_atm_watch_strike: int | None = None
+        self._nf_atm_watch_strike: int | None = None
 
     async def start(self) -> None:
         await self._load_funds()
@@ -278,6 +287,7 @@ class SchedulerService:
                 await self._tick_exits_nf()
                 await self._tick_entries_nf()
                 await self._tick_alerts()
+                await self._tick_atm_watch()
             except Exception as e:
                 print(f"Tick loop error: {e}")
 
@@ -338,8 +348,11 @@ class SchedulerService:
         closes = np.fromiter((c.close for c in closed_bn_candles), np.float64, len(closed_bn_candles))
         bn_closes_lookback = closes[-cfg.BN_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.BN_INDICATOR_LOOKBACK_BARS else closes
 
+        # 2026-09-19, explicit user decision: BN's entry vote is now over
+        # ALL 14 real NIFTY BANK stocks (cfg.BN_ALL_STOCKS), not just the 6
+        # leaders — see bn_entry_exit.evaluate_entry's rewritten rule.
         leader_recent = {}
-        for name, token in cfg.BN_LEADER_STOCKS.items():
+        for name, token in cfg.BN_ALL_STOCKS.items():
             with st.candle_lock(token):
                 candles = list(st.candles_5m.get(token, []))
             closed = [c for c in candles if c.start_time < new_bar_time]
@@ -453,6 +466,38 @@ class SchedulerService:
             for alert in fired:
                 await self._ws.broadcast(json.dumps({"type": "ALERT", **alert}, default=str))
 
+    async def _tick_atm_watch(self) -> None:
+        """
+        Live ATM CE/PE watchlist (2026-09-18, explicit user decision) — keeps
+        a continuous real-LTP subscription for whatever the CURRENT at-the-
+        money strike is, separate from bn_trade.py/nf_trade.py's per-active-
+        trade option subscription (that one is FROZEN at entry; this one
+        tracks the live, moving spot). Recomputing the ATM strike itself is
+        cheap (no Black-Scholes — just round(spot/100)*100), so this runs
+        every 100ms tick; the WS subscription is only touched when the
+        strike actually changes (comparing against the last-set value),
+        since a reconnect is what changing it costs (see market_data.py's
+        set_bn_atm_watch/set_nf_atm_watch).
+        """
+        st = get_state()
+        now = _now()
+        if st.bn_index_ltp > 0:
+            strike = get_atm_strike(st.bn_index_ltp)
+            if strike != self._bn_atm_watch_strike:
+                self._bn_atm_watch_strike = strike
+                expiry = bn_get_next_expiry(now)
+                ce = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "CE")
+                pe = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "PE")
+                self._mkt.set_bn_atm_watch(ce, pe)
+        if st.nf_index_ltp > 0:
+            strike = get_atm_strike(st.nf_index_ltp)
+            if strike != self._nf_atm_watch_strike:
+                self._nf_atm_watch_strike = strike
+                expiry = nf_get_next_expiry(now)
+                ce = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "CE")
+                pe = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "PE")
+                self._mkt.set_nf_atm_watch(ce, pe)
+
     async def _restore_from_db(self) -> None:
         """
         Restart recovery: rebuild today's trade/P&L state from the DB, so the
@@ -556,6 +601,14 @@ class SchedulerService:
                         )
                     except Exception as e:
                         print(f"NF EOD square-off DB error: {e}")
+
+        # Stop the live ATM CE/PE watchlist for the day — no point holding a
+        # WS subscription for stale strikes once the market's closed; it'll
+        # naturally resume tomorrow on the first live tick that moves it.
+        self._mkt.set_bn_atm_watch(None, None)
+        self._mkt.set_nf_atm_watch(None, None)
+        self._bn_atm_watch_strike = None
+        self._nf_atm_watch_strike = None
 
         await self._mkt.stop()
         await self._persist_funds()
@@ -1038,9 +1091,19 @@ class SchedulerService:
             "activeTrade":  active,
             "closedTrades": [_trade_dict(t) for t in closed_trades],
             "entryLoop":    diag,
+            "bnAtmWatch": {
+                "strike": self._bn_atm_watch_strike,
+                "ceSymbol": st.bn_atm_ce_symbol, "peSymbol": st.bn_atm_pe_symbol,
+                "ceLtp": st.bn_atm_ce_ltp, "peLtp": st.bn_atm_pe_ltp,
+            },
             "activeTradeNf":  active_nf,
             "closedTradesNf": [_trade_dict(t) for t in closed_trades_nf],
             "entryLoopNf":    diag_nf,
+            "nfAtmWatch": {
+                "strike": self._nf_atm_watch_strike,
+                "ceSymbol": st.nf_atm_ce_symbol, "peSymbol": st.nf_atm_pe_symbol,
+                "ceLtp": st.nf_atm_ce_ltp, "peLtp": st.nf_atm_pe_ltp,
+            },
             "liveLeaderRows": self._build_live_leader_rows(st),
             "liveLeaderRowsNf": self._build_live_leader_rows_nf(st),
             "stockCandles": stock_candles,
