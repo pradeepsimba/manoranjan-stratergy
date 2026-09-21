@@ -172,6 +172,15 @@ def evaluate_entry(
         atm_iv=itm_iv,
         atm_ce_premium=itm_ce_premium,
         atm_pe_premium=itm_pe_premium,
+        # See bn_entry_exit.evaluate_entry's identical comment — mirrors
+        # the basket-score condition instead of leaving these permanently
+        # False/None (found in review).
+        momentum_ok=score_buy_ok or score_sell_ok,
+        macd_dir=("BUY" if score_buy_ok else ("SELL" if score_sell_ok else None)),
+        ema_bullish=score_buy_ok,
+        ema_bearish=score_sell_ok,
+        bn_bullish=score_buy_ok,
+        bn_bearish=score_sell_ok,
         cooldown_ok=cooldown_ok,
         sideways_ok=True,
         dir_count_ok=score_buy_ok or score_sell_ok,

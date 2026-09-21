@@ -221,6 +221,19 @@ def evaluate_entry(
         atm_iv=itm_iv,
         atm_ce_premium=itm_ce_premium,
         atm_pe_premium=itm_pe_premium,
+        # momentum_ok/macd_dir/ema_bullish/ema_bearish/bn_bullish/bn_bearish
+        # are dashboard.js's Entry Loop Monitor fields for the now-removed
+        # composite-indicator gate — mirrored onto the basket-score
+        # condition (same True/False as dir_count_ok below) rather than
+        # left at their False/None dataclass defaults, which would
+        # permanently cap the "N/14 gates passed" banner below "ready" even
+        # at the exact instant a real trade fires (found in review).
+        momentum_ok=score_buy_ok or score_sell_ok,
+        macd_dir=("BUY" if score_buy_ok else ("SELL" if score_sell_ok else None)),
+        ema_bullish=score_buy_ok,
+        ema_bearish=score_sell_ok,
+        bn_bullish=score_buy_ok,
+        bn_bearish=score_sell_ok,
         cooldown_ok=cooldown_ok,
         sideways_ok=True,    # no longer a real gate — see the module docstring
         dir_count_ok=score_buy_ok or score_sell_ok,

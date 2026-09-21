@@ -15,7 +15,13 @@ from typing import Optional
 import numpy as np
 
 import app.config as cfg
-from app.engine.nf_entry_exit import ExitEvaluation, evaluate_exit, finalize_exit, open_trade_from_signal
+from app.engine.nf_entry_exit import (
+    ExitEvaluation,
+    _in_trading_window,
+    evaluate_exit,
+    finalize_exit,
+    open_trade_from_signal,
+)
 from app.engine.nf_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
 from app.models import NFSignal, NFTrade, PositionStatus
 from app.state import get_state
@@ -27,10 +33,12 @@ def place_paper_order(signal: NFSignal, now: datetime) -> NFTrade:
     """
     Open the single active NF trade from a fired NFSignal. Returns it
     (already added to AppState). See bn_trade.place_paper_order for why
-    the SCALP_MAX_TRADES_PER_DAY guardrail is re-checked here too, not
-    just inside evaluate_entry.
+    the trading-window and SCALP_MAX_TRADES_PER_DAY guardrails are
+    re-checked here too, not just inside evaluate_entry.
     """
     st = get_state()
+    if not _in_trading_window(now):
+        raise ValueError("Outside scalp trading window (09:45-11:15 / 13:45-14:45 IST)")
     if st.nf_trades_today >= cfg.SCALP_MAX_TRADES_PER_DAY:
         raise ValueError(f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached")
 

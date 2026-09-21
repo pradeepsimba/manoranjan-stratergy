@@ -144,7 +144,11 @@ def _try_entry(port: Portfolio, bn_ss: SymbolSeries, stocks: Dict[str, SymbolSer
     basket_recent = _basket_recent_at(stocks, day, tm)
 
     now = datetime.fromisoformat(bn_ss.series[gidx].start_time)
-    trades_today = len(port.trades) + (1 if port.active is not None else 0)
+    # port.active is always None here (the function already returned above
+    # otherwise), so trades_today is just the closed-trade count — no
+    # in-flight trade to add (found in review: a stale ternary here used to
+    # imply otherwise).
+    trades_today = len(port.trades)
     signal, _diag = evaluate_entry(now, bn_recent, bn_closes_lookback,
                                    basket_recent, port.last_exit_time, trades_today)
     if signal is None:

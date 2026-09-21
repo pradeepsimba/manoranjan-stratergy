@@ -15,7 +15,13 @@ from typing import Optional
 import numpy as np
 
 import app.config as cfg
-from app.engine.bn_entry_exit import ExitEvaluation, evaluate_exit, finalize_exit, open_trade_from_signal
+from app.engine.bn_entry_exit import (
+    ExitEvaluation,
+    _in_trading_window,
+    evaluate_exit,
+    finalize_exit,
+    open_trade_from_signal,
+)
 from app.engine.bn_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
 from app.models import BNSignal, BNTrade, PositionStatus
 from app.state import get_state
@@ -26,13 +32,18 @@ _order_seq = itertools.count(1)
 def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
     """
     Open the single active trade from a fired BNSignal. Returns it (already
-    added to AppState). Re-checks the SCALP_MAX_TRADES_PER_DAY guardrail
-    here too (not just inside evaluate_entry) so it truly caps every
-    executed trade regardless of origin — including place_manual_order
-    below, which bypasses evaluate_entry's gates entirely (a human
-    decision, not an algo signal) but must not bypass this risk limit.
+    added to AppState). Re-checks the trading-window and SCALP_MAX_TRADES_
+    PER_DAY guardrails here too (not just inside evaluate_entry) so they
+    truly cap every executed trade regardless of origin — including
+    place_manual_order below, which bypasses evaluate_entry's gates
+    entirely (a human decision, not an algo signal) but must not bypass
+    these risk limits (config.py's "Risk guardrails" comment already
+    claimed this was enforced here — this closes a real gap where only the
+    max-trades check actually was).
     """
     st = get_state()
+    if not _in_trading_window(now):
+        raise ValueError("Outside scalp trading window (09:45-11:15 / 13:45-14:45 IST)")
     if st.bn_trades_today >= cfg.SCALP_MAX_TRADES_PER_DAY:
         raise ValueError(f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached")
 
