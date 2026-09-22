@@ -23,7 +23,7 @@ from app.engine.bn_entry_exit import (
     open_trade_from_signal,
 )
 from app.engine.bn_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
-from app.models import BNSignal, BNTrade, PositionStatus
+from app.models import BNSignal, BNTrade, PositionStatus, closed_tail
 from app.state import get_state
 
 _order_seq = itertools.count(1)
@@ -52,18 +52,11 @@ def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
 
     st.active_trade = trade
     st.bn_trades_today += 1
-    st.bn_option_ltp = None   # fresh — any stale value from a prior trade must not leak in
-    # Start streaming this trade's real option leg (2026-09-17) — entry_premium
-    # stays the Black-Scholes value above (no real tick can exist yet at this
-    # exact instant); current_premium/exit_premium switch to real LTP the
-    # moment the first tick for this symbol arrives (see market_data.py's
-    # _process_tick and check_tick_exit/force_close below).
-    if st.market_data_service is not None:
-        # stockname is the underlying's plain name ("BANKNIFTY"), NOT the
-        # option symbol repeated — confirmed 2026-09-18 from the vendor's
-        # own echoed tick data (also: options are 1m-only, handled inside
-        # market_data.py's _resync_option_connection).
-        st.market_data_service.set_bn_option_symbol(trade.option_symbol, cfg.BN_OPTION_UNDERLYING)
+    # Real-option-LTP subscription/override DISABLED for the scalp strategy
+    # (2026-09-22, explicit user decision) — see _settle's comment below for
+    # why. trade.option_symbol is still computed/displayed (a useful label
+    # for which contract this models), just never subscribed to for a live
+    # tick any more.
 
     print(
         f"[PAPER] {trade.direction} {trade.option_type} {trade.strike} @ premium "
@@ -100,9 +93,13 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
 
     with st._bn_index_lock:
         bn_candles = list(st.bn_index_candles_5m)
-    closes = (np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
-              if bn_candles else np.zeros(0, dtype=np.float64))
-    lookback = closes[-cfg.BN_IV_LOOKBACK_BARS:] if closes.size > cfg.BN_IV_LOOKBACK_BARS else closes
+    # closed_tail() excludes the still-forming bar — a manual entry's
+    # premium must be computed on the same basis as the exit-tick checks
+    # that will later compare against it, or the tight ₹ target/stop
+    # bracket gets blown through by pure IV-estimate noise, not real
+    # movement.
+    tail = closed_tail(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
+    lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
 
     spot = st.bn_index_ltp
     option_type = "CE" if direction == "BUY" else "PE"
@@ -125,24 +122,6 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
     return place_paper_order(signal, now)
 
 
-def _live_premium_override(trade: BNTrade, st) -> Optional[float]:
-    """
-    Real-option-LTP override (2026-09-17): once trade.premium_synthetic has
-    latched False (a real WS tick for trade.option_symbol has arrived — see
-    market_data.py's _process_tick), this returns that real price so the
-    CALLER can pass it into evaluate_exit's live_premium_override param —
-    computed BEFORE evaluate_exit runs (2026-09-21, alongside the premium-
-    based target/stop rewrite) so the real tick drives the EXIT DECISION
-    itself, not just the post-hoc display value the old index-points exit
-    could get away with (that decision never depended on premium at all).
-    None when no real tick has arrived yet — evaluate_exit's own
-    Black-Scholes fallback covers that case.
-    """
-    if trade.option_symbol and not trade.premium_synthetic and st.bn_option_ltp:
-        return st.bn_option_ltp
-    return None
-
-
 def _settle(trade: BNTrade, now: datetime, exit_index_price: float,
            exit_premium: float, label: str) -> BNTrade:
     finalize_exit(trade, now, exit_index_price, exit_premium)
@@ -152,9 +131,6 @@ def _settle(trade: BNTrade, now: datetime, exit_index_price: float,
     st.active_trade = None
     st.closed_trades.append(trade)
     st.last_exit_time = now.isoformat()
-    st.bn_option_ltp = None
-    if st.market_data_service is not None:
-        st.market_data_service.set_bn_option_symbol(None, None)   # stop streaming this leg
     print(
         f"[PAPER] {label} {trade.direction} {trade.option_type} {trade.strike} @ premium "
         f"{exit_premium:.2f} | net ₹{trade.pnl:+.2f} (daily ₹{st.daily_pnl:+.2f}, "
@@ -166,17 +142,26 @@ def _settle(trade: BNTrade, now: datetime, exit_index_price: float,
 def check_tick_exit(now: datetime, current_index_price: float,
                     bn_closes_lookback: np.ndarray) -> Optional[BNTrade]:
     """
-    Tick-wise exit: ratchet the trailing/breakeven stop and close the trade the
-    instant target/stop is touched. Returns the closed trade, or None if still
-    open (or nothing is open).
+    Tick-wise exit: close the trade the instant target/stop/time-scratch is
+    touched. Returns the closed trade, or None if still open (or nothing is
+    open).
+
+    ALWAYS uses evaluate_exit's own synthetic Black-Scholes mark — no real-
+    option-LTP override (removed 2026-09-22, explicit user decision). That
+    override let a real market tick snap the price straight past the
+    strategy's whole ±₹2-3 target/stop bracket the instant one arrived
+    (root cause of a real observed bug: same-second entry/exit at a huge,
+    inconsistent loss with the index barely moving) — a discontinuity the
+    old, much wider index-points bracket could absorb but this one can't.
+    Settlement is now consistently synthetic for a trade's entire life,
+    matching the basis the bracket was actually calibrated against.
     """
     st = get_state()
     trade = st.active_trade
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
 
-    override = _live_premium_override(trade, st)
-    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, bn_closes_lookback, override)
+    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, bn_closes_lookback)
     trade.current_sl = ev.new_sl
     trade.sl_stage = ev.sl_stage
     trade.current_premium = ev.current_premium   # live mark for the ATM panel, even when not exiting
@@ -191,11 +176,11 @@ def force_close(now: datetime, current_index_price: float,
                 bn_closes_lookback: np.ndarray, label: str = "EOD SQUARE-OFF") -> Optional[BNTrade]:
     """Square off the active trade unconditionally (used for the 15:30 EOD
     flat, and — with label="MANUAL EXIT" — the dashboard's manual Exit
-    button; same target/stop-agnostic close either way, only the log label differs)."""
+    button; same target/stop-agnostic close either way, only the log label differs).
+    See check_tick_exit's docstring — always synthetic, no real-LTP override."""
     st = get_state()
     trade = st.active_trade
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
-    override = _live_premium_override(trade, st)
-    ev = evaluate_exit(trade, now, current_index_price, bn_closes_lookback, override)
+    ev = evaluate_exit(trade, now, current_index_price, bn_closes_lookback)
     return _settle(trade, now, current_index_price, ev.current_premium, label)

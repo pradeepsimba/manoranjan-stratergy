@@ -31,7 +31,7 @@ from app.engine.nf_entry_exit import _stock_qty_threshold as _nf_stock_qty_thres
 from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
 from app.engine.nf_pricing import build_weekly_option_symbol
 from app.engine.nf_pricing import get_next_expiry as nf_get_next_expiry
-from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase
+from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase, closed_tail
 from app.services import bn_trade, nf_trade, price_alerts
 from app.services.historical_data import fetch_indicator_history
 from app.services.market_data import MarketDataService
@@ -299,10 +299,12 @@ class SchedulerService:
             bn_candles = list(st.bn_index_candles_5m)
         if not bn_candles:
             return
-        # Slice the tail BEFORE building the numpy array — estimate_iv only
-        # ever reads the last BN_IV_LOOKBACK_BARS closes, so there's no need
-        # to convert all (up to 300) buffered candles on every 100ms tick.
-        tail = bn_candles[-cfg.BN_IV_LOOKBACK_BARS:] if len(bn_candles) > cfg.BN_IV_LOOKBACK_BARS else bn_candles
+        # closed_tail() excludes the still-forming last bar before feeding
+        # estimate_iv — see its own docstring for why (this was the actual
+        # root cause of a real production bug on the exit side, where the
+        # tight ~₹2-3 target/stop bracket got blown through by pure
+        # IV-estimate inconsistency, not real price movement).
+        tail = closed_tail(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
         lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
         try:
             closed = bn_trade.check_tick_exit(_now(), st.bn_index_ltp, lookback)
@@ -339,19 +341,11 @@ class SchedulerService:
         # every subsequent tick until it closes + cooldown — no risk of
         # firing twice off one live signal.
         bn_recent = bn_candles[-5:]
-        # estimate_iv's log-returns/annualization assumes every close-to-close
-        # step is a full closed 5m bar — bn_candles[-1] is always the
-        # still-forming bar (mutated in place tick by tick, per
-        # market_data._upsert), so it must be excluded here even though the
-        # live tick price is deliberately used elsewhere in this function
-        # (current_index_price/basket_ltp below). Feeding it in would let a
-        # return spanning only however many seconds have elapsed since the
-        # bar opened get annualized as if it were a full 5-minute move,
-        # biasing itm_iv (and therefore entry_premium) by time-within-bar
-        # rather than real volatility (found in review).
-        closed_bn_candles = bn_candles[:-1] if len(bn_candles) > 1 else bn_candles[:0]
-        closes = np.fromiter((c.close for c in closed_bn_candles), np.float64, len(closed_bn_candles))
-        bn_closes_lookback = closes[-cfg.BN_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.BN_INDICATOR_LOOKBACK_BARS else closes
+        # closed_tail() excludes the still-forming last bar (see its own
+        # docstring) even though the live tick price is deliberately used
+        # elsewhere in this function (current_index_price/basket_ltp below).
+        tail = closed_tail(bn_candles, cfg.BN_INDICATOR_LOOKBACK_BARS)
+        bn_closes_lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
 
         # Top-8 weighted-basket scalp strategy (2026-09-21) — only these 8
         # tokens (cfg.BN_SCALP_BASKET), not the full 14-stock BN_ALL_STOCKS
@@ -396,7 +390,8 @@ class SchedulerService:
             nf_candles = list(st.nf_index_candles_5m)
         if not nf_candles:
             return
-        tail = nf_candles[-cfg.NF_IV_LOOKBACK_BARS:] if len(nf_candles) > cfg.NF_IV_LOOKBACK_BARS else nf_candles
+        # See the BN mirror's comment above — same forming-bar exclusion via closed_tail().
+        tail = closed_tail(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
         lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
         try:
             closed = nf_trade.check_tick_exit(_now(), st.nf_index_ltp, lookback)
@@ -423,11 +418,10 @@ class SchedulerService:
         # Evaluated every tick, not once per closed bar — see the BN
         # mirror's comment in _tick_entries above.
         nf_recent = nf_candles[-5:]
-        # See the BN mirror's comment in _tick_entries above — exclude the
-        # still-forming last bar from the IV estimator's input array.
-        closed_nf_candles = nf_candles[:-1] if len(nf_candles) > 1 else nf_candles[:0]
-        closes = np.fromiter((c.close for c in closed_nf_candles), np.float64, len(closed_nf_candles))
-        nf_closes_lookback = closes[-cfg.NF_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.NF_INDICATOR_LOOKBACK_BARS else closes
+        # See the BN mirror's comment in _tick_entries above — closed_tail()
+        # excludes the still-forming last bar from the IV estimator's input.
+        tail = closed_tail(nf_candles, cfg.NF_INDICATOR_LOOKBACK_BARS)
+        nf_closes_lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
 
         # 2026-09-21: Top-8 weighted-basket tokens (cfg.NF_SCALP_BASKET),
         # not the 12-stock NF_LEADER_STOCKS the old rule used.
@@ -603,8 +597,8 @@ class SchedulerService:
             with st._bn_index_lock:
                 bn_candles = list(st.bn_index_candles_5m)
             if bn_candles:
-                closes = np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
-                lookback = closes[-cfg.BN_IV_LOOKBACK_BARS:] if closes.size > cfg.BN_IV_LOOKBACK_BARS else closes
+                tail = closed_tail(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
+                lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
                 closed = bn_trade.force_close(_now(), st.bn_index_ltp, lookback)
                 if closed:
                     try:
@@ -620,8 +614,8 @@ class SchedulerService:
             with st._nf_index_lock:
                 nf_candles = list(st.nf_index_candles_5m)
             if nf_candles:
-                closes = np.fromiter((c.close for c in nf_candles), np.float64, len(nf_candles))
-                lookback = closes[-cfg.NF_IV_LOOKBACK_BARS:] if closes.size > cfg.NF_IV_LOOKBACK_BARS else closes
+                tail = closed_tail(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
+                lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
                 closed = nf_trade.force_close(_now(), st.nf_index_ltp, lookback)
                 if closed:
                     try:

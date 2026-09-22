@@ -227,14 +227,14 @@ class ExitEvaluation:
 
 
 def evaluate_exit(trade: NFTrade, now: datetime, current_index_price: float,
-                  nf_closes_lookback: np.ndarray,
-                  live_premium_override: Optional[float] = None) -> ExitEvaluation:
-    """NF mirror of bn_entry_exit.evaluate_exit — see there for the full lifecycle walkthrough."""
+                  nf_closes_lookback: np.ndarray) -> ExitEvaluation:
+    """NF mirror of bn_entry_exit.evaluate_exit — see there for the full lifecycle
+    walkthrough, including why the live_premium_override this used to accept was removed."""
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(nf_closes_lookback)
     bs = black_scholes(current_index_price, trade.strike, T, cfg.NF_RISK_FREE_RATE, iv, trade.option_type)
-    premium = live_premium_override if live_premium_override is not None else bs["price"]
+    premium = bs["price"]
 
     entry_time = datetime.fromisoformat(trade.entry_time)
     elapsed_s = (now - entry_time).total_seconds()

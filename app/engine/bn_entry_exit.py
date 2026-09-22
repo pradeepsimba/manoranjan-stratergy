@@ -305,8 +305,7 @@ class ExitEvaluation:
 
 
 def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
-                  bn_closes_lookback: np.ndarray,
-                  live_premium_override: Optional[float] = None) -> ExitEvaluation:
+                  bn_closes_lookback: np.ndarray) -> ExitEvaluation:
     """
     12-second premium-based lifecycle (2026-09-21) — REPLACES the old
     index-points target/stop/breakeven/trail state machine entirely.
@@ -319,20 +318,23 @@ def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
     since entry, force a TIME_SCRATCH exit at a marketable (spread-crossing)
     price — see BN_SCALP_SCRATCH_SLIPPAGE_RS in config.py.
 
-    `live_premium_override`: when the caller (bn_trade.check_tick_exit) has
-    a real option LTP for this trade (premium_synthetic has latched False —
-    see CLAUDE.md's "Real-option-LTP paper trading"), it passes that HERE
-    so the EXIT DECISION itself uses the real tick, not only the
-    Black-Scholes mark this function always computes as a fallback/display
-    value. Caller-level handling, per this repo's "don't fork the shared
-    evaluate_exit" convention — this function stays live/backtest-identical
-    either way (backtest never passes an override).
+    Always uses its own freshly-computed Black-Scholes mark — this used to
+    accept a `live_premium_override` so the caller could substitute a real
+    option-LTP tick for the decision itself, but that was REMOVED
+    2026-09-22 (explicit user decision): a real tick could arrive within
+    the same second a trade opened (especially when a repeated strike kept
+    the option WS subscription already flowing) and snap the premium
+    straight past this strategy's whole ~₹2-3 target/stop bracket — the
+    confirmed root cause of a real production bug (same-second entry/exit
+    at a huge, inconsistent loss with the index barely moving). Settlement
+    is now consistently synthetic for a trade's entire life; see
+    bn_trade.check_tick_exit's docstring for the full incident writeup.
     """
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(bn_closes_lookback)
     bs = black_scholes(current_index_price, trade.strike, T, cfg.BN_RISK_FREE_RATE, iv, trade.option_type)
-    premium = live_premium_override if live_premium_override is not None else bs["price"]
+    premium = bs["price"]
 
     entry_time = datetime.fromisoformat(trade.entry_time)
     elapsed_s = (now - entry_time).total_seconds()

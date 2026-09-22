@@ -142,11 +142,17 @@ class MarketDataService:
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
 
-    # ── Real-option-LTP dynamic subscription ────────────────────────────────────
-    # Called by bn_trade.py/nf_trade.py whenever their single active trade opens
-    # (real symbol/stockname) or closes (None) — see models.py's BNTrade/
-    # NFTrade.option_symbol. Each engine only ever has one active trade, so each
-    # setter fully replaces that engine's half of the merged filter set.
+    # ── Real-option-LTP dynamic subscription — CURRENTLY UNUSED ─────────────────
+    # Used to be called by bn_trade.py/nf_trade.py whenever their single
+    # active trade opened/closed. Removed as a caller 2026-09-22 (see
+    # _process_tick's comment above for the full reason: it let a real tick
+    # snap a trade's settlement premium past the scalp strategy's ~₹2-3
+    # bracket). Left in place, unreachable, rather than deleted — the
+    # underlying dynamic-subscription mechanism (_resync_option_connection,
+    # the third WS connection it manages) is still legitimate infrastructure
+    # a future feature could reuse; re-wiring it is now a deliberate choice,
+    # not an accident, if it's ever needed again. Confirmed zero callers
+    # anywhere in the repo as of this comment.
 
     def set_bn_option_symbol(self, stock_symbol: Optional[str], stockname: Optional[str]) -> None:
         self._bn_option = (stock_symbol, stockname) if stock_symbol else None
@@ -340,17 +346,29 @@ class MarketDataService:
         if not symbol:
             return
 
-        # Real-option-LTP dynamic subscription (2026-09-17) + live ATM CE/PE
-        # watchlist (2026-09-18) — neither ever touches candles_5m/ltp (those
-        # are documented as "the fixed BN/NF stock universe only"); each just
-        # updates whichever option/watch symbol it matches (see
-        # set_bn_option_symbol/set_nf_option_symbol and set_bn_atm_watch/
-        # set_nf_atm_watch above). The active-trade match also flips that
-        # trade's one-way premium_synthetic latch; the watchlist match is a
-        # plain live cache (no latch — it's not tied to a specific trade, so
-        # there's nothing to "freeze the entry value of"). Checked before the
-        # 5m-only gate below and before the qty/candle-construction work,
-        # which would be wasted effort for a tick outside the fixed universe.
+        # Live ATM CE/PE watchlist (2026-09-18) — never touches candles_5m/ltp
+        # (those are documented as "the fixed BN/NF stock universe only");
+        # just updates whichever watch symbol it matches (see
+        # set_bn_atm_watch/set_nf_atm_watch above), a plain live cache with
+        # no per-trade latch. Checked before the 5m-only gate below and
+        # before the qty/candle-construction work, which would be wasted
+        # effort for a tick outside the fixed universe.
+        #
+        # The real-option-LTP-per-TRADE match (2026-09-17) that used to live
+        # here — matching a tick against active_trade.option_symbol and
+        # flipping trade.premium_synthetic — was REMOVED 2026-09-22 (explicit
+        # user decision) alongside bn_trade.py/nf_trade.py no longer calling
+        # set_bn_option_symbol/set_nf_option_symbol at all: that override let
+        # a real tick snap a trade's settlement premium straight past this
+        # strategy's whole ~₹2-3 target/stop bracket (confirmed root cause of
+        # a real production bug — see bn_trade.check_tick_exit's docstring).
+        # Removing the MATCH here too (not just the callers that used to
+        # trigger a subscription for it) closes this off completely: even if
+        # a tick ever arrived for a symbol that happened to equal some
+        # trade's option_symbol, it can no longer flip anything —
+        # trade.premium_synthetic now stays permanently True (its default),
+        # which is the truthful state now that settlement is always
+        # synthetic — no changes needed anywhere the field is displayed.
         #
         # CONFIRMED 2026-09-18: this vendor streams options at 1-MINUTE
         # granularity ONLY, not 5m like everything else here — the original
@@ -362,25 +380,15 @@ class MarketDataService:
         # so a future vendor protocol quirk can't silently disable this path
         # the same way again.
         st = self.state
-        active_bn = st.active_trade
-        active_nf = st.active_trade_nf
-        is_bn_opt = active_bn is not None and active_bn.option_symbol and symbol == active_bn.option_symbol
-        is_nf_opt = active_nf is not None and active_nf.option_symbol and symbol == active_nf.option_symbol
         is_bn_atm_ce = st.bn_atm_ce_symbol and symbol == st.bn_atm_ce_symbol
         is_bn_atm_pe = st.bn_atm_pe_symbol and symbol == st.bn_atm_pe_symbol
         is_nf_atm_ce = st.nf_atm_ce_symbol and symbol == st.nf_atm_ce_symbol
         is_nf_atm_pe = st.nf_atm_pe_symbol and symbol == st.nf_atm_pe_symbol
-        if is_bn_opt or is_nf_opt or is_bn_atm_ce or is_bn_atm_pe or is_nf_atm_ce or is_nf_atm_pe:
+        if is_bn_atm_ce or is_bn_atm_pe or is_nf_atm_ce or is_nf_atm_pe:
             if interval != "1m":
                 return
             ltp = _parse_ltp(n)
             if ltp > 0:
-                if is_bn_opt:
-                    st.bn_option_ltp = ltp
-                    active_bn.premium_synthetic = False
-                if is_nf_opt:
-                    st.nf_option_ltp = ltp
-                    active_nf.premium_synthetic = False
                 if is_bn_atm_ce: st.bn_atm_ce_ltp = ltp
                 if is_bn_atm_pe: st.bn_atm_pe_ltp = ltp
                 if is_nf_atm_ce: st.nf_atm_ce_ltp = ltp

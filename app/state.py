@@ -108,15 +108,20 @@ class AppState:
         self.nf_diagnostic:        Optional[NFDiagnostic] = None
         self.nf_trades_today: int = 0   # NF mirror of bn_trades_today above
 
-        # ── Real-option-LTP paper trading (2026-09-17, live-only, explicit
-        # user decision) — market_data_service self-registers here (see
-        # MarketDataService.__init__) so bn_trade.py/nf_trade.py can reach it
-        # without a circular import; not type-hinted as MarketDataService to
-        # avoid one (state.py must stay importable from market_data.py).
-        # bn_option_ltp/nf_option_ltp are the latest real tick for whichever
-        # option symbol the currently-active trade (if any) is subscribed
-        # to — see BNTrade.option_symbol/premium_synthetic in models.py.
+        # market_data_service self-registers here (see MarketDataService.
+        # __init__) — not type-hinted as MarketDataService to avoid a
+        # circular import (state.py must stay importable from market_data.py).
         self.market_data_service = None
+        # bn_option_ltp/nf_option_ltp: DEAD as of 2026-09-22 — used to be the
+        # latest real tick for whichever option symbol the active trade was
+        # subscribed to (the "real-option-LTP paper trading" feature, 2026-
+        # 09-17), removed after it let a real tick snap a trade's settlement
+        # premium past the scalp strategy's tight ~₹2-3 target/stop bracket
+        # (see bn_trade.check_tick_exit's docstring and market_data.py's
+        # _process_tick comment for the full story). Nothing sets these
+        # fields anymore — permanently None for the process lifetime. Left
+        # in place rather than removed since AppState fields are read in
+        # several places by attribute name; harmless to leave unset.
         self.bn_option_ltp: Optional[float] = None
         self.nf_option_ltp: Optional[float] = None
 

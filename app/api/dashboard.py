@@ -18,6 +18,7 @@ import app.services.settings as settings
 from app.auth import require_login
 from app.backtest.engine import run_backtest
 from app.backtest.signal_study import run_bn_leader_consensus_study
+from app.models import closed_tail
 from app.services import bn_trade, nf_trade
 from app.services.historical_data import fetch_candles_for_date
 from app.services.settings import BN_FUNDS_KEY
@@ -153,9 +154,12 @@ async def manual_exit() -> Dict[str, Any]:
 
     with st._bn_index_lock:
         bn_candles = list(st.bn_index_candles_5m)
-    closes = (np.fromiter((c.close for c in bn_candles), np.float64, len(bn_candles))
-              if bn_candles else np.zeros(0, dtype=np.float64))
-    lookback = closes[-cfg.BN_IV_LOOKBACK_BARS:] if closes.size > cfg.BN_IV_LOOKBACK_BARS else closes
+    # closed_tail() excludes the still-forming last bar — the same forming-
+    # bar IV leak already fixed for every other force_close/check_tick_exit
+    # caller (found in review 2026-09-22) applies here too: a human clicking
+    # Exit must get the same IV basis the automated tick loop would have used.
+    tail = closed_tail(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
+    lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
 
     closed = bn_trade.force_close(datetime.now(IST), st.bn_index_ltp, lookback, label="MANUAL EXIT")
     if closed is None:
@@ -207,9 +211,10 @@ async def manual_exit_nf() -> Dict[str, Any]:
 
     with st._nf_index_lock:
         nf_candles = list(st.nf_index_candles_5m)
-    closes = (np.fromiter((c.close for c in nf_candles), np.float64, len(nf_candles))
-              if nf_candles else np.zeros(0, dtype=np.float64))
-    lookback = closes[-cfg.NF_IV_LOOKBACK_BARS:] if closes.size > cfg.NF_IV_LOOKBACK_BARS else closes
+    # See manual_exit's identical comment above — closed_tail() excludes
+    # the still-forming last bar.
+    tail = closed_tail(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
+    lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
 
     closed = nf_trade.force_close(datetime.now(IST), st.nf_index_ltp, lookback, label="MANUAL EXIT")
     if closed is None:

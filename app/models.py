@@ -47,6 +47,29 @@ class Candle:            # cuts per-instance memory ~40% and speeds attribute ac
     def is_bearish(self) -> bool: return self.close < self.open
 
 
+def closed_tail(candles: List[Candle], n: int) -> List[Candle]:
+    """
+    The last `n` CLOSED bars from `candles`, excluding a still-forming
+    final bar — candles[-1] is always in-progress, mutated in place tick
+    by tick (see market_data._upsert), so it must never be fed into
+    estimate_iv's log-return calculation: a return spanning only however
+    many seconds the bar has been open would get annualized as if it were
+    a full closed 5-minute move (2026-09-22, found in review — was the
+    root cause of a real production bug: a scalp trade's exit-side IV
+    estimate disagreeing with its entry-side estimate blew straight
+    through the strategy's tight ~₹2-3 premium target/stop bracket).
+
+    Slices the tail FIRST (n+1 elements), not the whole (possibly ~300-bar)
+    buffer, so this stays cheap when called every ~100ms from the tick loop
+    — every caller of this needs "closed bars only", so this is the one
+    shared implementation instead of 8+ copies of the same two-line pattern
+    (one of which was previously missed entirely — see CLAUDE.md's
+    "Real-option-LTP paper trading" section history).
+    """
+    tail = candles[-(n + 1):] if len(candles) > n + 1 else candles
+    return tail[:-1] if len(tail) > 1 else tail[:0]
+
+
 # ── Bank Nifty options strategy ───────────────────────────────────────────────
 
 @dataclass(slots=True)   # built once per fired entry, live and backtest

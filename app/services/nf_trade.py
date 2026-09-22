@@ -23,7 +23,7 @@ from app.engine.nf_entry_exit import (
     open_trade_from_signal,
 )
 from app.engine.nf_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
-from app.models import NFSignal, NFTrade, PositionStatus
+from app.models import NFSignal, NFTrade, PositionStatus, closed_tail
 from app.state import get_state
 
 _order_seq = itertools.count(1)
@@ -47,12 +47,8 @@ def place_paper_order(signal: NFSignal, now: datetime) -> NFTrade:
 
     st.active_trade_nf = trade
     st.nf_trades_today += 1
-    st.nf_option_ltp = None   # fresh — any stale value from a prior trade must not leak in
-    # NF mirror of bn_trade.place_paper_order's real-option-LTP wiring —
-    # stockname is the underlying's plain name ("NIFTY"), not the option
-    # symbol repeated (see bn_trade.py's comment for why).
-    if st.market_data_service is not None:
-        st.market_data_service.set_nf_option_symbol(trade.option_symbol, cfg.NF_OPTION_UNDERLYING)
+    # Real-option-LTP subscription/override DISABLED for the scalp strategy —
+    # see bn_trade.check_tick_exit's docstring for why (NF mirror).
 
     print(
         f"[PAPER][NF] {trade.direction} {trade.option_type} {trade.strike} @ premium "
@@ -74,9 +70,12 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
 
     with st._nf_index_lock:
         nf_candles = list(st.nf_index_candles_5m)
-    closes = (np.fromiter((c.close for c in nf_candles), np.float64, len(nf_candles))
-              if nf_candles else np.zeros(0, dtype=np.float64))
-    lookback = closes[-cfg.NF_IV_LOOKBACK_BARS:] if closes.size > cfg.NF_IV_LOOKBACK_BARS else closes
+    # See bn_trade.place_manual_order's identical comment — closed_tail()
+    # excludes the still-forming bar so a manual entry's premium is
+    # computed on the same basis the exit-tick checks will later compare
+    # against.
+    tail = closed_tail(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
+    lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
 
     spot = st.nf_index_ltp
     option_type = "CE" if direction == "BUY" else "PE"
@@ -97,13 +96,6 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
     return place_paper_order(signal, now)
 
 
-def _live_premium_override(trade: NFTrade, st) -> Optional[float]:
-    """NF mirror of bn_trade._live_premium_override."""
-    if trade.option_symbol and not trade.premium_synthetic and st.nf_option_ltp:
-        return st.nf_option_ltp
-    return None
-
-
 def _settle(trade: NFTrade, now: datetime, exit_index_price: float,
            exit_premium: float, label: str) -> NFTrade:
     finalize_exit(trade, now, exit_index_price, exit_premium)
@@ -113,9 +105,6 @@ def _settle(trade: NFTrade, now: datetime, exit_index_price: float,
     st.active_trade_nf = None
     st.closed_trades_nf.append(trade)
     st.last_exit_time_nf = now.isoformat()
-    st.nf_option_ltp = None
-    if st.market_data_service is not None:
-        st.market_data_service.set_nf_option_symbol(None, None)
     print(
         f"[PAPER][NF] {label} {trade.direction} {trade.option_type} {trade.strike} @ premium "
         f"{exit_premium:.2f} | net ₹{trade.pnl:+.2f} (daily ₹{st.daily_pnl:+.2f}, "
@@ -126,14 +115,13 @@ def _settle(trade: NFTrade, now: datetime, exit_index_price: float,
 
 def check_tick_exit(now: datetime, current_index_price: float,
                     nf_closes_lookback: np.ndarray) -> Optional[NFTrade]:
-    """NF mirror of bn_trade.check_tick_exit."""
+    """NF mirror of bn_trade.check_tick_exit — always synthetic, no real-LTP override."""
     st = get_state()
     trade = st.active_trade_nf
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
 
-    override = _live_premium_override(trade, st)
-    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, nf_closes_lookback, override)
+    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, nf_closes_lookback)
     trade.current_sl = ev.new_sl
     trade.sl_stage = ev.sl_stage
     trade.current_premium = ev.current_premium
@@ -152,6 +140,5 @@ def force_close(now: datetime, current_index_price: float,
     trade = st.active_trade_nf
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
-    override = _live_premium_override(trade, st)
-    ev = evaluate_exit(trade, now, current_index_price, nf_closes_lookback, override)
+    ev = evaluate_exit(trade, now, current_index_price, nf_closes_lookback)
     return _settle(trade, now, current_index_price, ev.current_premium, label)
