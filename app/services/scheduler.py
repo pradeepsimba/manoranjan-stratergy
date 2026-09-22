@@ -72,8 +72,6 @@ async def _sleep_toward(hour: int, minute: int) -> None:
     await asyncio.sleep(min(_seconds_until(hour, minute), 30.0))
 
 
-_LEADER_HISTORY_BARS = 25   # covers both pattern (last 3) and qty-avg (last 20) window
-
 # ── Stock Candles panel (c.html port, unrelated to the BN trading strategy) ──
 _STOCK_TABLE_BARS   = 50   # bars per stock sent for the live candle table (client "Last N bars" selector trims further) —
                            # kept well under MAX_CANDLE_BUFFER=300; pushed every 1s to every connected browser, so this
@@ -356,9 +354,9 @@ class SchedulerService:
         # 2026-09-21, explicit user decision: BN's entry now reads only the
         # Top-8 weighted-basket tokens (cfg.BN_SCALP_BASKET), not the full
         # 14-stock BN_ALL_STOCKS universe the old leader-vote rule needed.
-        # Full history (not trimmed to _LEADER_HISTORY_BARS) — session VWAP
-        # needs every bar from today's open, and 8 tokens x <=300 bars is
-        # trivial once per bar close.
+        # Full history (untrimmed) — session VWAP needs every bar from
+        # today's open, and 8 tokens x <=300 bars is trivial once per bar
+        # close.
         basket_candles = {}
         for token in cfg.BN_SCALP_BASKET:
             with st.candle_lock(token):
