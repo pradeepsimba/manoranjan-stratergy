@@ -23,7 +23,7 @@ from app.engine.nf_entry_exit import (
     open_trade_from_signal,
 )
 from app.engine.nf_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
-from app.models import NFSignal, NFTrade, PositionStatus, closed_tail
+from app.models import NFSignal, NFTrade, PositionStatus, closed_tail_closes
 from app.state import get_state
 
 _order_seq = itertools.count(1)
@@ -70,12 +70,11 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
 
     with st._nf_index_lock:
         nf_candles = list(st.nf_index_candles_5m)
-    # See bn_trade.place_manual_order's identical comment — closed_tail()
-    # excludes the still-forming bar so a manual entry's premium is
-    # computed on the same basis the exit-tick checks will later compare
-    # against.
-    tail = closed_tail(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
-    lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
+    # See bn_trade.place_manual_order's identical comment —
+    # closed_tail_closes() excludes the still-forming bar so a manual
+    # entry's premium is computed on the same basis the exit-tick checks
+    # will later compare against.
+    lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
 
     spot = st.nf_index_ltp
     option_type = "CE" if direction == "BUY" else "PE"

@@ -80,24 +80,25 @@ class MarketDataService:
         # can't import this module — it's imported BY this module).
         self.state.market_data_service = self
 
-        # ── Real-option-LTP dynamic subscription (2026-09-17) — a THIRD,
-        # separate WS connection dedicated to whichever option symbol(s) the
-        # currently-active BN/NF trade(s) need real ticks for. Unlike the
-        # fixed BN+NF universe (subscribed once at start() and never
-        # changed), this connection's filter list changes every time a trade
-        # opens or closes, so it can't share the fixed connections' "send
-        # LIVE_FEED_INIT once at connect, never again" model — instead it's
-        # torn down and reconnected with a fresh filter list on every change
-        # (see _resync_option_connection). Starts with no filters/no task —
-        # only spun up once a trade actually needs it.
-        self._bn_option: Optional[tuple] = None   # (stock_symbol, stockname) or None
-        self._nf_option: Optional[tuple] = None
+        # ── Real-option-LTP dynamic subscription — CURRENTLY UNUSED, see
+        # set_bn_option_symbol's own comment further below for why. _bn_option/
+        # _nf_option stay permanently None: nothing calls their setters any
+        # more (confirmed zero callers repo-wide). The THIRD WS connection
+        # these used to share filters on is NOT dormant, though — it's still
+        # actively started/reconnected by the live ATM CE/PE watchlist below
+        # (set_bn_atm_watch/set_nf_atm_watch, called every tick from
+        # SchedulerService._tick_atm_watch) — only this per-trade half of its
+        # filter set is inert now, not the connection itself.
+        self._bn_option: Optional[tuple] = None   # (stock_symbol, stockname) or None — always None now
+        self._nf_option: Optional[tuple] = None   # always None now
         # Live ATM CE/PE watchlist (2026-09-18) — a SECOND pair of slots on
         # this same dedicated connection, independent of _bn_option/
-        # _nf_option above: those track one trade's strike, FROZEN at entry;
-        # these track whatever the CURRENT live ATM strike is, set by
-        # SchedulerService._tick_atm_watch every time it changes, regardless
-        # of whether a trade is open. Each holds (ce_symbol, pe_symbol).
+        # _nf_option above: those used to track one trade's strike, FROZEN
+        # at entry; these track whatever the CURRENT live ATM strike is, set
+        # by SchedulerService._tick_atm_watch every time it changes,
+        # regardless of whether a trade is open. Each holds (ce_symbol,
+        # pe_symbol). This pair is the ONLY thing still driving the third
+        # connection's filter set (see above).
         self._bn_atm_watch: Optional[tuple] = None
         self._nf_atm_watch: Optional[tuple] = None
         self._option_task: Optional[asyncio.Task] = None

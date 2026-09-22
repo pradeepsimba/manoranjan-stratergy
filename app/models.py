@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
+import numpy as np
+
 
 # ── Enumerations ──────────────────────────────────────────────────────────────
 
@@ -59,15 +61,28 @@ def closed_tail(candles: List[Candle], n: int) -> List[Candle]:
     estimate disagreeing with its entry-side estimate blew straight
     through the strategy's tight ~₹2-3 premium target/stop bracket).
 
-    Slices the tail FIRST (n+1 elements), not the whole (possibly ~300-bar)
-    buffer, so this stays cheap when called every ~100ms from the tick loop
-    — every caller of this needs "closed bars only", so this is the one
-    shared implementation instead of 8+ copies of the same two-line pattern
-    (one of which was previously missed entirely — see CLAUDE.md's
-    "Real-option-LTP paper trading" section history).
+    A plain slice — `candles[-(n+1):-1]` — already does the right thing in
+    every edge case (empty list, single forming-only bar, fewer than n+1
+    bars, exactly n+1, more than n+1: Python clips an out-of-range negative
+    start to 0 and naturally yields `[]` when the computed stop precedes
+    the start), so there's no hand-rolled branching to get wrong. Slicing
+    the tail first (n+1 elements), not the whole possibly-~300-bar buffer,
+    is what keeps this cheap when called every ~100ms from the tick loop.
     """
-    tail = candles[-(n + 1):] if len(candles) > n + 1 else candles
-    return tail[:-1] if len(tail) > 1 else tail[:0]
+    return candles[-(n + 1):-1]
+
+
+def closed_tail_closes(candles: List[Candle], n: int) -> np.ndarray:
+    """
+    closed_tail() as a float64 close-price array — every one of this
+    function's 10 call sites (found in review, 2026-09-22) previously
+    repeated `np.fromiter((c.close for c in tail), np.float64, len(tail))`
+    by hand after calling closed_tail(); this is the one shared
+    implementation of that second step too, so a future change to how
+    closes are extracted only needs to happen here.
+    """
+    tail = closed_tail(candles, n)
+    return np.fromiter((c.close for c in tail), np.float64, len(tail))
 
 
 # ── Bank Nifty options strategy ───────────────────────────────────────────────
@@ -146,17 +161,21 @@ class BNTrade:
     index_pnl_points:  float           = 0.0     # diagnostic only — never used for settlement
     confidence:        float           = 0.0
     entry_signal:      Optional[BNSignal] = None
-    # Real-option-LTP feature (2026-09-17, live-only — see app/services/
-    # bn_trade.py and market_data.py's set_bn_option_symbol). option_symbol
-    # is the vendor instrument this trade's option leg was subscribed under
-    # at entry (e.g. "BANKNIFTY17SEP56400CE"); premium_synthetic is a
-    # one-way latch, True until the first real WS tick for that symbol
-    # arrives, after which current_premium/exit_premium use real LTP instead
-    # of the Black-Scholes value. entry_premium above is ALWAYS the
-    # Black-Scholes value regardless (no real tick can exist yet at the
-    # exact instant a trade opens — see the design discussion this was
-    # decided in). Backtest's BTPosition has no equivalent fields; this only
-    # ever applies to a live BNTrade.
+    # option_symbol is the vendor instrument this trade's option leg would
+    # be subscribed under (e.g. "BANKNIFTY17SEP56400CE") — still computed
+    # and displayed as a label for which contract this trade models, even
+    # though nothing subscribes to it for a live tick any more.
+    #
+    # premium_synthetic is DEAD as of 2026-09-22 — permanently True for the
+    # life of every trade. It used to be a one-way latch (True until a real
+    # WS tick for option_symbol arrived, after which current_premium/
+    # exit_premium switched to that real LTP instead of the Black-Scholes
+    # mark) — removed after that switch let a real tick snap settlement
+    # past the scalp strategy's whole ~₹2-3 target/stop bracket (see
+    # bn_trade.check_tick_exit's docstring for the full incident writeup).
+    # entry_premium is, and always was, ALWAYS the Black-Scholes value.
+    # Backtest's BTPosition has no equivalent fields; this only ever
+    # applies to a live BNTrade.
     option_symbol:      str  = ""
     premium_synthetic:  bool = True
 

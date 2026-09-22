@@ -19,8 +19,6 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, List
 from zoneinfo import ZoneInfo
 
-import numpy as np
-
 import app.config as cfg
 from app.engine import bn_breakout
 from app.engine.bn_entry_exit import _leader_qty_surge, _stock_qty_threshold, evaluate_entry
@@ -31,7 +29,7 @@ from app.engine.nf_entry_exit import _stock_qty_threshold as _nf_stock_qty_thres
 from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
 from app.engine.nf_pricing import build_weekly_option_symbol
 from app.engine.nf_pricing import get_next_expiry as nf_get_next_expiry
-from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase, closed_tail
+from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase, closed_tail_closes
 from app.services import bn_trade, nf_trade, price_alerts
 from app.services.historical_data import fetch_indicator_history
 from app.services.market_data import MarketDataService
@@ -299,13 +297,12 @@ class SchedulerService:
             bn_candles = list(st.bn_index_candles_5m)
         if not bn_candles:
             return
-        # closed_tail() excludes the still-forming last bar before feeding
-        # estimate_iv — see its own docstring for why (this was the actual
-        # root cause of a real production bug on the exit side, where the
-        # tight ~₹2-3 target/stop bracket got blown through by pure
+        # closed_tail_closes() excludes the still-forming last bar before
+        # feeding estimate_iv — see its own docstring for why (this was the
+        # actual root cause of a real production bug on the exit side, where
+        # the tight ~₹2-3 target/stop bracket got blown through by pure
         # IV-estimate inconsistency, not real price movement).
-        tail = closed_tail(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
-        lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
+        lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
         try:
             closed = bn_trade.check_tick_exit(_now(), st.bn_index_ltp, lookback)
             if closed:
@@ -341,11 +338,11 @@ class SchedulerService:
         # every subsequent tick until it closes + cooldown — no risk of
         # firing twice off one live signal.
         bn_recent = bn_candles[-5:]
-        # closed_tail() excludes the still-forming last bar (see its own
-        # docstring) even though the live tick price is deliberately used
-        # elsewhere in this function (current_index_price/basket_ltp below).
-        tail = closed_tail(bn_candles, cfg.BN_INDICATOR_LOOKBACK_BARS)
-        bn_closes_lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
+        # closed_tail_closes() excludes the still-forming last bar (see its
+        # own docstring) even though the live tick price is deliberately
+        # used elsewhere in this function (current_index_price/basket_ltp
+        # below).
+        bn_closes_lookback = closed_tail_closes(bn_candles, cfg.BN_INDICATOR_LOOKBACK_BARS)
 
         # Top-8 weighted-basket scalp strategy (2026-09-21) — only these 8
         # tokens (cfg.BN_SCALP_BASKET), not the full 14-stock BN_ALL_STOCKS
@@ -390,9 +387,8 @@ class SchedulerService:
             nf_candles = list(st.nf_index_candles_5m)
         if not nf_candles:
             return
-        # See the BN mirror's comment above — same forming-bar exclusion via closed_tail().
-        tail = closed_tail(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
-        lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
+        # See the BN mirror's comment above — same forming-bar exclusion via closed_tail_closes().
+        lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
         try:
             closed = nf_trade.check_tick_exit(_now(), st.nf_index_ltp, lookback)
             if closed:
@@ -418,10 +414,9 @@ class SchedulerService:
         # Evaluated every tick, not once per closed bar — see the BN
         # mirror's comment in _tick_entries above.
         nf_recent = nf_candles[-5:]
-        # See the BN mirror's comment in _tick_entries above — closed_tail()
-        # excludes the still-forming last bar from the IV estimator's input.
-        tail = closed_tail(nf_candles, cfg.NF_INDICATOR_LOOKBACK_BARS)
-        nf_closes_lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
+        # See the BN mirror's comment in _tick_entries above —
+        # closed_tail_closes() excludes the still-forming last bar.
+        nf_closes_lookback = closed_tail_closes(nf_candles, cfg.NF_INDICATOR_LOOKBACK_BARS)
 
         # 2026-09-21: Top-8 weighted-basket tokens (cfg.NF_SCALP_BASKET),
         # not the 12-stock NF_LEADER_STOCKS the old rule used.
@@ -597,8 +592,7 @@ class SchedulerService:
             with st._bn_index_lock:
                 bn_candles = list(st.bn_index_candles_5m)
             if bn_candles:
-                tail = closed_tail(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
-                lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
+                lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
                 closed = bn_trade.force_close(_now(), st.bn_index_ltp, lookback)
                 if closed:
                     try:
@@ -614,8 +608,7 @@ class SchedulerService:
             with st._nf_index_lock:
                 nf_candles = list(st.nf_index_candles_5m)
             if nf_candles:
-                tail = closed_tail(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
-                lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
+                lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
                 closed = nf_trade.force_close(_now(), st.nf_index_ltp, lookback)
                 if closed:
                     try:

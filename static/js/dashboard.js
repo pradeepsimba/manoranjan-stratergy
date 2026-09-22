@@ -207,19 +207,21 @@ function renderTrade(t, ids, diag) {
     ['SL Stage', t.slStage],
     ['Confidence', t.confidence != null ? t.confidence + '%' : '—'],
     ['Entry Premium', '₹' + fmt2(t.entryPremium)],
+    // 'Current Premium', not 'Price Source' — the real-option-LTP feature
+    // that used to let this switch between a theoretical Black-Scholes
+    // mark and a real market LTP mid-trade was removed 2026-09-22 (it let
+    // a real tick snap settlement past the scalp strategy's tight ~₹2-3
+    // bracket — see CLAUDE.md's "Real-option-LTP paper trading" note for
+    // the incident writeup). Every premium here is now always the
+    // synthetic Black-Scholes mark, so a "Price Source" row showing a
+    // permanently-constant value would just be dead weight.
     ['Current Premium', '₹' + fmt2(t.currentPremium)],
-    // Real-option-LTP feature (2026-09-17) — t.premiumSynthetic is a
-    // one-way latch: true until the first real WS tick for optionSymbol
-    // arrives, after which Current/Exit Premium above are real LTP, not
-    // Black-Scholes. See CLAUDE.md's "Real-option-LTP paper trading" note.
-    ['Price Source', t.premiumSynthetic ? 'Synthetic (BS)' : 'Real (LTP)'],
     ['IV Used', t.currentIv != null ? (t.currentIv * 100).toFixed(1) + '%' : '—'],
     ['Live P&L', (livePnl >= 0 ? '+' : '') + '₹' + fmt2(livePnl)],
   ];
   card.innerHTML = cells.map(([lbl, val], i) => {
     const cls = lbl === 'SL Stage' ? stageCls
       : lbl === 'Live P&L' ? pnlCls
-      : lbl === 'Price Source' ? (t.premiumSynthetic ? '' : 'pnl-pos')
       : '';
     return `<div class="trade-cell"><span class="lbl">${escHtml(lbl)}</span><span class="val ${cls}">${val}</span></div>`;
   }).join('');

@@ -23,7 +23,7 @@ from app.engine.bn_entry_exit import (
     open_trade_from_signal,
 )
 from app.engine.bn_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
-from app.models import BNSignal, BNTrade, PositionStatus, closed_tail
+from app.models import BNSignal, BNTrade, PositionStatus, closed_tail_closes
 from app.state import get_state
 
 _order_seq = itertools.count(1)
@@ -53,10 +53,10 @@ def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
     st.active_trade = trade
     st.bn_trades_today += 1
     # Real-option-LTP subscription/override DISABLED for the scalp strategy
-    # (2026-09-22, explicit user decision) — see _settle's comment below for
-    # why. trade.option_symbol is still computed/displayed (a useful label
-    # for which contract this models), just never subscribed to for a live
-    # tick any more.
+    # (2026-09-22, explicit user decision) — see check_tick_exit's docstring
+    # below for the full incident writeup. trade.option_symbol is still
+    # computed/displayed (a useful label for which contract this models),
+    # just never subscribed to for a live tick any more.
 
     print(
         f"[PAPER] {trade.direction} {trade.option_type} {trade.strike} @ premium "
@@ -93,13 +93,12 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
 
     with st._bn_index_lock:
         bn_candles = list(st.bn_index_candles_5m)
-    # closed_tail() excludes the still-forming bar — a manual entry's
-    # premium must be computed on the same basis as the exit-tick checks
-    # that will later compare against it, or the tight ₹ target/stop
-    # bracket gets blown through by pure IV-estimate noise, not real
+    # closed_tail_closes() excludes the still-forming bar — a manual
+    # entry's premium must be computed on the same basis as the exit-tick
+    # checks that will later compare against it, or the tight ₹ target/
+    # stop bracket gets blown through by pure IV-estimate noise, not real
     # movement.
-    tail = closed_tail(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
-    lookback = np.fromiter((c.close for c in tail), np.float64, len(tail))
+    lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
 
     spot = st.bn_index_ltp
     option_type = "CE" if direction == "BUY" else "PE"
