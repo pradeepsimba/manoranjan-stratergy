@@ -766,7 +766,6 @@ class SchedulerService:
             hist = await fetch_indicator_history(cfg.BN_ALL_STOCKS, cfg.INTERVAL_5M, days_back=5)
             for token_key, candles in hist.items():
                 st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
-                st.tick_version[token_key] = st.tick_version.get(token_key, 0) + 1
 
             bn_hist = await fetch_indicator_history(
                 {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, cfg.INTERVAL_5M, days_back=1)
@@ -790,7 +789,6 @@ class SchedulerService:
             nf_hist = await fetch_indicator_history(cfg.NF_ALL_STOCKS, cfg.INTERVAL_5M, days_back=5)
             for token_key, candles in nf_hist.items():
                 st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
-                st.tick_version[token_key] = st.tick_version.get(token_key, 0) + 1
 
             # 1 day back, matching BN_INDEX_NAME's own fetch — an older repo
             # comment claimed the vendor's REST API returns full multi-day
@@ -1002,7 +1000,7 @@ class SchedulerService:
                 "noTradeReason": d.no_trade_reason, "atmStrike": d.atm_strike,
                 "atmPremium": d.atm_premium, "atmIv": d.atm_iv,
                 "atmCePremium": d.atm_ce_premium, "atmPePremium": d.atm_pe_premium,
-                "cooldownOk": d.cooldown_ok, "sidewaysOk": d.sideways_ok,
+                "cooldownOk": d.cooldown_ok, "cooldownMs": d.cooldown_ms, "sidewaysOk": d.sideways_ok,
                 "dirCountOk": d.dir_count_ok, "qtySurgeOk": d.qty_surge_ok,
                 "sameDirectionRequired": d.same_direction_required,
                 "gatesClear": d.gates_clear, "entryReady": d.entry_ready,

@@ -169,55 +169,9 @@ _updateAlertButton();
 _refreshAlertThresholds();
 setInterval(_refreshAlertThresholds, 60000);
 
-// ── Leader-consensus signal study (see app/backtest/signal_study.py) ─────────
-// Synchronous — one request, no run_id/polling like the real backtest needs.
-
-function runBnSignalStudy() {
-  const btn = document.getElementById('signal-study-run-btn');
-  const resultEl = document.getElementById('signal-study-result');
-  if (!resultEl) return;
-  if (btn) btn.disabled = true;
-  resultEl.innerHTML = '<div class="muted-text">Running…</div>';
-
-  const mode = document.getElementById('signal-study-mode')?.value || 'direction';
-  const days = document.getElementById('signal-study-days')?.value;
-  const required = document.getElementById('signal-study-required')?.value;
-  const params = new URLSearchParams({ mode });
-  if (days) params.set('days', days);
-  if (required) params.set('required', required);
-
-  fetch(`/api/signal-study/bn?${params.toString()}`, { method: 'POST' })
-    .then(r => r.json().then(body => ({ ok: r.ok, body })))
-    .then(({ ok, body }) => {
-      if (!ok) { resultEl.innerHTML = `<div class="muted-text pnl-neg">Error: ${escHtml(body.detail || 'request failed')}</div>`; return; }
-      renderBnSignalStudy(body);
-    })
-    .catch(e => { resultEl.innerHTML = `<div class="muted-text pnl-neg">Error: ${escHtml(e.message)}</div>`; })
-    .finally(() => { if (btn) btn.disabled = false; });
-}
-
-function renderBnSignalStudy(d) {
-  const el = document.getElementById('signal-study-result');
-  if (!el) return;
-  const modeLabel = d.mode === 'threshold' ? 'Threshold (alert pts)' : 'Simple direction';
-  if (!d.total_signals) {
-    el.innerHTML = `<div class="muted-text">${escHtml(d.note || 'No consensus signals found in the available history.')}</div>`;
-    return;
-  }
-  const pct = v => v != null ? (v * 100).toFixed(1) + '%' : '—';
-  const pts = v => v != null ? v.toFixed(2) + ' pts' : '—';
-  el.innerHTML = `
-    <div class="muted-text">Mode: ${escHtml(modeLabel)} | Range: ${escHtml(d.from_date)} to ${escHtml(d.to_date)} |
-      Consensus required: ${d.consensus_required} of 6 | Total signals: ${d.total_signals}</div>
-    <div class="bt-grid" style="margin-top:8px">
-      <div class="bt-cell"><div class="bt-cell-label">Up signals</div><div class="bt-cell-val">${d.signals_up}</div></div>
-      <div class="bt-cell"><div class="bt-cell-label">Up win rate</div>
-        <div class="bt-cell-val ${d.win_rate_up == null ? '' : d.win_rate_up >= 0.5 ? 'pnl-pos' : 'pnl-neg'}">${pct(d.win_rate_up)}</div></div>
-      <div class="bt-cell"><div class="bt-cell-label">Avg next-bar move (up)</div><div class="bt-cell-val">${pts(d.avg_move_points_up)}</div></div>
-      <div class="bt-cell"><div class="bt-cell-label">Down signals</div><div class="bt-cell-val">${d.signals_down}</div></div>
-      <div class="bt-cell"><div class="bt-cell-label">Down win rate</div>
-        <div class="bt-cell-val ${d.win_rate_down == null ? '' : d.win_rate_down >= 0.5 ? 'pnl-pos' : 'pnl-neg'}">${pct(d.win_rate_down)}</div></div>
-      <div class="bt-cell"><div class="bt-cell-label">Avg next-bar move (down)</div><div class="bt-cell-val">${pts(d.avg_move_points_down)}</div></div>
-    </div>
-  `;
-}
+// (runBnSignalStudy/renderBnSignalStudy removed 2026-09-22 — the
+// #signal-study-* panel they targeted was removed from index.html in an
+// earlier, unrelated commit; confirmed zero matching element ids anywhere
+// in the HTML and no other caller. The backend endpoint they called,
+// POST /api/signal-study/bn (app/backtest/signal_study.py), is untouched
+// and still works if called directly — only this dead UI glue is gone.)

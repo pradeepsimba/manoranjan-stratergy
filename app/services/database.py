@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """
 PostgreSQL persistence layer using asyncpg connection pool.
-Stores every executed position with full indicator context, scan log,
-and daily P&L summary.
+Stores every executed position, daily P&L summaries, backtest runs/trades,
+and dynamic settings overrides.
 """
 
 import json
@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS positions (
     exit_price      NUMERIC(10,2),
     exit_time       TEXT,
     pnl             NUMERIC(10,2)  DEFAULT 0,
+    -- rsi/macd_line/adx/plus_di/minus_di/vwap/candle_pattern/daily_green/
+    -- hourly_green: leftover equity-indicator columns from before this app
+    -- became the options strategy — save_position() below never writes any
+    -- of them (confirmed 2026-09-22: grepping every INSERT/UPDATE against
+    -- this table shows none of these 9 names). NOT dropped here — an actual
+    -- DROP COLUMN is a real, hard-to-reverse schema change against a live
+    -- database this app doesn't control the only copy of; flagging instead
+    -- of doing it unprompted. Safe to drop in a real migration once you've
+    -- confirmed nothing else reads them.
     rsi             NUMERIC(6,2),
     macd_line       NUMERIC(10,4),
     adx             NUMERIC(6,2),

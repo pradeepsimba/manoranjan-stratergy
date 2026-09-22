@@ -37,14 +37,10 @@ function connect() {
 // the market-data server; here they're all driven by the single existing
 // /ws/dashboard connection instead (see the plan's "Scanner data" decision). ─
 
-window._lastBnLtp = 0;
-
 function handleTickUpdate(prices) {
   if (!prices) return;
-  if (prices['BANKNIFTY'] != null) window._lastBnLtp = prices['BANKNIFTY'];
   if (typeof applyStockTickPrices === 'function') applyStockTickPrices(prices);
   if (typeof recordTickForAudit === 'function') recordTickForAudit(prices);
-  if (typeof appendTickToFile === 'function') appendTickToFile(prices);
 }
 
 // ── Render state ──────────────────────────────────────────────────────────────
@@ -107,7 +103,6 @@ function render(d) {
   renderEntryLoop(d.entryLoopNf, d.liveLeaderRowsNf, ENTRY_IDS_NF);
   if (typeof checkAllPriceAlerts === 'function') checkAllPriceAlerts(d.liveLeaderRows, d.liveLeaderRowsNf);
 
-  if (d.bnLtp) window._lastBnLtp = d.bnLtp;
   // Real server-side funds/active-trade state — read by kiteForm.js so the
   // manual order form's Submit button and Avail. Funds field reflect the
   // SAME account the automated engine trades against (the manual form is no
@@ -134,10 +129,6 @@ function render(d) {
   if (typeof renderSrLevels === 'function') {
     renderSrLevels(d.srLevels);
     renderSrLevels(d.srLevelsNf, STOCK_IDS_NF);
-  }
-  if (typeof renderBigTradesFromCandles === 'function') {
-    renderBigTradesFromCandles(d.stockCandles);
-    renderBigTradesFromCandles(d.stockCandlesNf, BIGTRADE_IDS_NF);
   }
 
   checkTradeTransitionForScreenshot(d.activeTrade);
@@ -491,8 +482,16 @@ function toggleSection(btn) {
 // REAL activeTrade/closedTrades transitions in STATE_UPDATE (per the plan's
 // "Trade history" decision) rather than a second, independent decision path.
 
+// setTradeLogFilter/clearTradeLog/renderTradeLog removed 2026-09-22 — the
+// #tradelog-tbody/#tl-filter-today/#tl-filter-all elements they targeted
+// don't exist anywhere in the HTML and nothing calls setTradeLogFilter/
+// clearTradeLog; renderTradeLog's body was an unconditional no-op past its
+// `!tbody` guard. The IndexedDB persistence below (initTradesDB/
+// _saveLocalTrade/updateLocalTradeLog) is untouched — it's a real,
+// independent browser-local record of every server trade, kept even
+// though there's currently no visible table reading it back.
+
 let _tradesDb = null;
-let _tradeLogFilter = 'today';
 
 function initTradesDB() {
   // version 2: keyPath 'localId' (not autoIncrement) so re-logging the same
@@ -509,7 +508,7 @@ function initTradesDB() {
     const store = db.createObjectStore('trades', { keyPath: 'localId' });
     store.createIndex('time', 'time', { unique: false });
   };
-  req.onsuccess = (e) => { _tradesDb = e.target.result; renderTradeLog(); };
+  req.onsuccess = (e) => { _tradesDb = e.target.result; };
   req.onerror = () => console.error('TradesDB unavailable');
 }
 
@@ -520,7 +519,6 @@ function _saveLocalTrade(obj) {
   _writtenTradeLogIds.add(obj.localId);
   const tx = _tradesDb.transaction('trades', 'readwrite');
   tx.objectStore('trades').put(obj);   // put (not add) — localId makes re-logging idempotent
-  tx.oncomplete = renderTradeLog;
 }
 
 function updateLocalTradeLog(activeTrade, closedTrades) {
@@ -544,51 +542,6 @@ function updateLocalTradeLog(activeTrade, closedTrades) {
   });
 }
 
-function setTradeLogFilter(which) {
-  _tradeLogFilter = which;
-  document.getElementById('tl-filter-today').classList.toggle('active', which === 'today');
-  document.getElementById('tl-filter-all').classList.toggle('active', which === 'all');
-  renderTradeLog();
-}
-
-function clearTradeLog() {
-  if (!_tradesDb) return;
-  const tx = _tradesDb.transaction('trades', 'readwrite');
-  tx.objectStore('trades').clear();
-  tx.oncomplete = renderTradeLog;
-}
-
-function renderTradeLog() {
-  const tbody = document.getElementById('tradelog-tbody');
-  if (!_tradesDb || !tbody) return;
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-
-  const tx = _tradesDb.transaction('trades', 'readonly');
-  const rows = [];
-  tx.objectStore('trades').openCursor(null, 'prev').onsuccess = (ev) => {
-    const cursor = ev.target.result;
-    if (cursor) {
-      const row = cursor.value;
-      if (_tradeLogFilter === 'all' || new Date(row.time) >= todayStart) rows.push(row);
-      cursor.continue();
-    } else {
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">No local trades logged yet</td></tr>';
-        return;
-      }
-      tbody.innerHTML = rows.map(r => {
-        const pnlCls = r.pnl > 0 ? 'pnl-pos' : r.pnl < 0 ? 'pnl-neg' : '';
-        return `<tr>
-          <td>${escHtml(r.type)}</td><td>${fmt2(r.price)}</td>
-          <td>${new Date(r.time).toLocaleString()}</td>
-          <td>${r.confidence != null ? r.confidence + '%' : '—'}</td>
-          <td class="${pnlCls}">${r.pnl != null ? fmt2(r.pnl) : '—'}</td>
-        </tr>`;
-      }).join('');
-    }
-  };
-}
-
 // ── Auto-screenshot on entry (port of c.html's takeTradeScreenshot) ──────────
 
 let _hadActiveTrade = false;
@@ -608,62 +561,16 @@ function checkTradeTransitionForScreenshot(activeTrade) {
   _hadActiveTrade = hasNow;
 }
 
-// ── CSV/file export (File System Access API, port of chooseOutputFile/
-// appendToFile/pickFields) — newline-delimited JSON of the same 4 fields as
-// c.html ({stockname, time, ltp, qty}); this feed carries no per-tick qty
-// field, so qty is always 0 here — expected, not a bug. ──────────────────────
+// (chooseOutputFile/appendTickToFile CSV/file-export feature removed
+// 2026-09-22 — the #fileexport-status element and its trigger button don't
+// exist anywhere in the HTML; appendTickToFile was still called on every
+// tick from handleTickUpdate but was permanently a no-op since
+// _writableStream could only ever be set by the unreachable
+// chooseOutputFile. Confirmed dead, not just unused.)
 
-let _fileHandle = null;
-let _writableStream = null;
-
-async function chooseOutputFile() {
-  const statusEl = document.getElementById('fileexport-status');
-  if (!window.showSaveFilePicker) {
-    if (statusEl) statusEl.textContent = 'File System Access API not supported in this browser.';
-    return;
-  }
-  try {
-    _fileHandle = await window.showSaveFilePicker({
-      suggestedName: 'bn_ticks.txt',
-      types: [{ description: 'Text File', accept: { 'text/plain': ['.txt'] } }],
-    });
-    _writableStream = await _fileHandle.createWritable();
-    if (statusEl) statusEl.textContent = `Writing to ${_fileHandle.name}`;
-  } catch (e) {
-    if (statusEl) statusEl.textContent = 'File selection cancelled.';
-  }
-}
-
-async function appendTickToFile(prices) {
-  if (!_writableStream) return;
-  const now = new Date().toISOString();
-  for (const name of QTY_AUDIT_LEADER_STOCKS) {
-    if (prices[name] === undefined) continue;
-    const line = JSON.stringify({ stockname: name, time: now, ltp: prices[name], qty: 0 }) + '\n';
-    try { await _writableStream.write(line); } catch (e) { /* stream closed */ }
-  }
-}
-
-// ── Trade Conditions modal (read-only, sourced from /api/settings) ───────────
-
-function openConditionModal() {
-  const modal = document.getElementById('condition-modal');
-  const body  = document.getElementById('condition-modal-body');
-  modal.classList.remove('hidden');
-  fetch('/api/settings').then(r => r.json()).then(desc => {
-    const groups = (desc && desc.groups) || [];
-    body.innerHTML = groups.map(g => `
-      <h4 style="margin:10px 0 4px;color:var(--txt-2)">${escHtml(g.name)}</h4>
-      <table><tbody>
-        ${g.settings.map(s => `<tr><td>${escHtml(s.label)}</td><td>${escHtml(String(s.value))}</td></tr>`).join('')}
-      </tbody></table>
-    `).join('');
-  }).catch(() => { body.textContent = 'Could not load settings.'; });
-}
-
-function closeConditionModal() {
-  document.getElementById('condition-modal').classList.add('hidden');
-}
+// (openConditionModal/closeConditionModal removed 2026-09-22 — the
+// #condition-modal/#condition-modal-body elements they targeted don't
+// exist anywhere in the HTML and no button calls them; confirmed dead.)
 
 // ── Backtest ───────────────────────────────────────────────────────────────────
 

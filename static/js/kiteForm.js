@@ -50,8 +50,6 @@ function kiteSetType(type, ids) {
   if (sellEl) sellEl.classList.toggle('active', type === 'SELL');
 }
 
-function kiteSetOrdType() { /* cosmetic only — see file header; server always fills at the current mark */ }
-
 function kiteUpdateFundsDisplay(ids) {
   ids = ids || KITE_IDS_BN;
   const el = document.getElementById(ids.funds);

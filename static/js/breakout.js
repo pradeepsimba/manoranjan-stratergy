@@ -274,15 +274,13 @@ function renderStockCandles(stockCandles, ids, cacheAsLive) {
   _lastStockOrder = Array.from(new Set(_lastStockOrder.concat(names)));
   // Shared with qtyAudit.js (window-level, no module system here) — the
   // vendor's current protocol embeds a real per-trade quantity on live
-  // ticks (parsed server-side into Candle.last_qty); the Big Trades panel
+  // ticks (parsed server-side into Candle.last_qty); recordTickForAudit
   // uses each stock's latest bar's last_qty as the real "quantity" figure.
-  window._lastVolumeByStock = window._lastVolumeByStock || {};
   window._lastQtyByStock = window._lastQtyByStock || {};
   names.forEach(n => {
     const bars = stockCandles[n] || [];
     if (bars.length) {
       _lastOpenByStock[n] = bars[bars.length - 1].open;
-      window._lastVolumeByStock[n] = bars[bars.length - 1].volume;
       window._lastQtyByStock[n] = bars[bars.length - 1].lastQty;
     }
   });

@@ -539,9 +539,9 @@ MAX_CANDLE_BUFFER = 300   # per-symbol in-memory candle buffer (deque maxlen)
 WS_MAX_FILTERS_PER_CONN = 35
 
 # Backtest v1 is intraday/5m only — nothing in c.html holds an option position
-# across days, so positional (delivery / 1d) replay is not built.
-BACKTEST_TIMEFRAMES = ["5m"]
-BACKTEST_MODES      = ["intraday"]
+# across days, so positional (delivery / 1d) replay is not built. (Removed
+# 2026-09-22: BACKTEST_TIMEFRAMES/BACKTEST_MODES constants — leftover from a
+# removed Backtest-panel dropdown, confirmed zero readers anywhere in the repo.)
 SCAN_WORKERS        = min(8, max(4, os.cpu_count() or 4))   # per-day backtest parallelism (ThreadPoolExecutor)
 
 # Moved out of the dynamic Settings-page tunables (2026-09-09, explicit user
@@ -869,10 +869,6 @@ _DEFAULTS: Dict[str, Any] = {
 _runtime_overrides: Dict[str, Any] = {}
 _thread_ctx = threading.local()
 
-# Bumped on every runtime-override mutation (Settings page apply/reset) — the
-# single choke point for "did a dynamic tunable change".
-_settings_generation = 0
-
 
 def __getattr__(name: str) -> Any:
     """PEP 562 resolver for dynamic tunables (static attrs never reach here)."""
@@ -893,41 +889,30 @@ def __dir__() -> List[str]:
 
 
 # ── Runtime-override management (Settings page / DB) ──────────────────────────
-
-def is_dynamic(name: str) -> bool:
-    return name in _DEFAULTS
-
+# (is_dynamic/runtime_overrides/settings_generation removed 2026-09-22 — a
+# read-only introspection API with zero callers anywhere in the repo; the
+# _settings_generation counter that fed settings_generation() was write-only
+# for the same reason. dynamic_defaults() stays — settings.py's import-time
+# drift assertion and describe() both genuinely use it.)
 
 def dynamic_defaults() -> Dict[str, Any]:
     return dict(_DEFAULTS)
 
 
-def runtime_overrides() -> Dict[str, Any]:
-    return dict(_runtime_overrides)
-
-
-def settings_generation() -> int:
-    return _settings_generation
-
-
 def set_runtime_overrides(changes: Dict[str, Any]) -> None:
     """Apply validated overrides globally (event-loop callers only)."""
-    global _settings_generation
     unknown = set(changes) - set(_DEFAULTS)
     if unknown:
         raise KeyError(f"unknown config keys: {sorted(unknown)}")
     _runtime_overrides.update(changes)
-    _settings_generation += 1
 
 
 def clear_runtime_overrides(keys: Optional[List[str]] = None) -> None:
-    global _settings_generation
     if keys is None:
         _runtime_overrides.clear()
     else:
         for k in keys:
             _runtime_overrides.pop(k, None)
-    _settings_generation += 1
 
 
 # ── Per-thread overrides (backtest workers ONLY — never the event loop) ──────

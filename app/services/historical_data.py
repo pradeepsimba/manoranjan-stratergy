@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date as _date
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -45,17 +45,6 @@ def _parse_candles(arr: list) -> List[Candle]:
         for n in arr
         if isinstance(n, dict)
     ]
-
-
-# ── Date helpers ───────────────────────────────────────────────────────────────
-
-def _today_range() -> Tuple[str, str]:
-    today     = datetime.now(IST).date()
-    from_date = datetime(today.year, today.month, today.day, 9, 15,
-                         tzinfo=IST).strftime("%Y-%m-%dT%H:%M:%S")
-    to_date   = datetime(today.year, today.month, today.day, 15, 30,
-                         tzinfo=IST).strftime("%Y-%m-%dT%H:%M:%S")
-    return from_date, to_date
 
 
 # ── Core fetch (one batch) ─────────────────────────────────────────────────────
@@ -143,20 +132,6 @@ async def _fetch_all(
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
-
-async def fetch_today_candles(
-    watchlist: Dict[str, str],
-    intervals: Optional[List[str]] = None,
-) -> Dict[str, Dict[str, List[Candle]]]:
-    if intervals is None:
-        intervals = [cfg.INTERVAL_5M]
-    stocks = [{"stockname": sym, "stock_symbol": tok}
-              for sym, tok in watchlist.items()]
-    if not stocks:
-        return {}
-    from_date, to_date = _today_range()
-    return await _fetch_all(stocks, intervals, from_date, to_date)
-
 
 async def fetch_indicator_history(
     watchlist: Dict[str, str],

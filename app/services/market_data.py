@@ -35,7 +35,6 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import websockets
-import websockets.exceptions
 
 import app.config as cfg
 from app.models import Candle, TradingPhase
@@ -47,6 +46,21 @@ _LTP_PAT = re.compile(r"LTP\s*([\d.]+)")
 _QTY_PAT = re.compile(r"qty\s+(\d+)", re.IGNORECASE)
 _BUY_QTY_PAT = re.compile(r"BuyQty\s+(\d+)")
 _SELL_QTY_PAT = re.compile(r"SellQty\s+(\d+)")
+
+
+def _parse_ltp(n: dict) -> float:
+    """Extract the LTP from a tick's `n["ltp"]` field — usually a bare
+    number, sometimes text with an embedded "LTP <value>" (see _LTP_PAT).
+    Returns 0.0 (never raises) if the field is missing or unparseable."""
+    if "ltp" not in n:
+        return 0.0
+    ltp_raw = str(n["ltp"])
+    m = _LTP_PAT.search(ltp_raw)
+    try:
+        return float(m.group(1)) if m else float(ltp_raw)
+    except ValueError:
+        return 0.0
+
 
 _MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
@@ -127,13 +141,6 @@ class MarketDataService:
         # Cancellation skips _run_ws's post-loop status update — set it here so
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
-
-    async def restart(self) -> None:
-        if not self._running:
-            return
-        await self.stop()
-        self.state.ws_status = "WS Resubscribing…"
-        self.start()
 
     # ── Real-option-LTP dynamic subscription ────────────────────────────────────
     # Called by bn_trade.py/nf_trade.py whenever their single active trade opens
@@ -366,14 +373,7 @@ class MarketDataService:
         if is_bn_opt or is_nf_opt or is_bn_atm_ce or is_bn_atm_pe or is_nf_atm_ce or is_nf_atm_pe:
             if interval != "1m":
                 return
-            ltp = 0.0
-            if "ltp" in n:
-                ltp_raw = str(n["ltp"])
-                m = _LTP_PAT.search(ltp_raw)
-                try:
-                    ltp = float(m.group(1)) if m else float(ltp_raw)
-                except (ValueError, AttributeError):
-                    pass
+            ltp = _parse_ltp(n)
             if ltp > 0:
                 if is_bn_opt:
                     st.bn_option_ltp = ltp
@@ -437,15 +437,7 @@ class MarketDataService:
             sell_qty=sell_qty,
         )
 
-        # Parse LTP
-        ltp = 0.0
-        if "ltp" in n:
-            ltp_raw = str(n["ltp"])
-            m = _LTP_PAT.search(ltp_raw)
-            try:
-                ltp = float(m.group(1)) if m else float(ltp_raw)
-            except (ValueError, AttributeError):
-                pass
+        ltp = _parse_ltp(n)
 
         if symbol == cfg.BN_INDEX_TOKEN:
             # A genuine index tick arrived — the vendor may have resumed
@@ -461,9 +453,6 @@ class MarketDataService:
         else:
             with self.state.candle_lock(symbol):
                 self._upsert(self.state.candles_5m, symbol, candle)
-                # Bumped under the SAME lock, right after the mutation, so any
-                # reader observing the new version also sees the updated candle list.
-                self.state.tick_version[symbol] = self.state.tick_version.get(symbol, 0) + 1
             if self.state.bn_index_synthetic:
                 self._update_synthetic_index()
             if self.state.nf_index_synthetic:

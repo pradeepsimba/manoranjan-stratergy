@@ -3,11 +3,12 @@ from __future__ import annotations
 """
 Backtest data layer for the Bank Nifty options strategy.
 
-Fetches 5-minute history for BankNifty + the 11 BN stocks (fixed universe,
-app.config.BN_INDEX_TOKEN / BN_ALL_STOCKS — no watchlist/Gemini selection
-involved) over the requested range, with extra warmup days so the composite
-indicator gate is valid from the first bar, and organizes each symbol's bars
-into a per-day index for the replay engine.
+Fetches 5-minute history for BankNifty + the 14 real NIFTY BANK stocks
+(fixed universe, app.config.BN_INDEX_TOKEN / BN_ALL_STOCKS — no watchlist/
+Gemini selection involved) over the requested range, with extra warmup days
+so the realized-vol IV estimate (see bn_pricing.estimate_iv) is valid from
+the first bar, and organizes each symbol's bars into a per-day index for
+the replay engine.
 """
 
 import asyncio
@@ -30,13 +31,12 @@ class SymbolSeries:
     by_day:    Dict[str, List[int]]         = field(default_factory=dict)  # "YYYY-MM-DD" -> [idx...]
     at:        Dict[str, Dict[str, int]]    = field(default_factory=dict)  # date -> {"HH:MM": idx}
 
-    # NumPy mirrors of `series`, built once by index_days(). The replay engine
-    # slices these as zero-copy views instead of rebuilding float64 arrays
-    # from Candle objects on every bar.
+    # NumPy mirror of `series.close`, built once by index_days(). The replay
+    # engine slices this as a zero-copy view instead of rebuilding a float64
+    # array from Candle objects on every bar. (highs/lows/vols mirrors were
+    # removed 2026-09-22 — confirmed zero readers anywhere in the repo; only
+    # .closes is ever actually consumed, by engine.py's IV/lookback slicing.)
     closes: Optional[np.ndarray] = None
-    highs:  Optional[np.ndarray] = None
-    lows:   Optional[np.ndarray] = None
-    vols:   Optional[np.ndarray] = None
 
     def index_days(self) -> None:
         for i, c in enumerate(self.series):
@@ -46,23 +46,21 @@ class SymbolSeries:
             self.at.setdefault(d, {})[tm] = i
 
         n = len(self.series)
-        self.closes = np.fromiter((c.close  for c in self.series), np.float64, n)
-        self.highs  = np.fromiter((c.high   for c in self.series), np.float64, n)
-        self.lows   = np.fromiter((c.low    for c in self.series), np.float64, n)
-        self.vols   = np.fromiter((c.volume for c in self.series), np.float64, n)
+        self.closes = np.fromiter((c.close for c in self.series), np.float64, n)
 
 
 def _sort_candles(candles: List[Candle]) -> List[Candle]:
     return sorted(candles, key=lambda c: c.start_time)
 
 
-def warmup_calendar_days(timeframe: str, configured: int,
-                         lookback: Optional[int] = None) -> int:
+def warmup_calendar_days(configured: int, lookback: Optional[int] = None) -> int:
     """
-    Enough calendar days before the range for the composite indicator gate to
-    converge at the chosen timeframe. `lookback` bars at `timeframe` minutes →
-    trading days (÷ ~375 session min) → calendar days (× 7/5 for weekends),
-    floored at the configured warmup.
+    Enough calendar days before the range for the realized-vol IV estimate
+    (see bn_pricing.estimate_iv) to have enough closes to converge on 5m
+    bars. `lookback` bars at 5m each → trading days (÷ ~375 session min) →
+    calendar days (× 7/5 for weekends), floored at the configured warmup.
+    (A `timeframe` parameter used to be here — removed 2026-09-22, it was
+    never anything but "5m" at the one call site and the body ignored it.)
 
     `lookback` is passed explicitly (not read from cfg) because a backtest run
     may OVERRIDE BN_INDICATOR_LOOKBACK_BARS, and that override is only active
@@ -84,14 +82,14 @@ async def load_backtest_data(db, from_d: date, to_d: date,
     """
     Returns (bn_index, stocks) where:
       bn_index — SymbolSeries for BankNifty (None if no data at all is available)
-      stocks   — {token: SymbolSeries} for the 11 BN stocks
+      stocks   — {token: SymbolSeries} for the 14 real NIFTY BANK stocks
 
     BankNifty history comes from OUR OWN self-recorded archive (`db`,
     app.services.database.get_bn_index_bars) — the external market-data
     server has no historical archive for the index itself (confirmed
     empirically: every date-range request returns only the current day),
-    unlike the 11 stocks, which are fetched from it directly and DO have
-    full multi-day history. The archive grows by one day at a time (see
+    unlike the stocks, which are fetched from it directly and DO have full
+    multi-day history. The archive grows by one day at a time (see
     scheduler._run_eod), so backtest range/depth is bounded by how long the
     live engine has been running, not by this function.
 
@@ -101,7 +99,7 @@ async def load_backtest_data(db, from_d: date, to_d: date,
     tf = cfg.INTERVAL_5M
     if warmup_days is None:
         warmup_days = cfg.BACKTEST_WARMUP_DAYS
-    warmup_days = warmup_calendar_days(tf, warmup_days, lookback)
+    warmup_days = warmup_calendar_days(warmup_days, lookback)
     fetch_from = (from_d - timedelta(days=warmup_days)).isoformat()
     fetch_to   = (to_d + timedelta(days=1)).isoformat()
 

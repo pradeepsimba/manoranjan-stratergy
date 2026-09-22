@@ -34,7 +34,6 @@ class AppState:
         # ── Candle stores — BankNifty index + the 12 BN stocks, all keyed by
         # TOKEN. Capped at 300 bars (deque maxlen set on assignment). ─────────
         self.candles_5m: Dict[str, List[Candle]] = {}
-        self.tick_version: Dict[str, int] = {}
         # deque(maxlen=...), not a plain list — MarketDataService._upsert_list
         # relies on maxlen for O(1) eviction of the oldest bar once the buffer
         # is full, matching the deque-per-token stores in candles_5m.
