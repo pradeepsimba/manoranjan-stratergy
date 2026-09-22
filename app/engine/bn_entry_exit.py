@@ -88,9 +88,23 @@ def evaluate_entry(
     basket_candles: Dict[str, List[Candle]],
     last_exit_time: Optional[datetime] = None,
     trades_today: int = 0,
+    current_index_price: Optional[float] = None,
+    basket_ltp: Optional[Dict[str, float]] = None,
 ) -> Tuple[Optional[BNSignal], BNDiagnostic]:
     """
-    Evaluate ONE just-closed BankNifty 5m bar for a scalp entry.
+    Evaluate a scalp entry against the CURRENT market state.
+
+    Evaluated every tick (2026-09-22, explicit user decision — was
+    previously once per closed 5m bar): `current_index_price`/`basket_ltp`
+    let the live scheduler feed the CURRENT live tick price for BankNifty
+    and each basket leg, so the score reacts within ~100ms of a real move
+    instead of waiting up to 5 minutes for the next bar close. Both
+    default to None, in which case this falls back to the last available
+    bar close (`bn_recent_candles[-1].close` / each leg's own last close)
+    — that fallback is what backtest uses, since it has no tick stream at
+    all (see scalp_signals.compute_basket_reading's own docstring) — this
+    is the one deliberate, CALLER-level live/backtest divergence this
+    function allows, not a fork of the decision logic itself.
 
     1. Composite score = sum(weight_i * (ltp_i-vwap_i)/vwap_i*100) over
        cfg.BN_SCALP_BASKET's 8 heaviest-weighted BN constituents (VWAP is a
@@ -117,7 +131,8 @@ def evaluate_entry(
     pure function tracks itself.
     """
     bn_bar_time = bn_recent_candles[-1].start_time if bn_recent_candles else ""
-    bn_close = bn_recent_candles[-1].close if bn_recent_candles else 0.0
+    bn_close = current_index_price if current_index_price else (
+        bn_recent_candles[-1].close if bn_recent_candles else 0.0)
 
     no_trade_reason: Optional[str] = None
 
@@ -137,7 +152,8 @@ def evaluate_entry(
         no_trade_reason = f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached"
 
     name_by_token = {tok: name for name, tok in cfg.BN_ALL_STOCKS.items()}
-    reading = compute_basket_reading(cfg.BN_SCALP_BASKET, basket_candles, name_by_token, now.date())
+    reading = compute_basket_reading(cfg.BN_SCALP_BASKET, basket_candles, name_by_token,
+                                     now.date(), ltp_by_token=basket_ltp)
     threshold = cfg.BN_SCALP_SCORE_THRESHOLD
 
     score_buy_ok = reading.score >= threshold
@@ -174,8 +190,26 @@ def evaluate_entry(
         strike = itm_ce_strike if option_type == "CE" else itm_pe_strike
         premium = itm_ce_premium if option_type == "CE" else itm_pe_premium
 
+        # seed keys on the basket score ITSELF (rounded to 3dp), not
+        # bn_bar_time and NOT wall-clock time. Two failed attempts, in
+        # order:
+        #  1. bn_bar_time (the forming bar's start) — constant for up to 5
+        #     minutes, so every tick within the same bar got the IDENTICAL
+        #     synthetic depth/W-OBI verdict, silently freezing this gate
+        #     even while score/top2 above genuinely re-sample every tick.
+        #  2. now.isoformat() (tick-precision wall clock) — swung too far
+        #     the other way: a FRESH independent random roll every ~100ms
+        #     means a persistent signal gets 10-20+ independent tries per
+        #     second, so the cumulative chance of at least one clearing
+        #     BN_WOBI_MIN_RATIO approaches ~100% within a second or two —
+        #     defeating W-OBI as a real filter (found in review).
+        # Keying on the score instead ties W-OBI to something that only
+        # changes when the market genuinely moves (score is itself driven
+        # by the live tick every cycle — see compute_basket_reading), with
+        # no free re-rolls: the same score always yields the same verdict,
+        # so a marginal signal can't just wait out a lucky dice roll.
         depth = synthetic_depth(cfg.BN_LOT_SIZE, itm_iv, reading.score,
-                                seed=f"BN{option_type}{strike}:{bn_bar_time}")
+                                seed=f"BN{option_type}{strike}:{reading.score:.3f}")
         wobi_value = compute_wobi(depth)
         wobi_ok = wobi_value > cfg.BN_WOBI_MIN_RATIO
 

@@ -51,7 +51,6 @@ def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
     trade = open_trade_from_signal(signal, now, order_id)
 
     st.active_trade = trade
-    st.last_trade_candle = signal.bar_time
     st.bn_trades_today += 1
     st.bn_option_ltp = None   # fresh — any stale value from a prior trade must not leak in
     # Start streaming this trade's real option leg (2026-09-17) — entry_premium

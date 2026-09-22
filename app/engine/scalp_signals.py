@@ -15,9 +15,12 @@ replayed there. Using bar data for both live and backtest keeps them on
 the exact same evaluate_entry implementation — this repo's hard "shared
 decision core" convention (see CLAUDE.md).
 
-Entry is evaluated once per newly-closed 5m bar (same convention the old
-leader-vote rule used) — this score is therefore a per-bar snapshot, not a
-continuously-updating tick value either, matching that cadence.
+Entry is evaluated every tick (2026-09-22, explicit user decision — see
+compute_basket_reading's own ltp_by_token param below), not once per
+newly-closed 5m bar as before that change — the SCORE itself is therefore a
+continuously-updating tick value (via ltp_by_token), even though VWAP, its
+other half, still only ever moves at 5m-bar-close granularity (see
+ltp_by_token's own docstring for why that half can't be tick-level too).
 """
 
 from dataclasses import dataclass, field
@@ -70,18 +73,26 @@ def compute_basket_reading(
     candles_by_token: Dict[str, List[Candle]],
     name_by_token: Dict[str, str],
     today: date,
+    ltp_by_token: Optional[Dict[str, float]] = None,
 ) -> BasketReading:
     """
     basket: {token: weight}, already renormalized to sum 1.0 (see
         cfg.BN_SCALP_BASKET/NF_SCALP_BASKET).
-    candles_by_token: this basket's own tokens' recent closed 5m candles —
-        caller slices to CLOSED bars only, same convention as the old
-        leader_recent dict (see bn_entry_exit.evaluate_entry's caller in
-        scheduler.py / the backtest engine's _leader_recent_at).
-    "ltp" for each leg is that leg's own last CLOSED bar's close — not a
-    separately-tracked live tick — so live and backtest read the identical
-    value for the identical bar (no separate real-time price feed needed
-    for this signal at all).
+    candles_by_token: this basket's own tokens' 5m candles for TODAY (may
+        include the still-forming bar — session_vwap only filters by date,
+        it doesn't care whether the last bar is closed).
+    ltp_by_token: live current price per token (2026-09-22, explicit user
+        decision — entry is now evaluated every tick, not once per closed
+        bar). The live scheduler passes this from st.ltp/st.bn_index_ltp so
+        the score reacts to the CURRENT price instantly; VWAP itself still
+        comes from 5m bar history either way (a session-to-date average
+        can't be tick-level without a whole new tick-accumulation pipeline
+        — see this module's docstring). Backtest omits this entirely (it
+        has no tick stream), falling back to the leg's last bar close —
+        this is the one deliberate, CALLER-level live/backtest divergence
+        this function allows, matching the class of divergence CLAUDE.md's
+        "shared decision core" convention already permits for touch
+        resolution.
     """
     legs: List[BasketLeg] = []
     score = 0.0
@@ -89,7 +100,7 @@ def compute_basket_reading(
         name = name_by_token.get(token, token)
         candles = candles_by_token.get(token) or []
         vwap = session_vwap(candles, today)
-        ltp = candles[-1].close if candles else None
+        ltp = (ltp_by_token or {}).get(token) or (candles[-1].close if candles else None)
         dev: Optional[float] = None
         if vwap and vwap > 0 and ltp:
             dev = (ltp - vwap) / vwap * 100.0

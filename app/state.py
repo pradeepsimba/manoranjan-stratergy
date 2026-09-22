@@ -57,16 +57,19 @@ class AppState:
         # ── The single active Bank Nifty options trade ────────────────────────
         self.active_trade:   Optional[BNTrade] = None
         self.closed_trades:  List[BNTrade]     = []   # today's closed trades
-        self.last_trade_candle: Optional[str]  = None  # dedupe same-5m-bar re-entry
-        self.last_exit_time: Optional[str]     = None  # ISO timestamp, 60s cooldown
+        self.last_exit_time: Optional[str]     = None  # ISO timestamp, cooldown
         self.daily_pnl:      float             = 0.0
         # Running paper-account balance — persists ACROSS days (see database's
         # _BN_FUNDS key), unlike daily_pnl which resets every EOD.
         self.funds: float = 0.0
 
         # ── Latest entry-loop diagnostic ("why didn't it fire") for the dashboard ─
+        # (last_evaluated_bar/last_trade_candle — the old "one eval per closed
+        # bar" dedup — were removed 2026-09-22 alongside the switch to
+        # tick-wise entry evaluation; st.active_trade plus evaluate_entry's own
+        # cooldown check already fully gate re-entry, so no bar-boundary
+        # bookkeeping is needed any more.)
         self.bn_diagnostic: Optional[BNDiagnostic] = None
-        self.last_evaluated_bar: Optional[str]     = None   # dedupe: one eval per closed bar
         # Scalp strategy (2026-09-21) risk guardrail: trades OPENED today,
         # for cfg.SCALP_MAX_TRADES_PER_DAY — reset every EOD alongside
         # closed_trades. Shared trading-window guardrail needs no state
@@ -102,10 +105,8 @@ class AppState:
 
         self.active_trade_nf:      Optional[NFTrade] = None
         self.closed_trades_nf:     List[NFTrade]      = []
-        self.last_trade_candle_nf: Optional[str]      = None
         self.last_exit_time_nf:    Optional[str]      = None
         self.nf_diagnostic:        Optional[NFDiagnostic] = None
-        self.last_evaluated_bar_nf: Optional[str]     = None
         self.nf_trades_today: int = 0   # NF mirror of bn_trades_today above
 
         # ── Real-option-LTP paper trading (2026-09-17, live-only, explicit

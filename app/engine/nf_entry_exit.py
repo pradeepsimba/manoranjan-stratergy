@@ -68,10 +68,14 @@ def evaluate_entry(
     basket_candles: Dict[str, List[Candle]],
     last_exit_time: Optional[datetime] = None,
     trades_today: int = 0,
+    current_index_price: Optional[float] = None,
+    basket_ltp: Optional[Dict[str, float]] = None,
 ) -> Tuple[Optional[NFSignal], NFDiagnostic]:
-    """NF mirror of bn_entry_exit.evaluate_entry — see there for the full gate walkthrough."""
+    """NF mirror of bn_entry_exit.evaluate_entry — see there for the full gate
+    walkthrough and the current_index_price/basket_ltp tick-wise-evaluation note."""
     nf_bar_time = nf_recent_candles[-1].start_time if nf_recent_candles else ""
-    nf_close = nf_recent_candles[-1].close if nf_recent_candles else 0.0
+    nf_close = current_index_price if current_index_price else (
+        nf_recent_candles[-1].close if nf_recent_candles else 0.0)
 
     no_trade_reason: Optional[str] = None
 
@@ -91,7 +95,8 @@ def evaluate_entry(
         no_trade_reason = f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached"
 
     name_by_token = {tok: name for name, tok in cfg.NF_ALL_STOCKS.items()}
-    reading = compute_basket_reading(cfg.NF_SCALP_BASKET, basket_candles, name_by_token, now.date())
+    reading = compute_basket_reading(cfg.NF_SCALP_BASKET, basket_candles, name_by_token,
+                                     now.date(), ltp_by_token=basket_ltp)
     threshold = cfg.NF_SCALP_SCORE_THRESHOLD
 
     score_buy_ok = reading.score >= threshold
@@ -125,8 +130,12 @@ def evaluate_entry(
         strike = itm_ce_strike if option_type == "CE" else itm_pe_strike
         premium = itm_ce_premium if option_type == "CE" else itm_pe_premium
 
+        # See bn_entry_exit.evaluate_entry's identical comment — seed keys
+        # on the score itself (ties W-OBI to genuine market movement, no
+        # free re-rolls), not nf_bar_time (froze for 5min) or wall-clock
+        # time (let a persistent signal dice-roll its way past the filter).
         depth = synthetic_depth(cfg.NF_LOT_SIZE, itm_iv, reading.score,
-                                seed=f"NF{option_type}{strike}:{nf_bar_time}")
+                                seed=f"NF{option_type}{strike}:{reading.score:.3f}")
         wobi_value = compute_wobi(depth)
         wobi_ok = wobi_value > cfg.NF_WOBI_MIN_RATIO
 

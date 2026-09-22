@@ -323,54 +323,57 @@ class SchedulerService:
 
         with st._bn_index_lock:
             bn_candles = list(st.bn_index_candles_5m)
-        if not bn_candles:
+        if not bn_candles or st.bn_index_ltp <= 0:
             return
 
-        new_bar_time = bn_candles[-1].start_time
-        if new_bar_time == st.last_evaluated_bar:
-            return   # already evaluated this bar — wait for the NEXT close
-        st.last_evaluated_bar = new_bar_time
-
-        # bn_candles[-1] just APPEARED this instant (market_data._upsert only
-        # appends on a newer start_time, mutating in place otherwise) — that
-        # means it's the brand-new, just-STARTED bar, often barely one tick
-        # old. The bar that actually just closed is whatever came before it.
-        # Evaluate only against bars strictly older than this new one (a
-        # start_time filter, not a blind [:-1], so a leader stock whose own
-        # feed hasn't rolled over yet doesn't lose its still-valid closed bar).
-        closed_bn_candles = [c for c in bn_candles if c.start_time < new_bar_time]
-        if not closed_bn_candles:
-            return
-
-        # evaluate_entry only reads bn_recent_candles[-1] now (the scalp
-        # strategy's basket/ITM/W-OBI pipeline needs just the just-closed
-        # bar's own time/close) — a small fixed tail, not the old momentum
-        # gate's cfg.BN_ATR_PERIOD-sized window (that gate, and the constant,
-        # are gone — see the 2026-09-21 removal of bn_signals.py).
-        bn_recent = closed_bn_candles[-5:]
+        # 2026-09-22, explicit user decision: the scalp entry is evaluated
+        # EVERY TICK (~100ms), not once per closed 5m bar — this method is
+        # already called every tick by _run_active_phase's loop, so the only
+        # change is no longer gating on "a new bar just closed" (the old
+        # last_evaluated_bar dedup is gone). current_index_price/basket_ltp
+        # feed evaluate_entry the LIVE tick price so the score reacts
+        # immediately instead of waiting up to 5 minutes for the next bar
+        # close; the candle history is still used for VWAP (which only
+        # meaningfully updates as bars complete) and the IV estimate. Once a
+        # trade opens, the `st.active_trade is not None` guard above blocks
+        # every subsequent tick until it closes + cooldown — no risk of
+        # firing twice off one live signal.
+        bn_recent = bn_candles[-5:]
+        # estimate_iv's log-returns/annualization assumes every close-to-close
+        # step is a full closed 5m bar — bn_candles[-1] is always the
+        # still-forming bar (mutated in place tick by tick, per
+        # market_data._upsert), so it must be excluded here even though the
+        # live tick price is deliberately used elsewhere in this function
+        # (current_index_price/basket_ltp below). Feeding it in would let a
+        # return spanning only however many seconds have elapsed since the
+        # bar opened get annualized as if it were a full 5-minute move,
+        # biasing itm_iv (and therefore entry_premium) by time-within-bar
+        # rather than real volatility (found in review).
+        closed_bn_candles = bn_candles[:-1] if len(bn_candles) > 1 else bn_candles[:0]
         closes = np.fromiter((c.close for c in closed_bn_candles), np.float64, len(closed_bn_candles))
         bn_closes_lookback = closes[-cfg.BN_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.BN_INDICATOR_LOOKBACK_BARS else closes
 
-        # 2026-09-21, explicit user decision: BN's entry now reads only the
-        # Top-8 weighted-basket tokens (cfg.BN_SCALP_BASKET), not the full
-        # 14-stock BN_ALL_STOCKS universe the old leader-vote rule needed.
-        # Full history (untrimmed) — session VWAP needs every bar from
-        # today's open, and 8 tokens x <=300 bars is trivial once per bar
-        # close.
+        # Top-8 weighted-basket scalp strategy (2026-09-21) — only these 8
+        # tokens (cfg.BN_SCALP_BASKET), not the full 14-stock BN_ALL_STOCKS
+        # universe the old leader-vote rule needed. Untrimmed history —
+        # session VWAP needs every bar from today's open.
+        name_by_token = {tok: name for name, tok in cfg.BN_ALL_STOCKS.items()}
         basket_candles = {}
+        basket_ltp = {}
         for token in cfg.BN_SCALP_BASKET:
             with st.candle_lock(token):
-                candles = list(st.candles_5m.get(token, []))
-            basket_candles[token] = [c for c in candles if c.start_time < new_bar_time]
+                basket_candles[token] = list(st.candles_5m.get(token, []))
+            basket_ltp[token] = st.ltp.get(name_by_token.get(token, token), 0.0)
 
         last_exit_time = (datetime.fromisoformat(st.last_exit_time)
                           if st.last_exit_time else None)
         now = _now()
         signal, diagnostic = evaluate_entry(now, bn_recent, bn_closes_lookback,
-                                            basket_candles, last_exit_time, st.bn_trades_today)
+                                            basket_candles, last_exit_time, st.bn_trades_today,
+                                            current_index_price=st.bn_index_ltp, basket_ltp=basket_ltp)
         st.bn_diagnostic = diagnostic
 
-        if signal is None or signal.bar_time == st.last_trade_candle:
+        if signal is None:
             return
 
         try:
@@ -414,40 +417,37 @@ class SchedulerService:
 
         with st._nf_index_lock:
             nf_candles = list(st.nf_index_candles_5m)
-        if not nf_candles:
+        if not nf_candles or st.nf_index_ltp <= 0:
             return
 
-        new_bar_time = nf_candles[-1].start_time
-        if new_bar_time == st.last_evaluated_bar_nf:
-            return
-        st.last_evaluated_bar_nf = new_bar_time
-
-        closed_nf_candles = [c for c in nf_candles if c.start_time < new_bar_time]
-        if not closed_nf_candles:
-            return
-
-        nf_recent = closed_nf_candles[-5:]   # see the BN mirror's comment above
+        # Evaluated every tick, not once per closed bar — see the BN
+        # mirror's comment in _tick_entries above.
+        nf_recent = nf_candles[-5:]
+        # See the BN mirror's comment in _tick_entries above — exclude the
+        # still-forming last bar from the IV estimator's input array.
+        closed_nf_candles = nf_candles[:-1] if len(nf_candles) > 1 else nf_candles[:0]
         closes = np.fromiter((c.close for c in closed_nf_candles), np.float64, len(closed_nf_candles))
         nf_closes_lookback = closes[-cfg.NF_INDICATOR_LOOKBACK_BARS:] if closes.size > cfg.NF_INDICATOR_LOOKBACK_BARS else closes
 
         # 2026-09-21: Top-8 weighted-basket tokens (cfg.NF_SCALP_BASKET),
-        # not the 12-stock NF_LEADER_STOCKS the old rule used — see the BN
-        # mirror in _tick_entries above for why the full history is passed
-        # untrimmed.
+        # not the 12-stock NF_LEADER_STOCKS the old rule used.
+        name_by_token = {tok: name for name, tok in cfg.NF_ALL_STOCKS.items()}
         basket_candles = {}
+        basket_ltp = {}
         for token in cfg.NF_SCALP_BASKET:
             with st.candle_lock(token):
-                candles = list(st.candles_5m.get(token, []))
-            basket_candles[token] = [c for c in candles if c.start_time < new_bar_time]
+                basket_candles[token] = list(st.candles_5m.get(token, []))
+            basket_ltp[token] = st.ltp.get(name_by_token.get(token, token), 0.0)
 
         last_exit_time = (datetime.fromisoformat(st.last_exit_time_nf)
                           if st.last_exit_time_nf else None)
         now = _now()
         signal, diagnostic = nf_evaluate_entry(now, nf_recent, nf_closes_lookback,
-                                               basket_candles, last_exit_time, st.nf_trades_today)
+                                               basket_candles, last_exit_time, st.nf_trades_today,
+                                               current_index_price=st.nf_index_ltp, basket_ltp=basket_ltp)
         st.nf_diagnostic = diagnostic
 
-        if signal is None or signal.bar_time == st.last_trade_candle_nf:
+        if signal is None:
             return
 
         try:
@@ -582,11 +582,9 @@ class SchedulerService:
             else:
                 if is_nf:
                     st.active_trade_nf = trade
-                    st.last_trade_candle_nf = trade.entry_time[:16]
                     st.nf_trades_today += 1
                 else:
                     st.active_trade = trade
-                    st.last_trade_candle = trade.entry_time[:16]
                     st.bn_trades_today += 1
 
         print(
@@ -718,16 +716,12 @@ class SchedulerService:
 
         st.active_trade = None
         st.closed_trades.clear()
-        st.last_trade_candle = None
         st.last_exit_time = None
-        st.last_evaluated_bar = None
         st.bn_diagnostic = None
         st.bn_trades_today = 0
         st.active_trade_nf = None
         st.closed_trades_nf.clear()
-        st.last_trade_candle_nf = None
         st.last_exit_time_nf = None
-        st.last_evaluated_bar_nf = None
         st.nf_diagnostic = None
         st.nf_trades_today = 0
         st.daily_pnl = 0.0

@@ -46,7 +46,6 @@ def place_paper_order(signal: NFSignal, now: datetime) -> NFTrade:
     trade = open_trade_from_signal(signal, now, order_id)
 
     st.active_trade_nf = trade
-    st.last_trade_candle_nf = signal.bar_time
     st.nf_trades_today += 1
     st.nf_option_ltp = None   # fresh — any stale value from a prior trade must not leak in
     # NF mirror of bn_trade.place_paper_order's real-option-LTP wiring —

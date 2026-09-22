@@ -25,7 +25,7 @@ from app.state import AppState
 
 # Edge-trigger state, keyed "BankNifty:up"/"BankNifty:down"/"Nifty 50:up"/...
 # — module-level, not locked: only ever touched from the tick loop running on
-# the event loop (same reasoning as st.last_evaluated_bar's lack of a lock).
+# the event loop (same reasoning as st.bn_trades_today's lack of a lock).
 _was_consensus: Dict[str, bool] = {}
 
 
