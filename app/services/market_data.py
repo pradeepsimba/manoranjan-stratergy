@@ -357,19 +357,18 @@ class MarketDataService:
         #
         # The real-option-LTP-per-TRADE match (2026-09-17) that used to live
         # here — matching a tick against active_trade.option_symbol and
-        # flipping trade.premium_synthetic — was REMOVED 2026-09-22 (explicit
-        # user decision) alongside bn_trade.py/nf_trade.py no longer calling
-        # set_bn_option_symbol/set_nf_option_symbol at all: that override let
-        # a real tick snap a trade's settlement premium straight past this
-        # strategy's whole ~₹2-3 target/stop bracket (confirmed root cause of
-        # a real production bug — see bn_trade.check_tick_exit's docstring).
+        # flipping a one-way trade.premium_synthetic latch — was REMOVED
+        # 2026-09-22 (explicit user decision), field and all, alongside
+        # bn_trade.py/nf_trade.py no longer calling set_bn_option_symbol/
+        # set_nf_option_symbol at all: that override let a real tick snap a
+        # trade's settlement premium straight past this strategy's whole
+        # ~₹2-3 target/stop bracket (confirmed root cause of a real
+        # production bug — see bn_trade.check_tick_exit's docstring).
         # Removing the MATCH here too (not just the callers that used to
         # trigger a subscription for it) closes this off completely: even if
         # a tick ever arrived for a symbol that happened to equal some
-        # trade's option_symbol, it can no longer flip anything —
-        # trade.premium_synthetic now stays permanently True (its default),
-        # which is the truthful state now that settlement is always
-        # synthetic — no changes needed anywhere the field is displayed.
+        # trade's option_symbol, there is no longer anything left for it to
+        # flip — settlement is unconditionally synthetic now.
         #
         # CONFIRMED 2026-09-18: this vendor streams options at 1-MINUTE
         # granularity ONLY, not 5m like everything else here — the original

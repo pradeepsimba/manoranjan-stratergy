@@ -959,7 +959,7 @@ class SchedulerService:
                 "exitPremium": t.exit_premium, "pnl": t.pnl,
                 "indexPnlPoints": t.index_pnl_points, "confidence": t.confidence,
                 "currentPremium": t.current_premium, "currentIv": t.current_iv,
-                "optionSymbol": t.option_symbol, "premiumSynthetic": t.premium_synthetic,
+                "optionSymbol": t.option_symbol,
                 "targetRs": t.target_rs, "stopRs": t.stop_rs, "timeStopS": t.time_stop_s,
                 "basketScoreAtEntry": t.basket_score_at_entry, "wobiAtEntry": t.wobi_at_entry,
             }

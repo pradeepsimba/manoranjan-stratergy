@@ -166,18 +166,16 @@ class BNTrade:
     # and displayed as a label for which contract this trade models, even
     # though nothing subscribes to it for a live tick any more.
     #
-    # premium_synthetic is DEAD as of 2026-09-22 — permanently True for the
-    # life of every trade. It used to be a one-way latch (True until a real
-    # WS tick for option_symbol arrived, after which current_premium/
-    # exit_premium switched to that real LTP instead of the Black-Scholes
-    # mark) — removed after that switch let a real tick snap settlement
-    # past the scalp strategy's whole ~₹2-3 target/stop bracket (see
-    # bn_trade.check_tick_exit's docstring for the full incident writeup).
-    # entry_premium is, and always was, ALWAYS the Black-Scholes value.
-    # Backtest's BTPosition has no equivalent fields; this only ever
-    # applies to a live BNTrade.
+    # There used to be a premium_synthetic field here too — a one-way latch
+    # that switched current_premium/exit_premium to a real option-market LTP
+    # once a real tick arrived, instead of the Black-Scholes mark.  REMOVED
+    # 2026-09-22 (field and all) after that switch let a real tick snap
+    # settlement past the scalp strategy's whole ~₹2-3 target/stop bracket
+    # (see bn_trade.check_tick_exit's docstring for the full incident
+    # writeup). entry_premium is, and always was, ALWAYS the Black-Scholes
+    # value. Backtest's BTPosition has no equivalent fields; this only ever
+    # applied to a live BNTrade.
     option_symbol:      str  = ""
-    premium_synthetic:  bool = True
 
 
 # ── Nifty 50 options strategy — parallel to the BN dataclasses above, same
@@ -237,9 +235,9 @@ class NFTrade:
     index_pnl_points:  float           = 0.0
     confidence:        float           = 0.0
     entry_signal:      Optional[NFSignal] = None
-    # NF mirror of BNTrade's real-option-LTP fields above — see there.
+    # NF mirror of BNTrade's option_symbol comment above — see there
+    # (including why premium_synthetic used to live here too).
     option_symbol:      str  = ""
-    premium_synthetic:  bool = True
 
 
 @dataclass(slots=True)
