@@ -32,6 +32,7 @@ Anti-look-ahead guarantees (still fully intact for the entry decision):
   * A position opened at bar t is only eligible to exit on bars > t.
 """
 
+import bisect
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
@@ -66,6 +67,24 @@ def _basket_recent_at(stocks: Dict[str, SymbolSeries], day: str, tm: str) -> Dic
     for token in cfg.BN_SCALP_BASKET:
         ss = stocks.get(token)
         idx = ss.at.get(day, {}).get(tm) if ss else None
+        if ss and idx is None:
+            # Fall back to the latest available bar AT OR BEFORE tm for this
+            # token on this day (found in review, 2026-09-23). Without this,
+            # a single missing bar for one BN_SCALP_BASKET leg — a real,
+            # documented vendor-gap class per CLAUDE.md's Kotak Bank/South
+            # Indian Bank naming notes — zeroed this leg's ENTIRE day's VWAP
+            # history for every subsequent bar that day (idx stayed None
+            # forever after the gap, since the exact-timestamp lookup keeps
+            # missing), a backtest-only divergence from live: the scheduler's
+            # own basket_candles build (scheduler.py) just reads whatever has
+            # accumulated in st.candles_5m, with no exact-timestamp lookup to
+            # fail in the first place. by_day[day] is chronological, so this
+            # never looks past tm (no look-ahead).
+            day_idxs = ss.by_day.get(day, [])
+            times = [ss.series[i].start_time[11:16] for i in day_idxs]
+            pos = bisect.bisect_right(times, tm) - 1
+            if pos >= 0:
+                idx = day_idxs[pos]
         out[token] = ss.series[:idx + 1] if (ss and idx is not None) else []
     return out
 
@@ -78,6 +97,7 @@ def _open_position(signal, now: datetime, gidx: int) -> BTPosition:
     target_rs = cfg.BN_SCALP_TARGET_RS
     stop_rs = cfg.BN_SCALP_STOP_RS
     time_stop_s = cfg.BN_SCALP_TIME_STOP_S
+    scratch_slippage_rs = cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS
 
     return BTPosition(
         direction=signal.direction,
@@ -92,6 +112,7 @@ def _open_position(signal, now: datetime, gidx: int) -> BTPosition:
         expiry=signal.expiry,
         entry_premium=signal.entry_premium,
         target_rs=target_rs, stop_rs=stop_rs, time_stop_s=time_stop_s,
+        scratch_slippage_rs=scratch_slippage_rs,
         basket_score_at_entry=signal.basket_score,
         wobi_at_entry=signal.wobi,
         lot_size=cfg.BN_LOT_SIZE,

@@ -42,6 +42,19 @@ class BTPosition:
     target_rs:             float = 0.0
     stop_rs:               float = 0.0
     time_stop_s:           float = 0.0
+    # Added 2026-09-23 (found in review): BNTrade/NFTrade (app/models.py)
+    # both carry scratch_slippage_rs, frozen at entry and read by
+    # bn_entry_exit.evaluate_exit/nf_entry_exit.evaluate_exit for the
+    # TIME_SCRATCH exit branch — CLAUDE.md's shared-decision-core duck-
+    # typing convention explicitly requires BTPosition to carry every field
+    # name evaluate_exit touches. This one field was missed when
+    # scratch_slippage_rs was added, so any future caller that routes
+    # backtest exits through the real evaluate_exit (instead of engine.py's
+    # current inline duplicate, which reads cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS
+    # directly) would hit AttributeError: 'BTPosition' object has no
+    # attribute 'scratch_slippage_rs'. Frozen at open the same way as
+    # target_rs/stop_rs/time_stop_s above — see _open_position in engine.py.
+    scratch_slippage_rs:   float = 0.0
     basket_score_at_entry: float = 0.0
     wobi_at_entry:         float = 0.0
     lot_size:     int = 30

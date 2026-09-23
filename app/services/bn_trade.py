@@ -18,11 +18,13 @@ import app.config as cfg
 from app.engine.bn_entry_exit import (
     ExitEvaluation,
     _in_trading_window,
+    _max_trades_ok,
     evaluate_exit,
     finalize_exit,
     open_trade_from_signal,
 )
 from app.engine.bn_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
+from app.engine.risk_guardrails import trading_window_description as _trading_window_description
 from app.models import BNSignal, BNTrade, PositionStatus, closed_tail_closes
 from app.state import get_state
 
@@ -43,8 +45,8 @@ def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
     """
     st = get_state()
     if not _in_trading_window(now):
-        raise ValueError("Outside scalp trading window (09:45-11:15 / 13:45-14:45 IST)")
-    if st.bn_trades_today >= cfg.SCALP_MAX_TRADES_PER_DAY:
+        raise ValueError(f"Outside scalp trading window ({_trading_window_description()})")
+    if not _max_trades_ok(st.bn_trades_today):
         raise ValueError(f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached")
 
     order_id = f"BN-{now.strftime('%H%M%S')}-{next(_order_seq)}"

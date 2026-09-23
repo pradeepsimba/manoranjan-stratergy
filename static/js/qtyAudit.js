@@ -120,7 +120,11 @@ function recordTickForAudit(prices) {
   QTY_AUDIT_ALL_LEADER_STOCKS.forEach(name => {
     if (prices[name] === undefined) return;
     const qty = qtys[name] !== undefined ? qtys[name] : 0;
-    console.log(`[qty-audit] ${name} LTP=${prices[name]} qty=${qty}`);
+    // console.log removed (found in review, 2026-09-23) — this fired once
+    // per leader stock on every ~100ms TICK_UPDATE (up to ~170 calls/sec)
+    // for a debug trace with no current UI consumer, left over from before
+    // this feature's visible panel was removed; addStockRecord below is the
+    // actual audit write and is unaffected.
     addStockRecord({ stockname: name, time: now, ltp: prices[name], qty });
   });
 }

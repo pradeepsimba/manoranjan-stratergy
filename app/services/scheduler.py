@@ -16,7 +16,7 @@ import copy
 import json
 from collections import deque as _deque
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 from zoneinfo import ZoneInfo
 
 import app.config as cfg
@@ -184,6 +184,74 @@ class SchedulerService:
         except Exception as e:
             print(f"Funds persist failed: {e}")
 
+    async def _persist_closed_exit(self, closed, label: str) -> None:
+        """
+        Persists a just-closed trade's exit row + funds, with a short bounded
+        retry (found in review, 2026-09-23). bn_trade.check_tick_exit/
+        force_close (and the nf_trade mirror) already commit the close IN
+        MEMORY — st.active_trade/active_trade_nf set to None, the trade
+        appended to closed_trades — before this method ever runs. Without a
+        retry, a single transient DB hiccup here (pool contention, a brief
+        connection blip) used to be caught by the caller's try/except and
+        just printed once: the `positions` row for this trade is left OPEN
+        forever (or, if save_position itself had failed earlier, never
+        written at all — update_position_exit's UPDATE...WHERE order_id=...
+        AND status='OPEN' then silently matches zero rows), while the
+        dashboard and st.closed_trades already show it closed — a
+        permanent, invisible gap in the trade audit log with no reconciler
+        anywhere in this app to catch it later. A couple of short retries
+        cover the common transient case without meaningfully delaying the
+        100ms tick loop (this only runs on an actual exit, not every tick);
+        a final failure is logged with a CRITICAL prefix so it's at least
+        greppable, since there's no dead-letter/reconciliation queue here.
+        """
+        delays = (0.0, 0.2, 0.6)
+        last_exc: Optional[Exception] = None
+        # Tracks the position-exit UPDATE separately from the funds persist
+        # (found in review, 2026-09-23): update_position_exit's WHERE
+        # order_id=... AND status='OPEN' now raises on a 0-row match (see
+        # database.py) — correct for a genuine first-attempt failure, but a
+        # naive retry-both-steps-every-time loop would re-call it after it
+        # had ALREADY succeeded (e.g. this step commits, then _persist_funds
+        # transiently fails) — the row is 'CLOSED' by then, so the retry's
+        # WHERE clause legitimately matches 0 rows and would raise again,
+        # producing a false "positions row NOT updated" CRITICAL log for a
+        # trade whose exit actually DID persist correctly. Only re-attempt
+        # whichever step hasn't succeeded yet.
+        position_persisted = False
+        for delay in delays:
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                if not position_persisted:
+                    await self._db.update_position_exit(
+                        order_id=closed.order_id, exit_price=closed.exit_index_price,
+                        exit_time=closed.exit_time, pnl=closed.pnl,
+                        exit_premium=closed.exit_premium,
+                    )
+                    position_persisted = True
+                # NOT self._persist_funds() — that helper swallows its own
+                # exceptions (print-and-continue, for its other fire-and-
+                # forget callers elsewhere in this file) so a funds-persist
+                # failure here would never actually reach this loop's
+                # except clause below, silently skipping the retry this
+                # whole method exists to provide (found in review,
+                # 2026-09-23) — call the DB write directly so a failure
+                # genuinely propagates and gets retried/logged like the
+                # position-exit write above.
+                await self._db.set_app_settings({BN_FUNDS_KEY: get_state().funds})
+                return
+            except Exception as e:
+                last_exc = e
+        if position_persisted:
+            print(f"CRITICAL: {label} exit funds persist failed after retries for "
+                  f"order_id={closed.order_id} — positions row WAS updated, but "
+                  f"funds NOT persisted for this exit: {last_exc}")
+        else:
+            print(f"CRITICAL: {label} exit DB persist failed after retries for "
+                  f"order_id={closed.order_id} — positions row NOT updated, "
+                  f"funds NOT persisted for this exit: {last_exc}")
+
     # ── Phase driver ──────────────────────────────────────────────────────────
 
     async def _phase_driver(self) -> None:
@@ -307,12 +375,7 @@ class SchedulerService:
         try:
             closed = bn_trade.check_tick_exit(_now(), st.bn_index_ltp, lookback)
             if closed:
-                await self._db.update_position_exit(
-                    order_id=closed.order_id, exit_price=closed.exit_index_price,
-                    exit_time=closed.exit_time, pnl=closed.pnl,
-                    exit_premium=closed.exit_premium,
-                )
-                await self._persist_funds()
+                await self._persist_closed_exit(closed, "BN")
         except Exception as e:
             print(f"Tick exit error: {e}")
 
@@ -393,12 +456,7 @@ class SchedulerService:
         try:
             closed = nf_trade.check_tick_exit(_now(), st.nf_index_ltp, lookback)
             if closed:
-                await self._db.update_position_exit(
-                    order_id=closed.order_id, exit_price=closed.exit_index_price,
-                    exit_time=closed.exit_time, pnl=closed.pnl,
-                    exit_premium=closed.exit_premium,
-                )
-                await self._persist_funds()
+                await self._persist_closed_exit(closed, "NF")
         except Exception as e:
             print(f"NF tick exit error: {e}")
 
@@ -494,7 +552,7 @@ class SchedulerService:
                 expiry = bn_get_next_expiry(now)
                 ce = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "CE")
                 pe = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "PE")
-                self._mkt.set_bn_atm_watch(ce, pe)
+                self._mkt.set_bn_atm_watch(ce, pe, strike=strike)
         if st.nf_index_ltp > 0:
             strike = nf_get_atm_strike(st.nf_index_ltp)
             if strike != self._nf_atm_watch_strike:
@@ -502,7 +560,7 @@ class SchedulerService:
                 expiry = nf_get_next_expiry(now)
                 ce = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "CE")
                 pe = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "PE")
-                self._mkt.set_nf_atm_watch(ce, pe)
+                self._mkt.set_nf_atm_watch(ce, pe, strike=strike)
 
     async def _restore_from_db(self) -> None:
         """
@@ -613,14 +671,12 @@ class SchedulerService:
             lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
             closed = bn_trade.force_close(_now(), fallback_price, lookback)
             if closed:
-                try:
-                    await self._db.update_position_exit(
-                        order_id=closed.order_id, exit_price=closed.exit_index_price,
-                        exit_time=closed.exit_time, pnl=closed.pnl,
-                        exit_premium=closed.exit_premium,
-                    )
-                except Exception as e:
-                    print(f"EOD square-off DB error: {e}")
+                # Reuses the same bounded-retry persistence as _tick_exits
+                # (found in review, 2026-09-23) — force_close above already
+                # committed this exit in memory, same as check_tick_exit, so
+                # a bare try/except-and-print here would have the identical
+                # silent-data-loss failure mode on a transient DB hiccup.
+                await self._persist_closed_exit(closed, "BN EOD square-off")
 
         if st.active_trade_nf is not None:
             with st._nf_index_lock:
@@ -630,14 +686,7 @@ class SchedulerService:
             lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
             closed = nf_trade.force_close(_now(), fallback_price, lookback)
             if closed:
-                try:
-                    await self._db.update_position_exit(
-                        order_id=closed.order_id, exit_price=closed.exit_index_price,
-                        exit_time=closed.exit_time, pnl=closed.pnl,
-                        exit_premium=closed.exit_premium,
-                    )
-                except Exception as e:
-                    print(f"NF EOD square-off DB error: {e}")
+                await self._persist_closed_exit(closed, "NF EOD square-off")
 
         # Stop the live ATM CE/PE watchlist for the day — no point holding a
         # WS subscription for stale strikes once the market's closed; it'll
@@ -1130,14 +1179,24 @@ class SchedulerService:
 
         # Snapshot the ATM-watch fields as one atomic group (2026-09-23 fix,
         # found in review) — this method runs in a real executor thread
-        # (_push_dashboard_loop), and reading these 8 fields one at a time
+        # (_push_dashboard_loop), and reading these fields one at a time
         # without a lock could interleave with MarketDataService.set_bn_
         # atm_watch/set_nf_atm_watch's own group write on a strike change,
         # pairing the NEW strike's symbols with the PREVIOUS strike's
-        # stale (pre-reset) LTP for one payload push.
+        # stale (pre-reset) LTP for one payload push. The strike itself is
+        # read from st.bn_atm_watch_strike/nf_atm_watch_strike here — NOT
+        # self._bn_atm_watch_strike/_nf_atm_watch_strike (those are the
+        # SchedulerService-local, unlocked change-detection cache used only
+        # by _tick_atm_watch on the event loop) — because that unlocked
+        # instance attribute is what let this exact same executor thread
+        # read a torn (new-strike, stale-symbol) pair before this fix
+        # (2026-09-23, found in review): _tick_atm_watch used to write it
+        # BEFORE calling set_bn_atm_watch, outside any lock.
         with st._atm_watch_lock:
+            _bn_atm_watch_strike = st.bn_atm_watch_strike
             _bn_atm_ce_symbol, _bn_atm_pe_symbol = st.bn_atm_ce_symbol, st.bn_atm_pe_symbol
             _bn_atm_ce_ltp, _bn_atm_pe_ltp = st.bn_atm_ce_ltp, st.bn_atm_pe_ltp
+            _nf_atm_watch_strike = st.nf_atm_watch_strike
             _nf_atm_ce_symbol, _nf_atm_pe_symbol = st.nf_atm_ce_symbol, st.nf_atm_pe_symbol
             _nf_atm_ce_ltp, _nf_atm_pe_ltp = st.nf_atm_ce_ltp, st.nf_atm_pe_ltp
 
@@ -1157,7 +1216,7 @@ class SchedulerService:
             "closedTrades": [_trade_dict(t) for t in closed_trades],
             "entryLoop":    diag,
             "bnAtmWatch": {
-                "strike": self._bn_atm_watch_strike,
+                "strike": _bn_atm_watch_strike,
                 "ceSymbol": _bn_atm_ce_symbol, "peSymbol": _bn_atm_pe_symbol,
                 "ceLtp": _bn_atm_ce_ltp, "peLtp": _bn_atm_pe_ltp,
             },
@@ -1165,7 +1224,7 @@ class SchedulerService:
             "closedTradesNf": [_trade_dict(t) for t in closed_trades_nf],
             "entryLoopNf":    diag_nf,
             "nfAtmWatch": {
-                "strike": self._nf_atm_watch_strike,
+                "strike": _nf_atm_watch_strike,
                 "ceSymbol": _nf_atm_ce_symbol, "peSymbol": _nf_atm_pe_symbol,
                 "ceLtp": _nf_atm_ce_ltp, "peLtp": _nf_atm_pe_ltp,
             },

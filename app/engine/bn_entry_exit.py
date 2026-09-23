@@ -45,6 +45,7 @@ from app.engine.bn_pricing import (
 )
 from app.engine.risk_guardrails import in_trading_window as _in_trading_window
 from app.engine.risk_guardrails import max_trades_ok as _max_trades_ok
+from app.engine.risk_guardrails import trading_window_description as _trading_window_description
 from app.engine.scalp_signals import compute_basket_reading
 from app.engine.wobi import compute_wobi, synthetic_depth
 from app.models import BNDiagnostic, BNSignal, BNTrade, Candle, PositionStatus
@@ -141,7 +142,7 @@ def evaluate_entry(
 
     window_ok = _in_trading_window(now)
     if no_trade_reason is None and not window_ok:
-        no_trade_reason = "Outside scalp trading window (09:45-11:15 / 13:45-14:45 IST)"
+        no_trade_reason = f"Outside scalp trading window ({_trading_window_description()})"
 
     max_trades_ok = _max_trades_ok(trades_today)
     if no_trade_reason is None and not max_trades_ok:

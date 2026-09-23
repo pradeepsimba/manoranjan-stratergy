@@ -60,9 +60,10 @@ def build_monthly_option_symbol(underlying: str, expiry: datetime, strike: int, 
     omits it entirely. Used for BankNifty, which NSE restricted to monthly/
     quarterly expiry only (discontinuing weekly contracts, effective
     2025-09-01 — see CLAUDE.md's "External dependencies" note and
-    get_next_expiry below). Feeds the real-option-LTP paper-trading feature
-    (2026-09-17/19, explicit user decision; live only, never called from
-    backtest) — matches a real 2026-09-18 example row from a user-supplied
+    get_next_expiry below). Originally built for the now-removed (2026-09-22)
+    real-option-LTP paper-trading feature; now feeds the live ATM CE/PE
+    watchlist instead (live only, never called from backtest) — matches a
+    real 2026-09-18 example row from a user-supplied
     vendor instrument-master export ("BANKNIFTY26SEP22300CE" — "26" is the
     YEAR there, not a day, a mis-read corrected 2026-09-19) but is still
     NOT independently confirmed against the live feed for a CURRENT

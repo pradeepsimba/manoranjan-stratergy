@@ -73,8 +73,9 @@ def build_weekly_option_symbol(underlying: str, expiry: datetime, strike: int, o
     get_next_expiry below). Confirmed 2026-09-19 against a real user-
     supplied example symbol — unlike bn_pricing.build_monthly_option_symbol,
     which remains unconfirmed against the live feed for a current contract.
-    Feeds the real-option-LTP paper-trading feature (2026-09-17, explicit
-    user decision; live only, never called from backtest).
+    Originally built for the now-removed (2026-09-22) real-option-LTP
+    paper-trading feature; now feeds the live ATM CE/PE watchlist instead
+    (live only, never called from backtest).
     """
     month_code = _WEEKLY_MONTH_CODE[expiry.month]
     return f"{underlying}{expiry.strftime('%y')}{month_code}{expiry.strftime('%d')}{strike}{option_type}"

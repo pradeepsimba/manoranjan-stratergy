@@ -143,22 +143,29 @@ class MarketDataService:
     # pair here too, for the now-removed real-option-LTP feature — see
     # __init__'s comment above.)
 
-    def set_bn_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str]) -> None:
+    def set_bn_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str],
+                          strike: Optional[int] = None) -> None:
         self._bn_atm_watch = (ce_symbol, pe_symbol) if (ce_symbol and pe_symbol) else None
         with self.state._atm_watch_lock:
             self.state.bn_atm_ce_symbol = ce_symbol
             self.state.bn_atm_pe_symbol = pe_symbol
             self.state.bn_atm_ce_ltp = None
             self.state.bn_atm_pe_ltp = None
+            # Written in the SAME locked group as the symbols above (2026-09-23
+            # fix, found in review) — see state.py's bn_atm_watch_strike comment
+            # for why a separate unlocked copy let _build_payload tear this.
+            self.state.bn_atm_watch_strike = strike
         self._resync_option_connection()
 
-    def set_nf_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str]) -> None:
+    def set_nf_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str],
+                          strike: Optional[int] = None) -> None:
         self._nf_atm_watch = (ce_symbol, pe_symbol) if (ce_symbol and pe_symbol) else None
         with self.state._atm_watch_lock:
             self.state.nf_atm_ce_symbol = ce_symbol
             self.state.nf_atm_pe_symbol = pe_symbol
             self.state.nf_atm_ce_ltp = None
             self.state.nf_atm_pe_ltp = None
+            self.state.nf_atm_watch_strike = strike
         self._resync_option_connection()
 
     def _resync_option_connection(self) -> None:

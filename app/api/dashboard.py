@@ -379,8 +379,14 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
     except ValueError as e:
         raise HTTPException(400, f"overrides: {e}")
 
-    slippage = req.slippage_bps if req.slippage_bps is not None else \
-        attr_overrides.get("SLIPPAGE_BPS", cfg.SLIPPAGE_BPS)
+    # attr_overrides can never contain "SLIPPAGE_BPS" (found in review,
+    # 2026-09-23) — it was pulled out of the dynamic SPEC registry on
+    # 2026-09-09, so expand_changes above would reject it with a 400 before
+    # this line could ever see it; the only real override path is the
+    # top-level slippage_bps request field. Reads cfg.SLIPPAGE_BPS directly
+    # instead of the dead attr_overrides.get(...) lookup that used to imply
+    # otherwise.
+    slippage = req.slippage_bps if req.slippage_bps is not None else cfg.SLIPPAGE_BPS
     if slippage < 0:
         raise HTTPException(400, "slippage_bps must be ≥ 0")
 

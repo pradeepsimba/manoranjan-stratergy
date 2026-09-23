@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 
 from fastapi import Cookie, HTTPException, Request
-from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from itsdangerous import BadData, URLSafeTimedSerializer
 
 import app.config as cfg
 
@@ -97,7 +97,18 @@ def is_logged_in(session: str | None) -> bool:
         return False
     try:
         payload = _serializer().loads(session, max_age=SESSION_MAX_AGE_SEC)
-    except (BadSignature, SignatureExpired):
+    except BadData:
+        # Catches BadSignature/SignatureExpired (the two cases this used to
+        # enumerate) AND BadPayload (found in review, 2026-09-23) — the
+        # latter is raised when a cookie's signature verifies but the signed
+        # payload itself fails to deserialize (e.g. truncated/corrupted, or
+        # a serializer format change across a deploy). BadData is the common
+        # base itsdangerous uses for exactly this class of "reject the
+        # cookie" outcome, so catching it here is the general fix rather
+        # than re-enumerating every subclass as they're found. Previously an
+        # uncaught BadPayload would propagate out of is_logged_in as an
+        # unhandled 500 instead of the clean "not logged in" this function
+        # is supposed to always return for any malformed/invalid cookie.
         return False
     return payload == {"user": cfg.SETTINGS_USER}
 

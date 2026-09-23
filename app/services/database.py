@@ -221,13 +221,31 @@ class DatabaseService:
                                    exit_time: str, pnl: float,
                                    exit_premium: Optional[float] = None) -> None:
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            tag = await conn.execute(
                 """
                 UPDATE positions
                 SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3, exit_premium=$4
                 WHERE order_id=$5 AND status='OPEN'
                 """,
                 exit_price, exit_time, pnl, exit_premium, order_id,
+            )
+        # asyncpg returns a command tag like "UPDATE 1"/"UPDATE 0" — a 0 here
+        # (found in review, 2026-09-23) used to be indistinguishable from
+        # success: the WHERE clause matches nothing if this order_id's entry
+        # row was never saved (a prior save_position failure) or was already
+        # closed, silently leaving the exit unrecorded with no error raised
+        # anywhere. Raising surfaces it to the caller's own error handling
+        # (scheduler.py's _persist_closed_exit retries + logs CRITICAL on
+        # exhaustion; the manual-exit endpoint returns a 500) instead of a
+        # completely invisible gap in the trade audit log.
+        try:
+            matched = int(tag.split()[-1])
+        except (ValueError, IndexError):
+            matched = None
+        if matched == 0:
+            raise RuntimeError(
+                f"update_position_exit: no OPEN position row matched order_id={order_id!r} "
+                f"— entry row missing or already closed"
             )
 
     async def get_today_positions(self) -> List[Dict[str, Any]]:
