@@ -10,6 +10,16 @@ get_next_expiry/the option-symbol builder are ALSO no longer shared: NSE's
 real expiry rules genuinely diverged between the two indices (see below),
 so reusing one function for both would be wrong for at least one of them,
 not just redundant.
+
+get_atm_strike/get_itm_strike are ALSO NOT reused from bn_pricing.py (fixed
+2026-09-23, found in review): BankNifty's real strike grid is 100 points,
+but Nifty 50's real strike grid is 50 points (see NF_ITM_OFFSET_POINTS's own
+comment in config.py, "~3 strikes ITM at Nifty 50's real 50-point strike
+step") — bn_pricing.get_atm_strike hardcodes `round(spot/100)*100`, which
+was being reused here unmodified and silently rounded every NF strike
+(entry ITM selection, manual orders, and the live ATM watchlist) to
+BankNifty's coarser grid, missing the true nearest 50-point strike roughly
+half the time.
 """
 
 import math
@@ -22,11 +32,23 @@ import numpy as np
 import app.config as cfg
 from app.engine.bn_pricing import (  # noqa: F401 — re-exported for nf_entry_exit.py
     black_scholes,
-    get_atm_strike,
-    get_itm_strike,
     normal_cdf,
     time_to_expiry_years,
 )
+
+_STRIKE_STEP = 50   # Nifty 50's real strike grid — NOT BankNifty's 100-point one (see module docstring)
+
+
+def get_atm_strike(spot: float) -> int:
+    """Nearest 50-point Nifty 50 strike (NF's own grid — see module docstring)."""
+    return int(round(spot / _STRIKE_STEP) * _STRIKE_STEP)
+
+
+def get_itm_strike(spot: float, option_type: str, offset: float) -> int:
+    """NF mirror of bn_pricing.get_itm_strike, rounded via THIS module's
+    get_atm_strike (50-point grid), not bn_pricing's (100-point) one."""
+    raw = (spot - offset) if option_type == "CE" else (spot + offset)
+    return get_atm_strike(raw)
 
 IST = ZoneInfo("Asia/Kolkata")
 

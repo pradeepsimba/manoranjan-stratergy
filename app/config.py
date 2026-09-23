@@ -689,9 +689,18 @@ NF_COST_SEBI_PCT       = 0.000001
 # composite-indicator entry condition and the index-points target/stop
 # above for BOTH instruments (2026-09-21, explicit user decision) — see
 # app/engine/bn_entry_exit.py / nf_entry_exit.py's rewritten evaluate_entry/
-# evaluate_exit. bn_signals.py/nf_signals.py and the BN_SIDEWAYS_RANGE_MIN-
-# style constants above are left in place, unused, per this repo's existing
-# revert-safety convention (see the 2026-09-19 BN rewrite's own comments).
+# evaluate_exit. bn_signals.py/nf_signals.py themselves were fully DELETED
+# (not just left unused) as part of this same 2026-09-21 rewrite — see this
+# file's own note near BN_SAME_DIRECTION_REQUIRED above; a stale copy of
+# this comment used to claim they were "left in place, unused, per this
+# repo's existing revert-safety convention," which was true of the 2026-
+# 09-19 leader-vote rewrite but became false the moment bn_signals.py/
+# nf_signals.py were actually deleted (2026-09-23 fix, found in review —
+# confirmed via `find app/engine -iname 'bn_signals*'` returning nothing but
+# a stale .pyc). The BN_SIDEWAYS_RANGE_MIN-style constants above ARE still
+# genuinely left in place, unused (they're plain config constants, not code
+# to delete) — only the "bn_signals.py/nf_signals.py" part of the old claim
+# was wrong.
 #
 # Fully simulated, live AND backtest — no real broker/order-routing or
 # option order-book connection exists anywhere in this repo (see

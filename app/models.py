@@ -144,6 +144,14 @@ class BNTrade:
     target_rs:         float = 0.0
     stop_rs:            float = 0.0
     time_stop_s:        float = 0.0
+    # TIME_SCRATCH settlement slippage — frozen from cfg.BN_SCALP_SCRATCH_
+    # SLIPPAGE_RS at entry (2026-09-23 fix, found in review), same freeze
+    # rule as target_rs/stop_rs/time_stop_s above: evaluate_exit used to
+    # read cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS directly at exit time instead of
+    # from the trade, meaning a live Settings-page change mid-trade could
+    # retroactively alter an already-open trade's TIME_SCRATCH payout — the
+    # exact class of bug the freeze convention exists to prevent.
+    scratch_slippage_rs: float = 0.0
     # Diagnostic snapshot of what fired this trade — never used for
     # settlement, purely for the dashboard/trade log.
     basket_score_at_entry: float = 0.0
@@ -220,6 +228,7 @@ class NFTrade:
     target_rs:             float = 0.0
     stop_rs:               float = 0.0
     time_stop_s:           float = 0.0
+    scratch_slippage_rs:   float = 0.0   # frozen at entry — see BNTrade's comment above
     basket_score_at_entry: float = 0.0
     wobi_at_entry:         float = 0.0
     lot_size:     int             = 65
@@ -265,17 +274,26 @@ class NFDiagnostic:
     candle_close_ok: bool             = True
     cooldown_ms:     float            = 0.0
     market_open:     bool             = True
-    atm_strike:      Optional[int]    = None
-    atm_premium:     Optional[float]  = None   # kept for the (currently unused) Entry Loop Monitor UI — mirrors atm_ce_premium
-    atm_iv:          Optional[float]  = None
-    # Live ATM CE/PE quote (2026-09-18, explicit user decision) — unlike
-    # atm_premium above, these are computed EVERY closed bar regardless of
+    # NOTE (2026-09-23 fix): these fields are named itm_* (not atm_*) because
+    # they hold the deep-ITM strike/premium the scalp strategy would actually
+    # trade (bn_pricing.get_itm_strike, offset by cfg.NF_ITM_OFFSET_POINTS
+    # from spot) — NOT the true at-the-money strike. Before this fix these
+    # were misnamed atm_strike/atm_premium/etc. and rendered in the dashboard
+    # as "ATM {strike}", which visibly disagreed with the real ATM strike
+    # shown by the separate live ATM CE/PE watchlist (bn_atm_ce_symbol/etc.
+    # in state.py) — confirmed user-facing confusion, not a P&L bug (nothing
+    # here feeds settlement), but a real naming/labeling defect.
+    itm_strike:      Optional[int]    = None
+    itm_premium:     Optional[float]  = None   # kept for the (currently unused) Entry Loop Monitor UI — mirrors itm_ce_premium
+    itm_iv:          Optional[float]  = None
+    # Live ITM CE/PE quote (2026-09-18, explicit user decision) — unlike
+    # itm_premium above, these are computed EVERY closed bar regardless of
     # whether the entry gates actually pass, so the dashboard can show "what
     # this would cost right now" even with no trade open. Still the same
     # theoretical Black-Scholes estimate as entry_premium always was — no
     # real option-chain data backs this (see CLAUDE.md's "Options pricing").
-    atm_ce_premium:  Optional[float]  = None
-    atm_pe_premium:  Optional[float]  = None
+    itm_ce_premium:  Optional[float]  = None
+    itm_pe_premium:  Optional[float]  = None
     cooldown_ok:      bool = True
     sideways_ok:      bool = False
     dir_count_ok:     bool = False
@@ -328,12 +346,13 @@ class BNDiagnostic:
     candle_close_ok: bool             = True
     cooldown_ms:     float            = 0.0
     market_open:     bool             = True
-    atm_strike:      Optional[int]    = None
-    atm_premium:     Optional[float]  = None   # kept for the (currently unused) Entry Loop Monitor UI — mirrors atm_ce_premium
-    atm_iv:          Optional[float]  = None
-    # BN mirror of NFDiagnostic's live ATM CE/PE quote fields above — see there.
-    atm_ce_premium:  Optional[float]  = None
-    atm_pe_premium:  Optional[float]  = None
+    # See NFDiagnostic's itm_strike NOTE above — same rename, same reason.
+    itm_strike:      Optional[int]    = None
+    itm_premium:     Optional[float]  = None   # kept for the (currently unused) Entry Loop Monitor UI — mirrors itm_ce_premium
+    itm_iv:          Optional[float]  = None
+    # BN mirror of NFDiagnostic's live ITM CE/PE quote fields above — see there.
+    itm_ce_premium:  Optional[float]  = None
+    itm_pe_premium:  Optional[float]  = None
     # Per-gate pass/fail, for the dashboard's Entry Loop Monitor (c.html-style
     # explicit ✔/✘ per row) — mirrors the same intermediate booleans
     # evaluate_entry already computes to build no_trade_reason/gates_clear,

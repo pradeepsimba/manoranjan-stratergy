@@ -145,18 +145,20 @@ class MarketDataService:
 
     def set_bn_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str]) -> None:
         self._bn_atm_watch = (ce_symbol, pe_symbol) if (ce_symbol and pe_symbol) else None
-        self.state.bn_atm_ce_symbol = ce_symbol
-        self.state.bn_atm_pe_symbol = pe_symbol
-        self.state.bn_atm_ce_ltp = None
-        self.state.bn_atm_pe_ltp = None
+        with self.state._atm_watch_lock:
+            self.state.bn_atm_ce_symbol = ce_symbol
+            self.state.bn_atm_pe_symbol = pe_symbol
+            self.state.bn_atm_ce_ltp = None
+            self.state.bn_atm_pe_ltp = None
         self._resync_option_connection()
 
     def set_nf_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str]) -> None:
         self._nf_atm_watch = (ce_symbol, pe_symbol) if (ce_symbol and pe_symbol) else None
-        self.state.nf_atm_ce_symbol = ce_symbol
-        self.state.nf_atm_pe_symbol = pe_symbol
-        self.state.nf_atm_ce_ltp = None
-        self.state.nf_atm_pe_ltp = None
+        with self.state._atm_watch_lock:
+            self.state.nf_atm_ce_symbol = ce_symbol
+            self.state.nf_atm_pe_symbol = pe_symbol
+            self.state.nf_atm_ce_ltp = None
+            self.state.nf_atm_pe_ltp = None
         self._resync_option_connection()
 
     def _resync_option_connection(self) -> None:
@@ -353,20 +355,21 @@ class MarketDataService:
         # so a future vendor protocol quirk can't silently disable this path
         # the same way again.
         st = self.state
-        is_bn_atm_ce = st.bn_atm_ce_symbol and symbol == st.bn_atm_ce_symbol
-        is_bn_atm_pe = st.bn_atm_pe_symbol and symbol == st.bn_atm_pe_symbol
-        is_nf_atm_ce = st.nf_atm_ce_symbol and symbol == st.nf_atm_ce_symbol
-        is_nf_atm_pe = st.nf_atm_pe_symbol and symbol == st.nf_atm_pe_symbol
-        if is_bn_atm_ce or is_bn_atm_pe or is_nf_atm_ce or is_nf_atm_pe:
-            if interval != "1m":
+        with st._atm_watch_lock:
+            is_bn_atm_ce = st.bn_atm_ce_symbol and symbol == st.bn_atm_ce_symbol
+            is_bn_atm_pe = st.bn_atm_pe_symbol and symbol == st.bn_atm_pe_symbol
+            is_nf_atm_ce = st.nf_atm_ce_symbol and symbol == st.nf_atm_ce_symbol
+            is_nf_atm_pe = st.nf_atm_pe_symbol and symbol == st.nf_atm_pe_symbol
+            if is_bn_atm_ce or is_bn_atm_pe or is_nf_atm_ce or is_nf_atm_pe:
+                if interval != "1m":
+                    return
+                ltp = _parse_ltp(n)
+                if ltp > 0:
+                    if is_bn_atm_ce: st.bn_atm_ce_ltp = ltp
+                    if is_bn_atm_pe: st.bn_atm_pe_ltp = ltp
+                    if is_nf_atm_ce: st.nf_atm_ce_ltp = ltp
+                    if is_nf_atm_pe: st.nf_atm_pe_ltp = ltp
                 return
-            ltp = _parse_ltp(n)
-            if ltp > 0:
-                if is_bn_atm_ce: st.bn_atm_ce_ltp = ltp
-                if is_bn_atm_pe: st.bn_atm_pe_ltp = ltp
-                if is_nf_atm_ce: st.nf_atm_ce_ltp = ltp
-                if is_nf_atm_pe: st.nf_atm_pe_ltp = ltp
-            return
 
         if interval != "5m":
             return

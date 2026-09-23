@@ -144,6 +144,16 @@ class AppState:
         self.nf_atm_pe_symbol: Optional[str] = None
         self.nf_atm_ce_ltp: Optional[float] = None
         self.nf_atm_pe_ltp: Optional[float] = None
+        # Guards the 4-field group writes above (MarketDataService.set_bn_
+        # atm_watch/set_nf_atm_watch on a strike change, _process_tick's LTP
+        # updates) against _build_payload's read of the same group, which
+        # runs in a REAL executor thread (SchedulerService._push_dashboard_
+        # loop) that can preempt mid-read — unlike the event-loop-only code
+        # that writes these fields, which can't interleave with itself.
+        # Without this lock, _build_payload could read a torn snapshot: the
+        # NEW strike's ce/pe symbols paired with the PREVIOUS strike's
+        # stale LTP (2026-09-23 fix, found in review).
+        self._atm_watch_lock: threading.Lock = threading.Lock()
 
     def candle_lock(self, token: str) -> threading.Lock:
         """Return (and lazily create) the per-token candle lock."""

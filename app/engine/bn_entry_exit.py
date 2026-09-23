@@ -250,11 +250,11 @@ def evaluate_entry(
         cooldown_ms=0.0 if cooldown_ok else max(0.0, cfg.BN_SCALP_COOLDOWN_S -
                                                  (now - last_exit_time).total_seconds()) * 1000.0,
         market_open=True,
-        atm_strike=itm_ce_strike if reading.score >= 0 else itm_pe_strike,
-        atm_premium=itm_ce_premium,   # kept for the (currently unused) Entry Loop Monitor UI
-        atm_iv=itm_iv,
-        atm_ce_premium=itm_ce_premium,
-        atm_pe_premium=itm_pe_premium,
+        itm_strike=itm_ce_strike if reading.score >= 0 else itm_pe_strike,
+        itm_premium=itm_ce_premium,   # kept for the (currently unused) Entry Loop Monitor UI
+        itm_iv=itm_iv,
+        itm_ce_premium=itm_ce_premium,
+        itm_pe_premium=itm_pe_premium,
         # momentum_ok/macd_dir/ema_bullish/ema_bearish/bn_bullish/bn_bearish
         # are dashboard.js's Entry Loop Monitor fields for the now-removed
         # composite-indicator gate — mirrored onto the basket-score
@@ -348,7 +348,7 @@ def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
         should_exit, exit_reason = True, "STOP"
     elif elapsed_s >= trade.time_stop_s:
         should_exit, exit_reason = True, "TIME_SCRATCH"
-        settle_premium = max(0.0, premium - cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS)
+        settle_premium = max(0.0, premium - trade.scratch_slippage_rs)
 
     return ExitEvaluation(
         new_sl=trade.current_sl, sl_stage=trade.sl_stage,
@@ -369,6 +369,7 @@ def open_trade_from_signal(signal: BNSignal, now: datetime, order_id: str = "") 
     target_rs = cfg.BN_SCALP_TARGET_RS
     stop_rs = cfg.BN_SCALP_STOP_RS
     time_stop_s = cfg.BN_SCALP_TIME_STOP_S
+    scratch_slippage_rs = cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS
 
     option_type = "CE" if signal.direction == "BUY" else "PE"
     option_symbol = build_monthly_option_symbol(
@@ -387,6 +388,7 @@ def open_trade_from_signal(signal: BNSignal, now: datetime, order_id: str = "") 
         target_rs=target_rs,
         stop_rs=stop_rs,
         time_stop_s=time_stop_s,
+        scratch_slippage_rs=scratch_slippage_rs,
         basket_score_at_entry=signal.basket_score,
         wobi_at_entry=signal.wobi,
         lot_size=cfg.BN_LOT_SIZE,

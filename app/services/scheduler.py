@@ -28,6 +28,7 @@ from app.engine.nf_entry_exit import _leader_qty_surge as _nf_leader_qty_surge
 from app.engine.nf_entry_exit import _stock_qty_threshold as _nf_stock_qty_threshold
 from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
 from app.engine.nf_pricing import build_weekly_option_symbol
+from app.engine.nf_pricing import get_atm_strike as nf_get_atm_strike
 from app.engine.nf_pricing import get_next_expiry as nf_get_next_expiry
 from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase, closed_tail_closes
 from app.services import bn_trade, nf_trade, price_alerts
@@ -495,7 +496,7 @@ class SchedulerService:
                 pe = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "PE")
                 self._mkt.set_bn_atm_watch(ce, pe)
         if st.nf_index_ltp > 0:
-            strike = get_atm_strike(st.nf_index_ltp)
+            strike = nf_get_atm_strike(st.nf_index_ltp)
             if strike != self._nf_atm_watch_strike:
                 self._nf_atm_watch_strike = strike
                 expiry = nf_get_next_expiry(now)
@@ -752,7 +753,13 @@ class SchedulerService:
         try:
             hist = await fetch_indicator_history(cfg.BN_ALL_STOCKS, cfg.INTERVAL_5M, days_back=5)
             for token_key, candles in hist.items():
-                st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
+                # Locked (2026-09-23 fix, found in review): this bulk replace
+                # is the only candles_5m write in the repo that ran unlocked
+                # — _build_payload's executor thread reads candles_5m under
+                # st.candle_lock(token) every 1s and could otherwise observe
+                # a torn read mid-reassignment.
+                with st.candle_lock(token_key):
+                    st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
 
             bn_hist = await fetch_indicator_history(
                 {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, cfg.INTERVAL_5M, days_back=1)
@@ -775,7 +782,8 @@ class SchedulerService:
         try:
             nf_hist = await fetch_indicator_history(cfg.NF_ALL_STOCKS, cfg.INTERVAL_5M, days_back=5)
             for token_key, candles in nf_hist.items():
-                st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
+                with st.candle_lock(token_key):
+                    st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
 
             # 1 day back, matching BN_INDEX_NAME's own fetch — an older repo
             # comment claimed the vendor's REST API returns full multi-day
@@ -984,9 +992,9 @@ class SchedulerService:
                 "emaBullish": d.ema_bullish, "emaBearish": d.ema_bearish,
                 "bnBull": d.bn_bull, "bnBear": d.bn_bear,
                 "bnBullish": d.bn_bullish, "bnBearish": d.bn_bearish,
-                "noTradeReason": d.no_trade_reason, "atmStrike": d.atm_strike,
-                "atmPremium": d.atm_premium, "atmIv": d.atm_iv,
-                "atmCePremium": d.atm_ce_premium, "atmPePremium": d.atm_pe_premium,
+                "noTradeReason": d.no_trade_reason, "itmStrike": d.itm_strike,
+                "itmPremium": d.itm_premium, "itmIv": d.itm_iv,
+                "itmCePremium": d.itm_ce_premium, "itmPePremium": d.itm_pe_premium,
                 "cooldownOk": d.cooldown_ok, "cooldownMs": d.cooldown_ms, "sidewaysOk": d.sideways_ok,
                 "dirCountOk": d.dir_count_ok, "qtySurgeOk": d.qty_surge_ok,
                 "sameDirectionRequired": d.same_direction_required,
@@ -1102,6 +1110,19 @@ class SchedulerService:
             for tok, candles in all_candles_nf.items()
         }
 
+        # Snapshot the ATM-watch fields as one atomic group (2026-09-23 fix,
+        # found in review) — this method runs in a real executor thread
+        # (_push_dashboard_loop), and reading these 8 fields one at a time
+        # without a lock could interleave with MarketDataService.set_bn_
+        # atm_watch/set_nf_atm_watch's own group write on a strike change,
+        # pairing the NEW strike's symbols with the PREVIOUS strike's
+        # stale (pre-reset) LTP for one payload push.
+        with st._atm_watch_lock:
+            _bn_atm_ce_symbol, _bn_atm_pe_symbol = st.bn_atm_ce_symbol, st.bn_atm_pe_symbol
+            _bn_atm_ce_ltp, _bn_atm_pe_ltp = st.bn_atm_ce_ltp, st.bn_atm_pe_ltp
+            _nf_atm_ce_symbol, _nf_atm_pe_symbol = st.nf_atm_ce_symbol, st.nf_atm_pe_symbol
+            _nf_atm_ce_ltp, _nf_atm_pe_ltp = st.nf_atm_ce_ltp, st.nf_atm_pe_ltp
+
         return {
             "type":         "STATE_UPDATE",
             "clock":        clock,
@@ -1119,16 +1140,16 @@ class SchedulerService:
             "entryLoop":    diag,
             "bnAtmWatch": {
                 "strike": self._bn_atm_watch_strike,
-                "ceSymbol": st.bn_atm_ce_symbol, "peSymbol": st.bn_atm_pe_symbol,
-                "ceLtp": st.bn_atm_ce_ltp, "peLtp": st.bn_atm_pe_ltp,
+                "ceSymbol": _bn_atm_ce_symbol, "peSymbol": _bn_atm_pe_symbol,
+                "ceLtp": _bn_atm_ce_ltp, "peLtp": _bn_atm_pe_ltp,
             },
             "activeTradeNf":  active_nf,
             "closedTradesNf": [_trade_dict(t) for t in closed_trades_nf],
             "entryLoopNf":    diag_nf,
             "nfAtmWatch": {
                 "strike": self._nf_atm_watch_strike,
-                "ceSymbol": st.nf_atm_ce_symbol, "peSymbol": st.nf_atm_pe_symbol,
-                "ceLtp": st.nf_atm_ce_ltp, "peLtp": st.nf_atm_pe_ltp,
+                "ceSymbol": _nf_atm_ce_symbol, "peSymbol": _nf_atm_pe_symbol,
+                "ceLtp": _nf_atm_ce_ltp, "peLtp": _nf_atm_pe_ltp,
             },
             "liveLeaderRows": self._build_live_leader_rows(st),
             "liveLeaderRowsNf": self._build_live_leader_rows_nf(st),

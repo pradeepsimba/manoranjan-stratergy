@@ -172,16 +172,21 @@ function renderTrade(t, ids, diag) {
   if (!t) {
     badge.textContent = 'none'; badge.className = 'badge gray';
     empty.style.display = ''; card.style.display = 'none';
-    // Live ATM CE/PE quote (2026-09-18) — shown even with no trade open, so
-    // there's always a "what would this cost right now" reference. `diag`
-    // is the same entryLoop/entryLoopNf diagnostic the (currently unused)
-    // Entry Loop Monitor reads — atmCePremium/atmPePremium are computed
-    // every closed bar regardless of gates. Still a theoretical Black-
-    // Scholes estimate, not real option-chain data (see CLAUDE.md).
-    if (diag && diag.atmStrike != null) {
+    // Live ITM entry quote (2026-09-18, renamed from "ATM" 2026-09-23 — see
+    // models.py's itm_strike NOTE) — shown even with no trade open, so
+    // there's always a "what would this cost right now" reference for the
+    // deep-ITM strike the strategy would actually trade. `diag` is the same
+    // entryLoop/entryLoopNf diagnostic the (currently unused) Entry Loop
+    // Monitor reads — itmCePremium/itmPePremium are computed every closed
+    // bar regardless of gates. Still a theoretical Black-Scholes estimate,
+    // not real option-chain data (see CLAUDE.md). Distinct from the always-
+    // visible real ATM CE/PE watchlist above (renderAtmWatch) — that one
+    // tracks the true at-the-money strike with a real market LTP; this one
+    // is a synthetic preview of the strategy's own (ITM, offset) entry.
+    if (diag && diag.itmStrike != null) {
       empty.innerHTML = `No active trade.<br><span class="muted-text">`
-        + `ATM ${diag.atmStrike} — CE ₹${fmt2(diag.atmCePremium)} / PE ₹${fmt2(diag.atmPePremium)}`
-        + (diag.atmIv != null ? ` (IV ${(diag.atmIv * 100).toFixed(1)}%)` : '')
+        + `Entry ITM ${diag.itmStrike} — CE ₹${fmt2(diag.itmCePremium)} / PE ₹${fmt2(diag.itmPePremium)}`
+        + (diag.itmIv != null ? ` (IV ${(diag.itmIv * 100).toFixed(1)}%)` : '')
         + `</span>`;
     } else {
       empty.textContent = 'No active trade.';
@@ -382,8 +387,8 @@ function renderEntryLoop(d, liveLeaderRows, ids) {
     ['EMA stack', d.emaBullish ? 'Bullish' : d.emaBearish ? 'Bearish' : 'Neutral', emaOk],
     ['BN gate', `${d.bnBullish ? 'Bullish' : d.bnBearish ? 'Bearish' : 'Neutral'} (bull ${Number(d.bnBull || 0).toFixed(1)} / bear ${Number(d.bnBear || 0).toFixed(1)})`, gateOk],
     ['No candle repeat', noRepeatOk ? 'New candle' : 'Already traded', noRepeatOk],
-    ['ATM strike/premium', d.atmStrike != null
-      ? `${d.atmStrike} @ ₹${fmt2(d.atmPremium)} (IV ${d.atmIv != null ? (d.atmIv * 100).toFixed(1) + '%' : '—'})`
+    ['Entry ITM strike/premium', d.itmStrike != null
+      ? `${d.itmStrike} @ ₹${fmt2(d.itmPremium)} (IV ${d.itmIv != null ? (d.itmIv * 100).toFixed(1) + '%' : '—'})`
       : '—', null],
   ];
   if (gates) gates.innerHTML = rows2.map(([lbl, val, ok]) => {
