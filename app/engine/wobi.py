@@ -18,14 +18,21 @@ convention, the exact same function runs in both.
 Model: resting size per level scales with lot size (a bigger contract
 attracts bigger clips) and inversely with IV (a calmer option holds a
 thicker book); the bid/ask TILT is driven directly by the basket momentum
-score's magnitude — a stronger same-direction move is modeled as a
-thicker book on whichever side favors the trade just about to be placed.
-This is standard market-microstructure intuition (order flow follows
-momentum), not a real observed order book. A signal that only just barely
-clears BN_SCALP_SCORE_THRESHOLD/NF_SCALP_SCORE_THRESHOLD produces a tilt
-around ~1.5x, which alone does not clear BN_WOBI_MIN_RATIO/NF_WOBI_MIN_RATIO
-(2.5) — W-OBI is a genuine second bar on top of the basket-score gate, not
-a rubber stamp that always passes once the score fires.
+score's MAGNITUDE (`abs(basket_score)`) — a stronger move in EITHER
+direction is modeled as a thicker bid side (synthetic_depth always
+thickens bid over ask; it takes no direction/option-type argument, so this
+is symmetric for both BUY and SELL signals, not literally "whichever side
+favors the trade about to be placed" as an earlier draft of this docstring
+overclaimed — found in review, 2026-09-23). This is standard
+market-microstructure intuition (order flow follows momentum), not a real
+observed order book, and since compute_wobi's pass/fail threshold only
+ever depends on this same magnitude-driven tilt, W-OBI functions as a
+second, independent check on CONVICTION STRENGTH layered on top of the
+basket-score gate, not a directional order-flow filter. A signal that only
+just barely clears BN_SCALP_SCORE_THRESHOLD/NF_SCALP_SCORE_THRESHOLD
+produces a tilt around ~1.5x, which alone does not clear
+BN_WOBI_MIN_RATIO/NF_WOBI_MIN_RATIO (2.5) — not a rubber stamp that always
+passes once the score fires.
 """
 
 import random

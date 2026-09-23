@@ -93,6 +93,7 @@ live ASGI server (not a standalone script) were checked, not assumed safe:
      around it.
 """
 
+import asyncio
 import bisect
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
@@ -317,6 +318,19 @@ def _simulate_day_worker(day: str, slippage_bps: float) -> List:
     return _simulate_day_impl(day, _worker_bn_index, _worker_stocks, slippage_bps)
 
 
+# Caps TOTAL concurrent backtest runs across this whole process (found in
+# review, 2026-09-23) — see cfg.MAX_CONCURRENT_BACKTEST_RUNS's own comment.
+# Safe to construct at import time: Python 3.10+ no longer binds a Semaphore
+# to a specific event loop at construction, only at first await, and this
+# module is only ever imported into the single ASGI server process (never
+# into a spawned backtest worker — those import only their own dependency
+# tree via _pool_worker_init, not app.api.dashboard/app.backtest.engine's
+# run_backtest). Acquired/released around simulate() in run_backtest below,
+# not around simulate() itself, so it's scoped to one asyncio.Semaphore per
+# server process regardless of how many /api/backtest requests race in.
+_BACKTEST_RUN_SEM = asyncio.Semaphore(cfg.MAX_CONCURRENT_BACKTEST_RUNS)
+
+
 def simulate(bn_index: SymbolSeries, stocks: Dict[str, SymbolSeries],
             from_d: date, to_d: date, slippage_bps: float,
             overrides: Optional[Dict] = None) -> Tuple[List, List, int]:
@@ -364,7 +378,6 @@ async def run_backtest(
     slippage_bps: float, overrides: Optional[Dict] = None,
 ) -> None:
     """Orchestrate one backtest run: fetch → simulate (in a worker thread) → persist."""
-    import asyncio
     try:
         overrides = overrides or {}
         warmup   = int(overrides.get("BACKTEST_WARMUP_DAYS", cfg.BACKTEST_WARMUP_DAYS))
@@ -379,9 +392,17 @@ async def run_backtest(
                         f"includes a day the engine has already completed.")
             return
 
-        trades, equity, days = await asyncio.to_thread(
-            simulate, bn_index, stocks, from_d, to_d, slippage_bps, overrides
-        )
+        # Bounded to cfg.MAX_CONCURRENT_BACKTEST_RUNS total in-flight runs
+        # (found in review, 2026-09-23) — without this, N concurrent
+        # /api/backtest requests each spawn their own SCAN_WORKERS-sized
+        # ProcessPoolExecutor with no cap across runs, oversubscribing the
+        # host's CPU/memory. `async with` releases on exception/cancellation
+        # via its own try/finally, so a failed/cancelled run can't leak a
+        # permanently-held slot.
+        async with _BACKTEST_RUN_SEM:
+            trades, equity, days = await asyncio.to_thread(
+                simulate, bn_index, stocks, from_d, to_d, slippage_bps, overrides
+            )
 
         summary = compute_metrics(trades, equity, days)
         summary["stocks_loaded"] = len(stocks)

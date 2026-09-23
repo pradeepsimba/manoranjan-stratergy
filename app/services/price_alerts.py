@@ -29,6 +29,18 @@ from app.state import AppState
 _was_consensus: Dict[str, bool] = {}
 
 
+def reset_consensus_state() -> None:
+    """
+    Clear all committed edge-trigger state (found in review, 2026-09-23) —
+    called by scheduler.py's _tick_alerts on a 0->positive dashboard-client
+    transition, so a condition that cycled true->false->true entirely while
+    no client was connected (which the has_clients commit-gate above does
+    NOT by itself catch — see _tick_alerts's comment) is guaranteed to look
+    like a fresh edge on the first post-reconnect check if it's still active.
+    """
+    _was_consensus.clear()
+
+
 def _leader_results(st: AppState, leader_stocks: Dict[str, str],
                     price_alert_attr: Dict[str, str]) -> List[dict]:
     """

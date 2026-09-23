@@ -197,7 +197,15 @@ class DatabaseService:
     async def save_position(self, trade: Union[BNTrade, NFTrade], instrument: str = "BANKNIFTY") -> None:
         symbol = cfg.BN_INDEX_NAME if instrument == "BANKNIFTY" else cfg.NF_INDEX_NAME
         token  = cfg.BN_INDEX_TOKEN if instrument == "BANKNIFTY" else cfg.NF_INDEX_TOKEN
-        target_offset = abs(trade.target - trade.entry_index_price)
+        # trade.target is an absolute OPTION-PREMIUM level (₹) since the
+        # 2026-09-21 scalp rewrite, not an index-points level — must diff
+        # against entry_premium (same ₹ scale), not entry_index_price (the
+        # BankNifty/Nifty spot, a completely different scale). Using
+        # entry_index_price here used to silently write a meaningless
+        # ~spot-sized number into every row's target_offset column (found in
+        # review, 2026-09-23) — audit/export-only, never read by
+        # evaluate_exit or live P&L.
+        target_offset = abs(trade.target - trade.entry_premium)
         iv_used = trade.entry_signal.iv_used if trade.entry_signal else None
         async with self._pool.acquire() as conn:
             await conn.execute(

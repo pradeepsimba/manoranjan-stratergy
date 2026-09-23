@@ -25,7 +25,7 @@ from app.engine.bn_entry_exit import (
 )
 from app.engine.bn_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
 from app.engine.risk_guardrails import trading_window_description as _trading_window_description
-from app.models import BNSignal, BNTrade, PositionStatus, closed_tail_closes
+from app.models import BNSignal, BNTrade, PositionStatus, TradingPhase, closed_tail_closes
 from app.state import get_state
 
 _order_seq = itertools.count(1)
@@ -88,6 +88,13 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
     if direction not in ("BUY", "SELL"):
         raise ValueError("direction must be BUY or SELL")
     st = get_state()
+    # Same session gate the automated _tick_entries applies (found in
+    # review, 2026-09-23) — without this, a manual order could be placed
+    # outside 09:30-15:00 (e.g. CLOSED overnight), opening a trade off a
+    # stale st.bn_index_ltp (never reset at EOD) with no _tick_exits loop
+    # running to ever close it until the next day's ACTIVE phase.
+    if st.phase != TradingPhase.ACTIVE:
+        raise ValueError("Manual orders are only allowed during the active trading session (09:30-15:00 IST).")
     if st.active_trade is not None:
         raise ValueError("A trade is already active — exit it before placing a new one.")
     if st.bn_index_ltp <= 0:

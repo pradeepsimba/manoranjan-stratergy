@@ -62,7 +62,6 @@ def _parse_ltp(n: dict) -> float:
         return 0.0
 
 
-_MAX_CANDLES = 300   # per symbol per interval in memory
 _WS_MAX_SIZE = 16 * 1024 * 1024   # 16 MiB receive buffer
 
 
@@ -617,7 +616,13 @@ class MarketDataService:
     def _upsert(store: dict, symbol: str, candle: Candle) -> None:
         lst = store.get(symbol)
         if lst is None:
-            store[symbol] = _deque([candle], maxlen=_MAX_CANDLES)
+            # cfg.MAX_CANDLE_BUFFER directly (found in review, 2026-09-23) —
+            # this used to be a separately-hardcoded _MAX_CANDLES=300 that
+            # only happened to match cfg.MAX_CANDLE_BUFFER by coincidence;
+            # retuning one without the other would have silently desynced
+            # per-symbol buffer sizes from the documented "300 bars, ~4
+            # sessions" cap.
+            store[symbol] = _deque([candle], maxlen=cfg.MAX_CANDLE_BUFFER)
             return
         last = lst[-1].start_time
         if last == candle.start_time:

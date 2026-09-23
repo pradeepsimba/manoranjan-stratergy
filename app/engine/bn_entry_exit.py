@@ -119,9 +119,17 @@ def evaluate_entry(
        synthetic depth must clear BN_WOBI_MIN_RATIO before the signal
        actually fires.
 
-    `basket_candles` must already be sliced to CLOSED bars only (same
-    convention the old leader_recent dict used) — the caller (scheduler.py
-    / the backtest engine) builds it from cfg.BN_SCALP_BASKET's 8 tokens.
+    `basket_candles` is caller-supplied per-token candle history for
+    cfg.BN_SCALP_BASKET's 8 tokens, UNTRIMMED up to and including the
+    latest available bar per token — session VWAP needs every bar from
+    today's open (see scalp_signals.compute_basket_reading's own
+    docstring). Live (scheduler.py's _tick_entries) and backtest
+    (app/backtest/engine.py's _basket_recent_at) both build it this way;
+    they differ only in whether that latest bar is still actively forming
+    (live, mutating every tick) or already a fully-closed historical bar
+    (backtest, which evaluates once per bar close) — the same
+    live/backtest divergence documented for `current_index_price`/
+    `basket_ltp` above, not a contract this function itself enforces.
     `trades_today` is the caller's running count of trades opened so far
     today (the SCALP_MAX_TRADES_PER_DAY guardrail) — mirrors how
     last_exit_time is caller-supplied runtime state, not something this

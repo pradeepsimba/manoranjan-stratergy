@@ -555,6 +555,15 @@ WS_MAX_FILTERS_PER_CONN = 35
 # 2026-09-22: BACKTEST_TIMEFRAMES/BACKTEST_MODES constants — leftover from a
 # removed Backtest-panel dropdown, confirmed zero readers anywhere in the repo.)
 SCAN_WORKERS        = min(8, max(4, os.cpu_count() or 4))   # per-day backtest parallelism (ProcessPoolExecutor, since 2026-09-23 — see app/backtest/engine.py)
+# Caps TOTAL concurrent /api/backtest runs (found in review, 2026-09-23) —
+# each run's own ProcessPoolExecutor spawns up to SCAN_WORKERS OS processes,
+# and nothing previously capped how many runs could be in flight at once, so
+# two concurrent runs could oversubscribe the host by 2x SCAN_WORKERS
+# processes. app/backtest/engine.py's run_backtest acquires a module-level
+# asyncio.Semaphore(MAX_CONCURRENT_BACKTEST_RUNS) before calling simulate(),
+# giving a hard ceiling of MAX_CONCURRENT_BACKTEST_RUNS * SCAN_WORKERS
+# worker processes regardless of how many runs are requested concurrently.
+MAX_CONCURRENT_BACKTEST_RUNS = 1
 
 # Moved out of the dynamic Settings-page tunables (2026-09-09, explicit user
 # decision) — the Backtest UI panel is gone from the dashboard, so per-run

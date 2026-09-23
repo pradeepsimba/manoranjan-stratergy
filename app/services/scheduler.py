@@ -99,6 +99,9 @@ class SchedulerService:
         # the strike actually changes, not every 100ms tick.
         self._bn_atm_watch_strike: int | None = None
         self._nf_atm_watch_strike: int | None = None
+        # Previous tick's client-connected state, for _tick_alerts's
+        # reconnect edge-reset (found in review, 2026-09-23) — see there.
+        self._had_alert_clients = False
 
     async def start(self) -> None:
         await self._load_funds()
@@ -541,6 +544,26 @@ class SchedulerService:
         """
         st = get_state()
         has_clients = self._ws.count() > 0
+        # Reconnect edge-reset (found in review, 2026-09-23): the
+        # has_clients commit-gate above (2026-09-23) fixed "detected once
+        # while offline, never toggled" — a condition still true when a
+        # client connects now correctly fires. It does NOT fix a condition
+        # that went true->false->true entirely while offline: _was_consensus
+        # stays frozen at whatever it was last committed (True), so the
+        # first post-reconnect tick sees met=True/was=True and no edge
+        # fires, even though a fresh down-up cycle happened unseen. On a
+        # 0->positive client-count transition, clear all committed state so
+        # the very next check is guaranteed to see a fresh edge if the
+        # condition is currently active — only committed state is reset, not
+        # detection (which already runs every tick regardless of clients).
+        # Tradeoff: a condition that's been continuously true through a
+        # brief disconnect/reconnect blip re-fires once, spuriously — judged
+        # acceptable since this alert is purely informational (never feeds
+        # evaluate_entry/evaluate_exit) and over-notifying beats the
+        # previous silent-miss failure mode.
+        if has_clients and not self._had_alert_clients:
+            price_alerts.reset_consensus_state()
+        self._had_alert_clients = has_clients
         try:
             fired = price_alerts.check_consensus(
                 st, "BankNifty", cfg.BN_LEADER_STOCKS, cfg.BN_PRICE_ALERT_ATTR,

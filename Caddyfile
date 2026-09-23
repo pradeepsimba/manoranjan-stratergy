@@ -1,0 +1,21 @@
+# LAN-only HTTPS front for the dashboard (self-signed cert) — see
+# docker-compose.yml's "caddy" service comment and CLAUDE.md's "Run" section:
+# exists purely so the dashboard's browser-notification alerts (which the
+# Notification API restricts to secure contexts, see static/js/alerts.js)
+# work over a plain LAN IP. Separate from the "nginx" service in
+# docker-compose.yml, which terminates the real public cert for
+# algo.vaangamart.com — this one is deliberately self-signed/LAN-only.
+#
+# {$UPSTREAM} is set by docker-compose.yml's "caddy" service environment
+# (UPSTREAM: app:8080, Docker's internal DNS name for the app container).
+# The :localhost:8080 fallback covers running Caddy natively on the host
+# instead of via Compose, where there's no such env var.
+#
+# (Found in review, 2026-09-23: docker-compose.yml already bind-mounted
+# ./Caddyfile:/etc/caddy/Caddyfile:ro, but no Caddyfile existed anywhere in
+# the repo — `docker compose up -d --build` could not actually start the
+# caddy service on a fresh checkout.)
+:8443 {
+	tls internal
+	reverse_proxy {$UPSTREAM:localhost:8080}
+}

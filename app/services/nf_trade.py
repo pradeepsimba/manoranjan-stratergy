@@ -25,7 +25,7 @@ from app.engine.nf_entry_exit import (
 )
 from app.engine.nf_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
 from app.engine.risk_guardrails import trading_window_description as _trading_window_description
-from app.models import NFSignal, NFTrade, PositionStatus, closed_tail_closes
+from app.models import NFSignal, NFTrade, PositionStatus, TradingPhase, closed_tail_closes
 from app.state import get_state
 
 _order_seq = itertools.count(1)
@@ -65,6 +65,10 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
     if direction not in ("BUY", "SELL"):
         raise ValueError("direction must be BUY or SELL")
     st = get_state()
+    # See bn_trade.place_manual_order's identical comment — same session
+    # gate the automated _tick_entries_nf applies (found in review, 2026-09-23).
+    if st.phase != TradingPhase.ACTIVE:
+        raise ValueError("Manual orders are only allowed during the active trading session (09:30-15:00 IST).")
     if st.active_trade_nf is not None:
         raise ValueError("A trade is already active — exit it before placing a new one.")
     if st.nf_index_ltp <= 0:
