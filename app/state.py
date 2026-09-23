@@ -108,32 +108,34 @@ class AppState:
         self.nf_diagnostic:        Optional[NFDiagnostic] = None
         self.nf_trades_today: int = 0   # NF mirror of bn_trades_today above
 
-        # market_data_service self-registers here (see MarketDataService.
-        # __init__) — not type-hinted as MarketDataService to avoid a
-        # circular import (state.py must stay importable from market_data.py).
-        self.market_data_service = None
-        # bn_option_ltp/nf_option_ltp: DEAD as of 2026-09-22 — used to be the
-        # latest real tick for whichever option symbol the active trade was
-        # subscribed to (the "real-option-LTP paper trading" feature, 2026-
-        # 09-17), removed after it let a real tick snap a trade's settlement
-        # premium past the scalp strategy's tight ~₹2-3 target/stop bracket
-        # (see bn_trade.check_tick_exit's docstring and market_data.py's
-        # _process_tick comment for the full story). Nothing sets these
-        # fields anymore — permanently None for the process lifetime. Left
-        # in place rather than removed since AppState fields are read in
-        # several places by attribute name; harmless to leave unset.
-        self.bn_option_ltp: Optional[float] = None
-        self.nf_option_ltp: Optional[float] = None
+        # market_data_service/bn_option_ltp/nf_option_ltp — REMOVED 2026-09-22
+        # (field and all, not just left dead): these existed only for the
+        # "real-option-LTP paper trading" feature (2026-09-17), which let a
+        # real tick snap a trade's settlement premium past the scalp
+        # strategy's tight ~₹2-3 target/stop bracket (see bn_trade.
+        # check_tick_exit's docstring for the full incident writeup).
+        # market_data_service existed solely so bn_trade.py/nf_trade.py
+        # could reach MarketDataService.set_bn_option_symbol/
+        # set_nf_option_symbol without a circular import — once those
+        # setters were confirmed to have zero remaining callers anywhere,
+        # a repo-wide grep also confirmed market_data_service/bn_option_ltp/
+        # nf_option_ltp themselves had zero readers outside state.py and
+        # market_data.py's own (also-removed) writer — an earlier version
+        # of this comment claimed "AppState fields are read in several
+        # places by attribute name," which was the actual reason given for
+        # NOT removing them; that claim didn't hold up once checked, so
+        # they were removed outright instead, for consistency with
+        # premium_synthetic's own removal the same day.
 
         # ── Live ATM CE/PE watchlist (2026-09-18, explicit user decision) —
-        # separate from bn_option_ltp/nf_option_ltp above: THAT tracks one
-        # specific trade's FROZEN strike (set at entry, never changes for
-        # that trade's lifetime); THIS tracks whatever the CURRENT live ATM
-        # strike is (recomputed continuously off bn_index_ltp/nf_index_ltp
+        # separate from the removed real-option-LTP feature above: THAT
+        # used to track one specific trade's FROZEN strike (set at entry,
+        # never changes for that trade's lifetime); THIS tracks whatever
+        # the CURRENT live ATM strike is (recomputed continuously off
+        # bn_index_ltp/nf_index_ltp
         # by SchedulerService._tick_atm_watch), regardless of whether a
         # trade is open. Symbols are set by MarketDataService.set_bn_atm_
-        # watch/set_nf_atm_watch; LTPs are filled in by _process_tick the
-        # same way as bn_option_ltp/nf_option_ltp.
+        # watch/set_nf_atm_watch; LTPs are filled in by _process_tick.
         self.bn_atm_ce_symbol: Optional[str] = None
         self.bn_atm_pe_symbol: Optional[str] = None
         self.bn_atm_ce_ltp: Optional[float] = None

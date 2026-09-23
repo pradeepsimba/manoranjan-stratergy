@@ -75,30 +75,20 @@ class MarketDataService:
         self._tasks: list[asyncio.Task] = []
         self._conn_status: dict = {}
         self.state = get_state()
-        # Self-register so bn_trade.py/nf_trade.py can reach set_bn_option_
-        # symbol/set_nf_option_symbol without a circular import (state.py
-        # can't import this module — it's imported BY this module).
-        self.state.market_data_service = self
 
-        # ── Real-option-LTP dynamic subscription — CURRENTLY UNUSED, see
-        # set_bn_option_symbol's own comment further below for why. _bn_option/
-        # _nf_option stay permanently None: nothing calls their setters any
-        # more (confirmed zero callers repo-wide). The THIRD WS connection
-        # these used to share filters on is NOT dormant, though — it's still
-        # actively started/reconnected by the live ATM CE/PE watchlist below
-        # (set_bn_atm_watch/set_nf_atm_watch, called every tick from
-        # SchedulerService._tick_atm_watch) — only this per-trade half of its
-        # filter set is inert now, not the connection itself.
-        self._bn_option: Optional[tuple] = None   # (stock_symbol, stockname) or None — always None now
-        self._nf_option: Optional[tuple] = None   # always None now
-        # Live ATM CE/PE watchlist (2026-09-18) — a SECOND pair of slots on
-        # this same dedicated connection, independent of _bn_option/
-        # _nf_option above: those used to track one trade's strike, FROZEN
-        # at entry; these track whatever the CURRENT live ATM strike is, set
-        # by SchedulerService._tick_atm_watch every time it changes,
-        # regardless of whether a trade is open. Each holds (ce_symbol,
-        # pe_symbol). This pair is the ONLY thing still driving the third
-        # connection's filter set (see above).
+        # ── Dedicated option WS connection — a THIRD, separate connection
+        # driven ONLY by the live ATM CE/PE watchlist below (2026-09-18):
+        # set_bn_atm_watch/set_nf_atm_watch, called every tick from
+        # SchedulerService._tick_atm_watch whenever the live ATM strike
+        # changes, regardless of whether a trade is open. There used to
+        # also be a per-TRADE half of this connection's filter set (the
+        # "real-option-LTP paper trading" feature, 2026-09-17,
+        # set_bn_option_symbol/set_nf_option_symbol) — REMOVED 2026-09-22
+        # (methods, backing fields, and the state.py self-registration that
+        # only existed to reach them, all deleted outright) after it let a
+        # real tick snap a trade's settlement premium past the scalp
+        # strategy's tight ~₹2-3 target/stop bracket (see bn_trade.
+        # check_tick_exit's docstring for the full incident writeup).
         self._bn_atm_watch: Optional[tuple] = None
         self._nf_atm_watch: Optional[tuple] = None
         self._option_task: Optional[asyncio.Task] = None
@@ -143,33 +133,15 @@ class MarketDataService:
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
 
-    # ── Real-option-LTP dynamic subscription — CURRENTLY UNUSED ─────────────────
-    # Used to be called by bn_trade.py/nf_trade.py whenever their single
-    # active trade opened/closed. Removed as a caller 2026-09-22 (see
-    # _process_tick's comment above for the full reason: it let a real tick
-    # snap a trade's settlement premium past the scalp strategy's ~₹2-3
-    # bracket). Left in place, unreachable, rather than deleted — the
-    # underlying dynamic-subscription mechanism (_resync_option_connection,
-    # the third WS connection it manages) is still legitimate infrastructure
-    # a future feature could reuse; re-wiring it is now a deliberate choice,
-    # not an accident, if it's ever needed again. Confirmed zero callers
-    # anywhere in the repo as of this comment.
-
-    def set_bn_option_symbol(self, stock_symbol: Optional[str], stockname: Optional[str]) -> None:
-        self._bn_option = (stock_symbol, stockname) if stock_symbol else None
-        self._resync_option_connection()
-
-    def set_nf_option_symbol(self, stock_symbol: Optional[str], stockname: Optional[str]) -> None:
-        self._nf_option = (stock_symbol, stockname) if stock_symbol else None
-        self._resync_option_connection()
-
     # ── Live ATM CE/PE watchlist ─────────────────────────────────────────────
     # Called by SchedulerService._tick_atm_watch whenever the live ATM strike
-    # changes (not every tick — only on an actual change). Unlike
-    # set_bn_option_symbol above, this always resets the cached LTPs to None
-    # — a strike change means the PREVIOUS strike's price is no longer
-    # relevant, and holding onto it would show a stale/wrong-strike price
-    # until the new strike's first real tick arrives.
+    # changes (not every tick — only on an actual change). Always resets the
+    # cached LTPs to None — a strike change means the PREVIOUS strike's
+    # price is no longer relevant, and holding onto it would show a
+    # stale/wrong-strike price until the new strike's first real tick
+    # arrives. (There used to be a set_bn_option_symbol/set_nf_option_symbol
+    # pair here too, for the now-removed real-option-LTP feature — see
+    # __init__'s comment above.)
 
     def set_bn_atm_watch(self, ce_symbol: Optional[str], pe_symbol: Optional[str]) -> None:
         self._bn_atm_watch = (ce_symbol, pe_symbol) if (ce_symbol and pe_symbol) else None
@@ -190,9 +162,9 @@ class MarketDataService:
     def _resync_option_connection(self) -> None:
         """
         Recomputes the option connection's desired filter set from
-        _bn_option/_nf_option/_bn_atm_watch/_nf_atm_watch and, if it actually
-        changed, tears down and reconnects that one dedicated connection
-        with the new set. The vendor's LIVE_FEED_INIT protocol only has an
+        _bn_atm_watch/_nf_atm_watch and, if it actually changed, tears down
+        and reconnects that one dedicated connection with the new set. The
+        vendor's LIVE_FEED_INIT protocol only has an
         observed "subscribe at connect time" shape (no separate incremental-
         subscribe message), so a reconnect is the only way to change what
         this connection streams — acceptable since trades open/close far
@@ -208,12 +180,9 @@ class MarketDataService:
         UNDERLYING/NF_OPTION_UNDERLYING), confirmed from the vendor's own
         echoed tick data — NOT the option symbol itself repeated.
         """
-        pairs = [p for p in (self._bn_option, self._nf_option) if p]
+        # dict, not a set — dedupes for free if BN/NF's ATM strikes ever
+        # happen to coincide on the identical symbol.
         merged = {}
-        for sym, name in pairs:
-            merged[sym] = name   # dedupe — harmless if BN/NF ever pick the identical symbol
-        # ATM watchlist entries are (ce_symbol, pe_symbol) pairs, not
-        # (stock_symbol, stockname) like _bn_option/_nf_option above.
         if self._bn_atm_watch:
             ce, pe = self._bn_atm_watch
             merged[ce] = cfg.BN_OPTION_UNDERLYING
@@ -228,10 +197,14 @@ class MarketDataService:
             return
         self._option_filters = new_filters
         if self._option_task:
-            # Not awaited — this is a sync method, called from bn_trade.py/
-            # nf_trade.py's sync functions. cancel() just schedules the
-            # cancellation; the old task's own cleanup (_run_ws's post-`async
-            # with` line) still runs in the background and could briefly
+            # Not awaited — this is a sync method, called from
+            # SchedulerService._tick_atm_watch's set_bn_atm_watch/
+            # set_nf_atm_watch calls (the only remaining callers now that
+            # bn_trade.py/nf_trade.py's per-trade set_bn_option_symbol/
+            # set_nf_option_symbol were removed 2026-09-22). cancel() just
+            # schedules the cancellation; the old task's own cleanup
+            # (_run_ws's post-`async with` line) still runs in the
+            # background and could briefly
             # overwrite _conn_status[_OPTION_CONN_ID] back to "Disconnected"
             # right after the new task below sets "Connected" — a cosmetic
             # status-string race only, self-corrects on the new connection's
