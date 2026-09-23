@@ -179,6 +179,15 @@ BN_ALL_STOCKS: Dict[str, str] = {
     "YES BANK":              "YESBANK",
 }
 
+# Precomputed inverse of BN_ALL_STOCKS (token -> internal display name).
+# BN_ALL_STOCKS is a static, immutable dict, so this only needs building
+# once here — bn_entry_exit.py/scheduler.py used to independently rebuild
+# this same dict comprehension every ~100ms tick (twice per tick, per
+# instrument), pure wasted CPU in the app's most latency-sensitive loop
+# (found in review, 2026-09-23). Same pattern already used for
+# BN_QTY_THRESHOLD_ATTR etc. above.
+BN_NAME_BY_TOKEN: Dict[str, str] = {tok: name for name, tok in BN_ALL_STOCKS.items()}
+
 # Nifty Bank per-stock weight, % — keyed by the same trading-symbol strings
 # as BN_ALL_STOCKS' values (this repo's candles_5m is likewise stock_symbol-
 # keyed — see CLAUDE.md's "candles_5m is keyed by TOKEN" convention, now
@@ -424,6 +433,9 @@ NF_ALL_STOCKS: Dict[str, str] = {
     # returns real, current data, so that's deliberately kept as-is rather
     # than swapped to the technically-correct-but-vendor-dead TMPV symbol.
 }
+
+# Precomputed inverse of NF_ALL_STOCKS — see BN_NAME_BY_TOKEN's comment above.
+NF_NAME_BY_TOKEN: Dict[str, str] = {tok: name for name, tok in NF_ALL_STOCKS.items()}
 
 # Equal weight across all 50 (100/50) as the base — the fallback for any
 # stock not covered by the overlay below. Keyed by stock_symbol, same
@@ -802,8 +814,11 @@ NF_SCALP_STOP_RS     = 2.00
 # racing to mutate the SAME st.active_trade/st.active_trade_nf (this
 # engine's hard "at most one active trade" invariant, see CLAUDE.md) would
 # only add risk, not precision.
-BN_SCALP_TIME_STOP_S = 12.0
-NF_SCALP_TIME_STOP_S = 12.0
+# DYNAMIC (2026-09-23, explicit user decision — Settings page time
+# management) — see _DEFAULTS below / app/services/settings.py's "Scalp
+# Timing" group. Frozen onto the trade at entry like every other risk
+# parameter (BNTrade/NFTrade.time_stop_s), so a live edit never affects an
+# already-open trade.
 
 # Marketable-exit slippage (₹) modeled on a forced time-scratch — "cancel
 # the resting passive target order and fire a marketable limit exit (Bid-1
@@ -825,10 +840,12 @@ NF_SCALP_COOLDOWN_S = 15.0
 # trades/day, enforced inside evaluate_entry for the algo path and again
 # inside bn_trade.place_paper_order/nf_trade.place_paper_order (covers the
 # manual-order path too — see there) so nothing can exceed it either way.
-SCALP_WINDOW1_START_HOUR, SCALP_WINDOW1_START_MIN = 9, 45
-SCALP_WINDOW1_END_HOUR,   SCALP_WINDOW1_END_MIN   = 11, 15
-SCALP_WINDOW2_START_HOUR, SCALP_WINDOW2_START_MIN = 13, 45
-SCALP_WINDOW2_END_HOUR,   SCALP_WINDOW2_END_MIN   = 14, 45
+# The window HOUR/MIN pairs are DYNAMIC as of 2026-09-23 (explicit user
+# decision — Settings page time management, "when to start the trading") —
+# see _DEFAULTS below / settings.py's "Scalp Timing" group; read live every
+# tick via _in_trading_window(now), so an edit takes effect immediately,
+# same as every other dynamic tunable (never frozen onto a trade — the
+# window only gates NEW entries, not an already-open trade's exit).
 SCALP_MAX_TRADES_PER_DAY = 5
 
 # ── Dynamic tunables — hard defaults. Only BN/NF Alerts remain here (2026-
@@ -873,6 +890,19 @@ _DEFAULTS: Dict[str, Any] = {
     # above. Client-side only, see static/js/alerts.js.
     "BN_ALERT_CONSENSUS_REQUIRED": 4,   # of 6 leaders
     "NF_ALERT_CONSENSUS_REQUIRED": 8,   # of 12 leaders
+
+    # ── Scalp timing (2026-09-23, explicit user decision) — the two trading
+    # windows (shared by BOTH instruments, see bn_entry_exit._in_trading_
+    # window/nf_entry_exit._in_trading_window) and the per-instrument hard
+    # time-stop (seconds) on the 12-second execution lifecycle. Read live —
+    # windows gate new entries only; time-stop is frozen onto the trade at
+    # entry (BNTrade/NFTrade.time_stop_s), same as target_rs/stop_rs.
+    "SCALP_WINDOW1_START_HOUR": 9,  "SCALP_WINDOW1_START_MIN": 45,
+    "SCALP_WINDOW1_END_HOUR":   11, "SCALP_WINDOW1_END_MIN":   15,
+    "SCALP_WINDOW2_START_HOUR": 13, "SCALP_WINDOW2_START_MIN": 45,
+    "SCALP_WINDOW2_END_HOUR":   14, "SCALP_WINDOW2_END_MIN":   45,
+    "BN_SCALP_TIME_STOP_S": 12.0,
+    "NF_SCALP_TIME_STOP_S": 12.0,
 }
 
 _runtime_overrides: Dict[str, Any] = {}

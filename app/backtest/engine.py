@@ -110,7 +110,14 @@ def _try_exit(port: Portfolio, bn_ss: SymbolSeries, gidx: int,
     bar = bn_ss.series[gidx]
     now = datetime.fromisoformat(bar.start_time)
 
-    lookback = bn_ss.closes[max(0, gidx - cfg.BN_IV_LOOKBACK_BARS):gidx + 1]
+    # Look-ahead fix (2026-09-23, found in review): the touch check below can
+    # resolve at bar gidx's OPEN — the earliest instant of that bar, before
+    # its own close is known — so the lookback here must exclude gidx's own
+    # close (unlike the entry-side/EOD lookbacks elsewhere in this module,
+    # which correctly include their own bar since they price AT that bar's
+    # close). Mirrors the live engine's closed_tail_closes fix for the same
+    # class of bug (forming-bar IV leak).
+    lookback = bn_ss.closes[max(0, gidx - cfg.BN_IV_LOOKBACK_BARS):gidx]
     iv = estimate_iv(lookback)
     expiry_dt = datetime.fromisoformat(pos.expiry)
     T = time_to_expiry_years(now, expiry_dt)

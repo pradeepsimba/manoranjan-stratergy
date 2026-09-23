@@ -3,12 +3,14 @@ from __future__ import annotations
 """
 Realistic fill + cost model for the Bank Nifty options backtest.
 
-Two distinct things are being "filled" here:
-  * The underlying BankNifty index price that determines WHEN target/stop is
-    touched — gap-at-open + intrabar high/low, same convention this repo's
-    equity backtest used (SL wins a same-bar tie).
-  * The option PREMIUM actually traded — slippage is applied here (the index
-    price is a model input, not a tradable leg).
+This is a PREMIUM-based fill model (2026-09-21 scalp-strategy rewrite) —
+target/stop touch resolution is on the OPTION PREMIUM range (gap-at-open +
+intrabar high/low), not the underlying index (the pre-rewrite index-points
+model's own touch resolver, resolve_index_touch, was deleted 2026-09-23 as
+confirmed-dead code once nothing called it any more — see
+resolve_premium_touch below for the current, PREMIUM-based equivalent).
+Slippage is applied on the premium too, since that's the actually-tradable
+leg here.
 
 Options cost model (brokerage/STT/txn/GST/SEBI on premium turnover) uses
 PLACEHOLDER rates — confirm current India options charges before trusting
@@ -18,37 +20,6 @@ absolute backtest ₹ P&L; relative signal quality isn't sensitive to this.
 from typing import Optional, Tuple
 
 import app.config as cfg
-from app.models import Candle
-
-
-# ── Underlying index touch resolution (gap-at-open + intrabar) ──────────────
-
-def resolve_index_touch(direction: str, sl_level: float, target_level: float,
-                        bar: Candle) -> Optional[Tuple[float, str]]:
-    """
-    Whether THIS bar touches `sl_level`/`target_level` (as they stood BEFORE
-    the bar), gap-at-open aware. Returns (exit_index_price, outcome) or None.
-    SL wins a same-bar tie (assume the adverse move came first).
-    """
-    if direction == "BUY":
-        if bar.open <= sl_level:
-            return bar.open, "STOP"
-        if bar.open >= target_level:
-            return bar.open, "TARGET"
-        if bar.low <= sl_level:
-            return sl_level, "STOP"
-        if bar.high >= target_level:
-            return target_level, "TARGET"
-    else:
-        if bar.open >= sl_level:
-            return bar.open, "STOP"
-        if bar.open <= target_level:
-            return bar.open, "TARGET"
-        if bar.high >= sl_level:
-            return sl_level, "STOP"
-        if bar.low <= target_level:
-            return target_level, "TARGET"
-    return None
 
 
 # ── Option-premium touch resolution (2026-09-21 scalp-strategy rewrite) ────
@@ -58,13 +29,11 @@ def resolve_premium_touch(sl_level: float, target_level: float,
                           premium_low: float) -> Optional[Tuple[float, str]]:
     """
     Generic touch resolution on a PREMIUM range, gap-at-open + intrabar
-    aware — same convention as resolve_index_touch above, generalized off
-    an already-direction-normalized level series instead of the underlying
-    index specifically. This strategy's target/stop are always "premium up
-    = win, premium down = loss" regardless of CE/PE (see
-    bn_entry_exit.evaluate_exit), so there is only ONE branch here, unlike
-    resolve_index_touch's BUY/SELL split. STOP wins a same-bar tie (assume
-    the adverse move came first).
+    aware. This strategy's target/stop are always "premium up = win,
+    premium down = loss" regardless of CE/PE (see bn_entry_exit.
+    evaluate_exit), so there is only ONE branch here (no BUY/SELL split
+    needed — unlike the deleted index-points-era resolver this replaced).
+    STOP wins a same-bar tie (assume the adverse move came first).
 
     Caller computes premium_high/premium_low from Black-Scholes at the
     bar's index high/low (max/min of the two, since a CE's premium rises

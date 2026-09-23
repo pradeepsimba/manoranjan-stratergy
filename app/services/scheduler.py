@@ -349,7 +349,7 @@ class SchedulerService:
         # tokens (cfg.BN_SCALP_BASKET), not the full 14-stock BN_ALL_STOCKS
         # universe the old leader-vote rule needed. Untrimmed history —
         # session VWAP needs every bar from today's open.
-        name_by_token = {tok: name for name, tok in cfg.BN_ALL_STOCKS.items()}
+        name_by_token = cfg.BN_NAME_BY_TOKEN
         basket_candles = {}
         basket_ltp = {}
         for token in cfg.BN_SCALP_BASKET:
@@ -421,7 +421,7 @@ class SchedulerService:
 
         # 2026-09-21: Top-8 weighted-basket tokens (cfg.NF_SCALP_BASKET),
         # not the 12-stock NF_LEADER_STOCKS the old rule used.
-        name_by_token = {tok: name for name, tok in cfg.NF_ALL_STOCKS.items()}
+        name_by_token = cfg.NF_NAME_BY_TOKEN
         basket_candles = {}
         basket_ltp = {}
         for token in cfg.NF_SCALP_BASKET:
@@ -538,6 +538,13 @@ class SchedulerService:
             time_stop_s = cfg.NF_SCALP_TIME_STOP_S if is_nf else cfg.BN_SCALP_TIME_STOP_S
             target_rs   = cfg.NF_SCALP_TARGET_RS   if is_nf else cfg.BN_SCALP_TARGET_RS
             stop_rs     = cfg.NF_SCALP_STOP_RS     if is_nf else cfg.BN_SCALP_STOP_RS
+            # scratch_slippage_rs (2026-09-23) belongs in this same backfill —
+            # was missing (found in review), silently defaulting to the
+            # dataclass 0.0 and reintroducing the exact bug this field was
+            # added to prevent (evaluate_exit reading a live cfg value
+            # instead of a frozen one) for any restart-recovered OPEN trade.
+            scratch_slippage_rs = (cfg.NF_SCALP_SCRATCH_SLIPPAGE_RS if is_nf
+                                   else cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS)
             trade = cls(
                 direction=str(r.get("direction") or "BUY"),
                 entry_index_price=_f(r.get("entry_price")),
@@ -549,6 +556,7 @@ class SchedulerService:
                 expiry=str(r.get("expiry") or ""),
                 entry_premium=_f(r.get("entry_premium")),
                 target_rs=target_rs, stop_rs=stop_rs, time_stop_s=time_stop_s,
+                scratch_slippage_rs=scratch_slippage_rs,
                 lot_size=int(r.get("quantity") or (cfg.NF_LOT_SIZE if is_nf else cfg.BN_LOT_SIZE)),
                 order_id=str(r.get("order_id") or ""),
                 status=status,
@@ -589,37 +597,47 @@ class SchedulerService:
         if not st.closed_trades and st.active_trade is None:
             await self._restore_from_db()
 
-        if st.active_trade is not None and st.bn_index_ltp > 0:
+        if st.active_trade is not None:
             with st._bn_index_lock:
                 bn_candles = list(st.bn_index_candles_5m)
-            if bn_candles:
-                lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
-                closed = bn_trade.force_close(_now(), st.bn_index_ltp, lookback)
-                if closed:
-                    try:
-                        await self._db.update_position_exit(
-                            order_id=closed.order_id, exit_price=closed.exit_index_price,
-                            exit_time=closed.exit_time, pnl=closed.pnl,
-                            exit_premium=closed.exit_premium,
-                        )
-                    except Exception as e:
-                        print(f"EOD square-off DB error: {e}")
+            # bn_index_ltp can still be 0 here (e.g. a restart/recovery right
+            # before 15:30 with no live tick yet) — fall back to the last
+            # known candle close, then the trade's own entry price, so the
+            # trade is ALWAYS actually settled (finalize_exit + DB row +
+            # daily_pnl) instead of just vanishing from st.active_trade below
+            # with nothing ever recorded (a real money/data-loss bug fixed
+            # 2026-09-23: force-closing used to be skipped entirely whenever
+            # ltp was 0, yet active_trade was still unconditionally cleared).
+            fallback_price = st.bn_index_ltp if st.bn_index_ltp > 0 else (
+                bn_candles[-1].close if bn_candles else st.active_trade.entry_index_price)
+            lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
+            closed = bn_trade.force_close(_now(), fallback_price, lookback)
+            if closed:
+                try:
+                    await self._db.update_position_exit(
+                        order_id=closed.order_id, exit_price=closed.exit_index_price,
+                        exit_time=closed.exit_time, pnl=closed.pnl,
+                        exit_premium=closed.exit_premium,
+                    )
+                except Exception as e:
+                    print(f"EOD square-off DB error: {e}")
 
-        if st.active_trade_nf is not None and st.nf_index_ltp > 0:
+        if st.active_trade_nf is not None:
             with st._nf_index_lock:
                 nf_candles = list(st.nf_index_candles_5m)
-            if nf_candles:
-                lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
-                closed = nf_trade.force_close(_now(), st.nf_index_ltp, lookback)
-                if closed:
-                    try:
-                        await self._db.update_position_exit(
-                            order_id=closed.order_id, exit_price=closed.exit_index_price,
-                            exit_time=closed.exit_time, pnl=closed.pnl,
-                            exit_premium=closed.exit_premium,
-                        )
-                    except Exception as e:
-                        print(f"NF EOD square-off DB error: {e}")
+            fallback_price = st.nf_index_ltp if st.nf_index_ltp > 0 else (
+                nf_candles[-1].close if nf_candles else st.active_trade_nf.entry_index_price)
+            lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
+            closed = nf_trade.force_close(_now(), fallback_price, lookback)
+            if closed:
+                try:
+                    await self._db.update_position_exit(
+                        order_id=closed.order_id, exit_price=closed.exit_index_price,
+                        exit_time=closed.exit_time, pnl=closed.pnl,
+                        exit_premium=closed.exit_premium,
+                    )
+                except Exception as e:
+                    print(f"NF EOD square-off DB error: {e}")
 
         # Stop the live ATM CE/PE watchlist for the day — no point holding a
         # WS subscription for stale strikes once the market's closed; it'll
@@ -743,7 +761,7 @@ class SchedulerService:
 
     async def _load_all_historical(self) -> None:
         """
-        Loads 5 days of history for the 11 BN stocks (fully archived on this
+        Loads 5 days of history for the 14 BN stocks (fully archived on this
         server) and merges TODAY's BankNifty bars into whatever's already
         accumulated in bn_index_candles_5m from prior live sessions — the
         BankNifty history fetch itself only ever returns today (see the note
@@ -886,7 +904,7 @@ class SchedulerService:
             await asyncio.sleep(1)
 
     def _collect_all_candles(self, st) -> dict:
-        """BankNifty index + all 11 BN stocks, keyed by TOKEN — for the Stock
+        """BankNifty index + all 14 BN stocks, keyed by TOKEN — for the Stock
         Candles panel (breakout/S-R/global-signal), unrelated to the BN
         trading strategy's own candle reads elsewhere in this file."""
         out = {}
@@ -898,7 +916,7 @@ class SchedulerService:
         return out
 
     def _collect_all_candles_nf(self, st) -> dict:
-        """NF mirror of _collect_all_candles — Nifty 50 index + all 32 NF stocks."""
+        """NF mirror of _collect_all_candles — Nifty 50 index + all 51 NF stocks."""
         out = {}
         with st._nf_index_lock:
             out[cfg.NF_INDEX_TOKEN] = list(st.nf_index_candles_5m)

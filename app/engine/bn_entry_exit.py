@@ -29,7 +29,7 @@ the leader stocks. Do not wire them into evaluate_entry.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -43,6 +43,7 @@ from app.engine.bn_pricing import (
     get_next_expiry,
     time_to_expiry_years,
 )
+from app.engine.risk_guardrails import in_trading_window as _in_trading_window
 from app.engine.scalp_signals import compute_basket_reading
 from app.engine.wobi import compute_wobi, synthetic_depth
 from app.models import BNDiagnostic, BNSignal, BNTrade, Candle, PositionStatus
@@ -67,18 +68,10 @@ def _leader_qty_surge(leader_recent: Dict[str, List[Candle]]) -> Dict[str, bool]
     return out
 
 
-def _in_trading_window(now: datetime) -> bool:
-    """
-    Risk guardrail: entries only inside the two configured windows (default
-    09:45-11:15 / 13:45-14:45 IST) — see config.py's SCALP_WINDOW1/2_*.
-    Shared by BN and NF (one set of windows, not a pair per instrument).
-    """
-    t = now.time()
-    w1 = (time(cfg.SCALP_WINDOW1_START_HOUR, cfg.SCALP_WINDOW1_START_MIN)
-          <= t <= time(cfg.SCALP_WINDOW1_END_HOUR, cfg.SCALP_WINDOW1_END_MIN))
-    w2 = (time(cfg.SCALP_WINDOW2_START_HOUR, cfg.SCALP_WINDOW2_START_MIN)
-          <= t <= time(cfg.SCALP_WINDOW2_END_HOUR, cfg.SCALP_WINDOW2_END_MIN))
-    return w1 or w2
+# _in_trading_window moved to app.engine.risk_guardrails.in_trading_window
+# 2026-09-23 (found in review) — was byte-identical copy-pasted code in both
+# this file and nf_entry_exit.py despite each docstring calling it "shared".
+# Imported above under its old name so every call site below is unchanged.
 
 
 def evaluate_entry(
@@ -151,7 +144,7 @@ def evaluate_entry(
     if no_trade_reason is None and not max_trades_ok:
         no_trade_reason = f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached"
 
-    name_by_token = {tok: name for name, tok in cfg.BN_ALL_STOCKS.items()}
+    name_by_token = cfg.BN_NAME_BY_TOKEN
     reading = compute_basket_reading(cfg.BN_SCALP_BASKET, basket_candles, name_by_token,
                                      now.date(), ltp_by_token=basket_ltp)
     threshold = cfg.BN_SCALP_SCORE_THRESHOLD

@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -361,11 +361,21 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         raise HTTPException(400, "from_date must be on or before to_date")
 
     try:
-        # No SPEC key is bt=True any more (2026-09-09 settings cleanup —
-        # every strategy/session tunable is now a static cfg attribute), so
-        # this only ever succeeds with an empty overrides dict; any key at
-        # all raises "unknown setting" here, which is the correct behavior.
+        # As of 2026-09-23 the "Scalp Timing" group (trading windows + per-
+        # instrument time-stop) is dynamic and bt=True again (the 2026-09-09
+        # cleanup's "no SPEC key is bt=True" claim this comment used to make
+        # is stale — found in review), so a real override dict can reach
+        # here now. expand_changes only validates each key in isolation
+        # (format/bounds); a window-pair cross-check (start < end) is a
+        # separate step below, same as apply_and_persist/reset in
+        # settings.py — otherwise an inverted window silently makes
+        # _in_trading_window unsatisfiable for the whole backtest run with
+        # no error surfaced (found in review).
         attr_overrides = settings.expand_changes(req.overrides or {}, bt_only=True)
+        settings.validate_scalp_windows({
+            **{k: getattr(cfg, k) for k in cfg.dynamic_defaults()},
+            **attr_overrides,
+        })
     except ValueError as e:
         raise HTTPException(400, f"overrides: {e}")
 
@@ -459,5 +469,16 @@ async def dashboard_ws(websocket: WebSocket) -> None:
     try:
         while True:
             await websocket.receive_text()
-    except Exception:
+    except WebSocketDisconnect:
+        pass   # normal client-side close — nothing to log
+    except Exception as e:
+        # Found in review (2026-09-23): this used to be a bare
+        # `except Exception: ws_manager.disconnect(websocket)` with no
+        # logging at all — an unexpected error here (protocol violation,
+        # a real bug in the receive loop) would vanish with zero trace,
+        # unlike market_data.py's equivalent WS error handlers, which all
+        # print. WebSocketDisconnect (the normal close path) is still
+        # silent, same as before.
+        print(f"Dashboard WS error: {e}")
+    finally:
         ws_manager.disconnect(websocket)

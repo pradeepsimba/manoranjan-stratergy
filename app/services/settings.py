@@ -4,13 +4,15 @@ from __future__ import annotations
 Dynamic settings registry + persistence.
 
 As of 2026-09-09 (explicit user decision, "remove all except threshold"),
-the only tunables left here are BN/NF Alerts — the client-side price-move
-notification thresholds. Every other former tunable (session timings,
-strategy gates, risk, options pricing/costs, qty-surge thresholds, engine
-tick interval) is now a plain static attribute in app.config, no longer
-editable from Settings or per backtest run. The "time"/"cond" coercion
-machinery below is generic infrastructure kept for any future tunable that
-needs it — no current SPEC entry uses it.
+most former tunables (strategy gates, risk, options pricing/costs, qty-surge
+thresholds, engine tick interval) became plain static attributes in
+app.config, no longer editable from Settings or per backtest run. BN/NF
+Alerts (client-side price-move notification thresholds) remained the only
+survivors — until 2026-09-23 (explicit user decision, "time management" —
+see the "Scalp Timing" group below), which made the two trading windows and
+the per-instrument scalp time-stop dynamic again. The "time" coercion
+machinery, previously unused generic infrastructure, is now actually
+exercised by that group's 4 virtual "HH:MM" keys.
 
 SPEC declares every runtime-editable tunable: display metadata, type, bounds,
 and whether it may be overridden per-backtest-run ("bt"). Values themselves
@@ -102,10 +104,35 @@ SPEC: List[Dict[str, Any]] = [
     _s("NF_ALERT_CONSENSUS_REQUIRED", "Leaders required for consensus alert", "int", "NF Alerts",
        min_=1, max_=12, bt=False,
        help_="Separate alert when at least this many of the 12 leaders cross their own move-alert threshold in the SAME direction."),
+
+    # ── Scalp timing (2026-09-23, explicit user decision) — no "BN "/"NF "
+    # prefix on this group's name, so it always shows regardless of the
+    # Settings page's instrument filter (see settings.js's applyFilter —
+    # only a prefixed group name is ever hidden by that filter). Windows are
+    # genuinely shared by both instruments; the two time-stop entries below
+    # are per-instrument but small enough to keep in the same group rather
+    # than splitting it in two for just one setting each.
+    _s("SCALP_WINDOW1_START", "Trading window 1 — start", "time", "Scalp Timing",
+       parts=("SCALP_WINDOW1_START_HOUR", "SCALP_WINDOW1_START_MIN"),
+       help_="No new entries (either instrument) before this time. Checked live every tick."),
+    _s("SCALP_WINDOW1_END", "Trading window 1 — end", "time", "Scalp Timing",
+       parts=("SCALP_WINDOW1_END_HOUR", "SCALP_WINDOW1_END_MIN"),
+       help_="No new entries after this time until window 2 opens."),
+    _s("SCALP_WINDOW2_START", "Trading window 2 — start", "time", "Scalp Timing",
+       parts=("SCALP_WINDOW2_START_HOUR", "SCALP_WINDOW2_START_MIN")),
+    _s("SCALP_WINDOW2_END", "Trading window 2 — end", "time", "Scalp Timing",
+       parts=("SCALP_WINDOW2_END_HOUR", "SCALP_WINDOW2_END_MIN"),
+       help_="No new entries after this time for the rest of the day."),
+    _s("BN_SCALP_TIME_STOP_S", "BankNifty time-stop (s)", "float", "Scalp Timing",
+       min_=1, max_=60, step=0.5,
+       help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade."),
+    _s("NF_SCALP_TIME_STOP_S", "Nifty 50 time-stop (s)", "float", "Scalp Timing",
+       min_=1, max_=60, step=0.5,
+       help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade."),
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
-GROUP_ORDER = ["BN Alerts", "NF Alerts"]
+GROUP_ORDER = ["Scalp Timing", "BN Alerts", "NF Alerts"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.
@@ -214,6 +241,45 @@ def _attr_keys(spec: Dict[str, Any]) -> List[str]:
     return list(spec["parts"]) if spec["type"] == "time" else [spec["key"]]
 
 
+# ── Cross-field validation ────────────────────────────────────────────────────
+# Trading-window start/end are two independent virtual SPEC keys (each
+# validated individually as a plain "HH:MM" by _coerce), so an inverted pair
+# (start >= end) would pass per-key validation yet silently make
+# _in_trading_window(now) always False for that window for the rest of the
+# day — checked wherever a change to either window could take effect: on
+# save, on partial reset, and at startup load (self-heals instead of crash-
+# looping, same convention this repo used for the now-removed
+# validate_time_order/validate_bn_indicator_periods before 2026-09-09).
+_WINDOWS = [
+    ("SCALP_WINDOW1_START_HOUR", "SCALP_WINDOW1_START_MIN",
+     "SCALP_WINDOW1_END_HOUR",   "SCALP_WINDOW1_END_MIN",   "Trading window 1"),
+    ("SCALP_WINDOW2_START_HOUR", "SCALP_WINDOW2_START_MIN",
+     "SCALP_WINDOW2_END_HOUR",   "SCALP_WINDOW2_END_MIN",   "Trading window 2"),
+]
+_SCALP_TIMING_ATTRS = [k for s in SPEC if s["group"] == "Scalp Timing" for k in _attr_keys(s)]
+
+
+def validate_scalp_windows(effective: Dict[str, Any]) -> None:
+    """`effective` must have all 8 SCALP_WINDOW*_HOUR/MIN attrs (already-coerced ints)."""
+    for sh, sm, eh, em, label in _WINDOWS:
+        if effective[sh] * 60 + effective[sm] >= effective[eh] * 60 + effective[em]:
+            raise ValueError(f"{label}: start time must be before end time")
+
+
+def _effective_state(overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Current live value of every dynamic key, with `overrides` layered on
+    top — the merged state any cross-field validator (currently just
+    validate_scalp_windows) should check against. One shared builder for
+    load_and_apply/apply_and_persist/reset below (2026-09-23, found in
+    review — each used to hand-roll this same merge slightly differently).
+    At startup (load_and_apply, before any override is applied yet) current
+    cfg values already equal the defaults, so this is equivalent to merging
+    onto defaults there too — no special-casing needed.
+    """
+    return {**{k: getattr(cfg, k) for k in cfg.dynamic_defaults()}, **overrides}
+
+
 def _read_value(spec: Dict[str, Any], source: Dict[str, Any]) -> Any:
     if spec["type"] == "time":
         h, m = spec["parts"]
@@ -273,6 +339,12 @@ async def load_and_apply(db) -> None:
             print(f"Settings: ignoring invalid stored override {k}={v!r} ({e})")
 
     if valid:
+        try:
+            validate_scalp_windows(_effective_state(valid))
+        except ValueError as e:
+            print(f"Settings: stored Scalp Timing overrides invalid ({e}) — reverting that group to defaults")
+            for k in _SCALP_TIMING_ATTRS:
+                valid.pop(k, None)
         cfg.set_runtime_overrides(valid)
         print(f"Settings: applied {len(valid)} stored overrides")
 
@@ -284,6 +356,7 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     changes in code flow through). Returns the fresh describe() payload.
     """
     attr_changes = expand_changes(changes)
+    validate_scalp_windows(_effective_state(attr_changes))
 
     defaults   = cfg.dynamic_defaults()
     store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
@@ -309,6 +382,13 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
             if spec is None:
                 raise ValueError(f"unknown setting: {key}")
             attr_keys.extend(_attr_keys(spec))
+
+    # A partial reset can only ever move a key TOWARD its (sane) default, but
+    # a window attr NOT included in this reset could still be left overridden
+    # in a now-invalid combination with the other window attr's fresh
+    # default — check the resulting effective state before committing.
+    defaults = cfg.dynamic_defaults()
+    validate_scalp_windows(_effective_state({k: defaults[k] for k in attr_keys}))
 
     await db.delete_app_settings(attr_keys)
     cfg.clear_runtime_overrides(attr_keys)

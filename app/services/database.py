@@ -358,11 +358,13 @@ class DatabaseService:
     async def get_app_settings(self) -> Dict[str, Any]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("SELECT key, value FROM app_settings")
-        out: Dict[str, Any] = {}
-        for r in rows:
-            v = r["value"]
-            out[r["key"]] = json.loads(v) if isinstance(v, str) else v
-        return out
+        # Routed through the shared _decode_jsonb helper (found in review:
+        # this used to inline the identical json.loads-if-str logic instead
+        # of using it, diverging from the repo's stated "the" jsonb-decode
+        # convention) — wrapped as a single-key dict since _decode_jsonb
+        # operates on named columns within one row, not a key/value table.
+        return {r["key"]: self._decode_jsonb({"value": r["value"]}, "value")["value"]
+               for r in rows}
 
     async def set_app_settings(self, changes: Dict[str, Any]) -> None:
         if not changes:

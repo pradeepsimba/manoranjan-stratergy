@@ -131,8 +131,10 @@ function render(d) {
     renderSrLevels(d.srLevelsNf, STOCK_IDS_NF);
   }
 
-  checkTradeTransitionForScreenshot(d.activeTrade);
+  checkTradeTransitionForScreenshot(d.activeTrade, 'bn');
+  checkTradeTransitionForScreenshot(d.activeTradeNf, 'nf');
   updateLocalTradeLog(d.activeTrade, d.closedTrades || []);
+  updateLocalTradeLog(d.activeTradeNf, d.closedTradesNf || []);
 }
 
 // ── Active trade card ─────────────────────────────────────────────────────────
@@ -523,9 +525,15 @@ const _writtenTradeLogIds = new Set();   // skip redundant put()s for a trade al
 
 function _saveLocalTrade(obj) {
   if (!_tradesDb || _writtenTradeLogIds.has(obj.localId)) return;
-  _writtenTradeLogIds.add(obj.localId);
+  // Mark "logged" only once the write actually succeeds — this used to be
+  // set eagerly before put() was known to succeed, with no onerror handler
+  // (unlike qtyAudit.js's addStockRecord), so a failed write (quota, a
+  // stale connection) would silently and permanently drop that trade from
+  // the log for the rest of the session (found in review).
   const tx = _tradesDb.transaction('trades', 'readwrite');
-  tx.objectStore('trades').put(obj);   // put (not add) — localId makes re-logging idempotent
+  const req = tx.objectStore('trades').put(obj);   // put (not add) — localId makes re-logging idempotent
+  req.onsuccess = () => _writtenTradeLogIds.add(obj.localId);
+  req.onerror = () => console.error('Local Trade Log write failed:', obj.localId, req.error);
 }
 
 function updateLocalTradeLog(activeTrade, closedTrades) {
@@ -551,21 +559,27 @@ function updateLocalTradeLog(activeTrade, closedTrades) {
 
 // ── Auto-screenshot on entry (port of c.html's takeTradeScreenshot) ──────────
 
-let _hadActiveTrade = false;
+// Per-instrument transition state — was a single shared flag until 2026-09-23
+// (found in review), which meant this was only ever called for BankNifty and
+// Nifty 50 entries never triggered a screenshot at all (NF manual/algo
+// trading was generalized to a first-class instrument 2026-09-18, but this
+// function was never updated alongside it). Keyed 'bn'/'nf' so each
+// instrument's own open/closed transition is tracked independently.
+const _hadActiveTrade = { bn: false, nf: false };
 
-function checkTradeTransitionForScreenshot(activeTrade) {
+function checkTradeTransitionForScreenshot(activeTrade, instr) {
   const hasNow = !!activeTrade;
-  if (hasNow && !_hadActiveTrade && typeof html2canvas === 'function') {
+  if (hasNow && !_hadActiveTrade[instr] && typeof html2canvas === 'function') {
     const label = `${activeTrade.direction}_ENTRY_${activeTrade.entryIndexPrice}`;
     html2canvas(document.body).then(canvas => {
       const a = document.createElement('a');
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      a.download = `${label}_${ts}.png`;
+      a.download = `${instr.toUpperCase()}_${label}_${ts}.png`;
       a.href = canvas.toDataURL('image/png');
       a.click();
     }).catch(() => {});
   }
-  _hadActiveTrade = hasNow;
+  _hadActiveTrade[instr] = hasNow;
 }
 
 // (chooseOutputFile/appendTickToFile CSV/file-export feature removed

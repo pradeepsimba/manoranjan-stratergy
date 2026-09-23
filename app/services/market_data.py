@@ -455,6 +455,14 @@ class MarketDataService:
         # Live-price ticker push — every 5m tick (index or stock) refreshes the
         # dashboard delta; the BN engine's entry/exit evaluation runs on its own
         # tick-wise loop timer, not off a per-tick dirty flag.
+        # Deliberately unlocked (found in review, confirmed safe — not an
+        # oversight): _process_tick is fully synchronous (no `await`, see this
+        # class's own docstring), so this add() and _push_tick_updates_loop's
+        # swap (`dirty, st.dirty_ticks_push = st.dirty_ticks_push, set()`)
+        # can never interleave on the single event loop both run on — same
+        # "only ever touched from the event loop" reasoning price_alerts.py's
+        # module-level _was_consensus state documents. Would need a lock only
+        # if tick ingest ever moved to a real OS thread.
         if self.state.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
             self.state.dirty_ticks_push.add(symbol)
 
