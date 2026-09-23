@@ -427,11 +427,16 @@ function renderSrLevels(srLevels, ids) {
   if (!body) return;
   const names = Object.keys(srLevels || {});
   if (!names.length) {
-    body.innerHTML = '<tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>';
+    const emptyHtml = '<tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>';
+    if (body._h !== emptyHtml) { body._h = emptyHtml; body.innerHTML = emptyHtml; }
     return;
   }
   const fmt = arr => (arr || []).map(v => Number(v).toFixed(2)).join(', ') || '-';
-  body.innerHTML = names.map(name => {
+  // Whole-string diff guard (found in review, 2026-09-23 — same pattern as
+  // renderStockCandles above): this panel only actually refreshes every 5
+  // minutes (SchedulerService._refresh_15m_sr_loop), so without this guard
+  // it was rebuilding via innerHTML on every ~1s STATE_UPDATE regardless.
+  const html = names.map(name => {
     const d5  = (srLevels[name] || {}).m5  || {};
     const d15 = (srLevels[name] || {}).m15 || {};
     return `<tr>
@@ -440,6 +445,7 @@ function renderSrLevels(srLevels, ids) {
       <td>${fmt(d15.supports)}</td><td>${fmt(d15.resistances)}</td>
     </tr>`;
   }).join('');
+  if (body._h !== html) { body._h = html; body.innerHTML = html; }
 }
 
 // Live cell flash off TICK_UPDATE (currently-forming bar's LTP only —

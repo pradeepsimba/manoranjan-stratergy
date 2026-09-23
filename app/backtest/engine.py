@@ -59,12 +59,29 @@ live ASGI server (not a standalone script) were checked, not assumed safe:
      _pool_worker_init snapshots {k: getattr(cfg, k) for k in
      cfg.dynamic_defaults()} in the PARENT (which still sees the live
      value) and applies it in each child via cfg.set_runtime_overrides
-     before this run's own per-run `overrides` are layered on top. Verified
-     empirically (imported `main` first, exactly like uvicorn would have it
-     already loaded, then spawned workers referencing a real module-level
-     function) that this does NOT re-trigger main.py's FastAPI-app/service
-     creation in the children — pickling-by-reference only needs to import
-     app.backtest.engine's own dependency tree, which never imports main.py.
+     before this run's own per-run `overrides` are layered on top.
+     CORRECTED 2026-09-23 (found in review — the earlier version of this
+     note overclaimed): under the Docker/production launch (`uvicorn
+     main:app`), `main.py` is imported as an ordinary module, so a spawned
+     child's multiprocessing bootstrap only needs to import
+     app.backtest.engine's own dependency tree — main.py's FastAPI-app/
+     service objects genuinely never get constructed in the child. But
+     under the LOCAL dev launch this repo's own CLAUDE.md also documents
+     (`python main.py`), `main.py` runs AS `__main__` (script mode,
+     `__spec__ is None`), and Python's spawn bootstrap unconditionally
+     re-executes that script's module-level code in every child (as
+     `__mp_main__`, per multiprocessing.spawn._fixup_main_from_path) to
+     reconstruct `sys.modules['__main__']` — confirmed empirically with a
+     standalone repro (a top-level print/object-construction in a toy
+     "main.py"-shaped script executes once per spawned worker). This DOES
+     re-run main.py's `db_service = DatabaseService()` /
+     `mkt_service = MarketDataService()` / `app = FastAPI(...)` /
+     `app.include_router(...)` construction in every worker under local
+     dev — harmless (those constructors have no I/O side effects, and the
+     `uvicorn.run(...)` call is correctly skipped since it's gated behind
+     `if __name__ == "__main__":`, which is False for the `__mp_main__`
+     re-exec), but it is real wasted per-worker startup work, not "zero
+     re-trigger" as this note used to claim.
   3. cfg.thread_overrides (the OLD, thread-local-scoped mechanism — still
      used by nothing else in this file now) is UNNECESSARY here, not just
      replaced: each worker process is a separate OS process dedicated to

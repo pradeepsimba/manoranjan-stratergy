@@ -554,7 +554,7 @@ WS_MAX_FILTERS_PER_CONN = 35
 # across days, so positional (delivery / 1d) replay is not built. (Removed
 # 2026-09-22: BACKTEST_TIMEFRAMES/BACKTEST_MODES constants — leftover from a
 # removed Backtest-panel dropdown, confirmed zero readers anywhere in the repo.)
-SCAN_WORKERS        = min(8, max(4, os.cpu_count() or 4))   # per-day backtest parallelism (ThreadPoolExecutor)
+SCAN_WORKERS        = min(8, max(4, os.cpu_count() or 4))   # per-day backtest parallelism (ProcessPoolExecutor, since 2026-09-23 — see app/backtest/engine.py)
 
 # Moved out of the dynamic Settings-page tunables (2026-09-09, explicit user
 # decision) — the Backtest UI panel is gone from the dashboard, so per-run

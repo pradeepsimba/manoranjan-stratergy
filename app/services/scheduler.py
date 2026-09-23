@@ -252,6 +252,36 @@ class SchedulerService:
                   f"order_id={closed.order_id} — positions row NOT updated, "
                   f"funds NOT persisted for this exit: {last_exc}")
 
+    async def _persist_new_position(self, trade, instrument: str, label: str) -> None:
+        """
+        Persists a freshly-opened trade's entry row, with the same short
+        bounded retry as _persist_closed_exit (found in review, 2026-09-23:
+        this entry-side save had no retry at all, just a bare try/except-
+        and-print, even though it can fail for the exact same transient-DB
+        reasons the exit path was hardened against). Without a retry, a
+        single transient DB hiccup here silently drops the entry row
+        entirely — the trade still runs correctly in memory (st.active_trade
+        is already set by place_paper_order before this call), but roughly
+        BN_SCALP_TIME_STOP_S/NF_SCALP_TIME_STOP_S later, when the exit fires,
+        update_position_exit's WHERE order_id=... AND status='OPEN' matches
+        zero rows and raises — surfacing as a confusing "positions row NOT
+        updated" CRITICAL log instead of a clear "entry save failed" one,
+        for what was really an entry-side failure all along.
+        """
+        delays = (0.0, 0.2, 0.6)
+        last_exc: Optional[Exception] = None
+        for delay in delays:
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                await self._db.save_position(trade, instrument=instrument)
+                return
+            except Exception as e:
+                last_exc = e
+        print(f"CRITICAL: {label} entry DB persist failed after retries for "
+              f"order_id={trade.order_id} — positions row NOT written for this "
+              f"entry: {last_exc}")
+
     # ── Phase driver ──────────────────────────────────────────────────────────
 
     async def _phase_driver(self) -> None:
@@ -436,10 +466,7 @@ class SchedulerService:
         except ValueError as e:
             print(f"BN order rejected: {e}")
             return
-        try:
-            await self._db.save_position(trade, instrument="BANKNIFTY")
-        except Exception as e:
-            print(f"DB save_position error: {e}")
+        await self._persist_new_position(trade, "BANKNIFTY", "BN")
 
     # ── Nifty 50 — mirrors _tick_exits/_tick_entries above ───────────────────
 
@@ -503,10 +530,7 @@ class SchedulerService:
         except ValueError as e:
             print(f"NF order rejected: {e}")
             return
-        try:
-            await self._db.save_position(trade, instrument="NIFTY50")
-        except Exception as e:
-            print(f"DB save_position (NF) error: {e}")
+        await self._persist_new_position(trade, "NIFTY50", "NF")
 
     async def _tick_alerts(self) -> None:
         """

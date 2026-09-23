@@ -269,7 +269,8 @@ function renderClosedTrades(bnTrades, nfTrades) {
 
   countEl.textContent = merged.length;
   if (!merged.length) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-cell">No trades yet today</td></tr>';
+    const emptyHtml = '<tr><td colspan="11" class="empty-cell">No trades yet today</td></tr>';
+    if (tbody._h !== emptyHtml) { tbody._h = emptyHtml; tbody.innerHTML = emptyHtml; }
     return;
   }
   const html = merged.slice().reverse().map(t => {
@@ -314,10 +315,9 @@ function renderEntryLoop(d, liveLeaderRows, ids) {
   // to the frozen last-evaluated-bar snapshot only if the live feed hasn't
   // populated yet (e.g. right at WAIT_ZONE before any candle has arrived).
   const rows = (liveLeaderRows && liveLeaderRows.length ? liveLeaderRows : null) || (d && d.leaderRows) || [];
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>';
-  } else {
-    tbody.innerHTML = rows.map(r => {
+  const leaderHtml = !rows.length
+    ? '<tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>'
+    : rows.map(r => {
       const dirCls = r.close != null && r.open != null
         ? (r.close > r.open ? 'pnl-pos' : r.close < r.open ? 'pnl-neg' : '') : '';
       return `<tr>
@@ -328,13 +328,13 @@ function renderEntryLoop(d, liveLeaderRows, ids) {
         <td data-label="Surge">${r.surged ? '<span class="badge green">yes</span>' : '<span class="badge gray">no</span>'}</td>
       </tr>`;
     }).join('');
-  }
+  if (tbody && tbody._h !== leaderHtml) { tbody._h = leaderHtml; tbody.innerHTML = leaderHtml; }
 
   const gates = document.getElementById(ids.gates);
   if (!d) {
     const summary = document.getElementById(ids.summary);
     if (summary) { summary.textContent = '—'; summary.className = 'entry-summary'; }
-    if (gates) gates.innerHTML = '';
+    if (gates && gates._h !== '') { gates._h = ''; gates.innerHTML = ''; }
     return;
   }
 
@@ -405,11 +405,12 @@ function renderEntryLoop(d, liveLeaderRows, ids) {
       ? `${d.itmStrike} @ ₹${fmt2(d.itmPremium)} (IV ${d.itmIv != null ? (d.itmIv * 100).toFixed(1) + '%' : '—'})`
       : '—', null],
   ];
-  if (gates) gates.innerHTML = rows2.map(([lbl, val, ok]) => {
+  const gatesHtml = rows2.map(([lbl, val, ok]) => {
     const indicator = ok === null ? '<span class="g-ok na">—</span>'
       : ok ? '<span class="g-ok pass">✔</span>' : '<span class="g-ok fail">✘</span>';
     return `<div class="gate-row"><span class="g-lbl">${lbl}</span><span class="g-val">${val}</span>${indicator}</div>`;
   }).join('');
+  if (gates && gates._h !== gatesHtml) { gates._h = gatesHtml; gates.innerHTML = gatesHtml; }
 
   const reasonEl = document.getElementById(ids.noTradeReason);
   if (!reasonEl) return;
