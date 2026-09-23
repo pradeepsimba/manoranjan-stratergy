@@ -46,12 +46,27 @@ function initStockDB() {
 }
 
 function addStockRecord(data) {
-  if (!_qtyDb) return;
+  addStockRecords([data]);
+}
+
+// Batched form (found in review, 2026-09-23 — performance pass): every
+// ~100ms TICK_UPDATE used to call addStockRecord once PER leader stock (up
+// to 18), each opening its OWN IndexedDB transaction — up to ~180
+// transaction opens/sec competing with pruneOldStockRecords' own readwrite
+// transactions on the same store. One transaction covering the whole
+// tick's batch of stocks does the same writes with 1/18th the transaction
+// overhead; per-item error handling is unchanged (each add() still gets
+// its own onerror), only the transaction itself is now shared.
+function addStockRecords(items) {
+  if (!_qtyDb || !items.length) return;
   const tx = _qtyDb.transaction('stocks', 'readwrite');
-  const req = tx.objectStore('stocks').add(data);
-  req.onerror = (e) => {
-    console.error('addStockRecord FAILED:', e.target.error?.name, e.target.error?.message, data);
-  };
+  const store = tx.objectStore('stocks');
+  for (const data of items) {
+    const req = store.add(data);
+    req.onerror = (e) => {
+      console.error('addStockRecord FAILED:', e.target.error?.name, e.target.error?.message, data);
+    };
+  }
   tx.onerror = (e) => {
     console.error('addStockRecord TRANSACTION FAILED:', e.target.error?.name, e.target.error?.message);
   };
@@ -117,16 +132,19 @@ function recordTickForAudit(prices) {
   if (!prices) return;
   const now = new Date().toISOString();
   const qtys = window._lastQtyByStock || {};
+  const batch = [];
   QTY_AUDIT_ALL_LEADER_STOCKS.forEach(name => {
     if (prices[name] === undefined) return;
     const qty = qtys[name] !== undefined ? qtys[name] : 0;
     // console.log removed (found in review, 2026-09-23) — this fired once
     // per leader stock on every ~100ms TICK_UPDATE (up to ~170 calls/sec)
     // for a debug trace with no current UI consumer, left over from before
-    // this feature's visible panel was removed; addStockRecord below is the
-    // actual audit write and is unaffected.
-    addStockRecord({ stockname: name, time: now, ltp: prices[name], qty });
+    // this feature's visible panel was removed.
+    batch.push({ stockname: name, time: now, ltp: prices[name], qty });
   });
+  // One shared transaction for this whole tick's stocks, not one per stock
+  // (found in review, 2026-09-23 — see addStockRecords' own comment).
+  addStockRecords(batch);
 }
 
 initStockDB();

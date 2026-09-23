@@ -226,12 +226,24 @@ function renderTrade(t, ids, diag) {
     ['IV Used', t.currentIv != null ? (t.currentIv * 100).toFixed(1) + '%' : '—'],
     ['Live P&L', (livePnl >= 0 ? '+' : '') + '₹' + fmt2(livePnl)],
   ];
-  card.innerHTML = cells.map(([lbl, val], i) => {
+  // Build the label skeleton once per card, then only diff each cell's
+  // VALUE (found in review, 2026-09-23): this used to rebuild the whole
+  // card's innerHTML on every render, visibly flashing once a second while
+  // a trade is open — current premium/IV/live P&L change essentially every
+  // tick server-side, so this was the most-frequently-flashing panel in the
+  // app. Labels never change, so the skeleton only needs building once.
+  if (!card._valEls) {
+    card.innerHTML = cells.map(([lbl]) =>
+      `<div class="trade-cell"><span class="lbl">${escHtml(lbl)}</span><span class="val"></span></div>`
+    ).join('');
+    card._valEls = Array.from(card.querySelectorAll('.val'));
+  }
+  cells.forEach(([lbl, val], i) => {
     const cls = lbl === 'SL Stage' ? stageCls
       : lbl === 'Live P&L' ? pnlCls
       : '';
-    return `<div class="trade-cell"><span class="lbl">${escHtml(lbl)}</span><span class="val ${cls}">${val}</span></div>`;
-  }).join('');
+    _setCell(card._valEls[i], String(val), 'val ' + cls);
+  });
 }
 
 // ── Closed trades ──────────────────────────────────────────────────────────────

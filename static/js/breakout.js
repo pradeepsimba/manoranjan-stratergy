@@ -363,10 +363,23 @@ function renderStockCandles(stockCandles, ids, cacheAsLive) {
       `<span class="tally-g">G:${tally[i].g}</span> <span class="tally-r">R:${tally[i].r}</span></th>`;
   }
   headHtml += '<th>BuyQtyPending</th><th>SellQtyPending</th>';
-  head.innerHTML = headHtml;
+  // Whole-string compare before writing (found in review, 2026-09-23 —
+  // same pattern dashboard.js's renderClosedTrades already uses): this
+  // table rebuilds via innerHTML on every STATE_UPDATE (~1s) regardless of
+  // whether the content actually changed. A full per-cell diff (like
+  // dashboard.js's _setCell) would need a variable-shape rewrite — rows
+  // and columns both change size (stocks appear/disappear, "Last N bars"
+  // grows through the session) — too big a change to make blind without a
+  // live browser to verify against. This cheaper guard still eliminates
+  // the redundant reflow whenever nothing actually changed (idle market,
+  // CLOSED-phase static data, a repeated snapshot) — the common case this
+  // panel flashes on unnecessarily — while leaving genuine per-tick
+  // updates unchanged.
+  if (head._h !== headHtml) { head._h = headHtml; head.innerHTML = headHtml; }
 
   if (!names.length) {
-    body.innerHTML = '<tr><td class="empty-cell">Waiting for data…</td></tr>';
+    const emptyHtml = '<tr><td class="empty-cell">Waiting for data…</td></tr>';
+    if (body._h !== emptyHtml) { body._h = emptyHtml; body.innerHTML = emptyHtml; }
     return;
   }
 
@@ -379,7 +392,7 @@ function renderStockCandles(stockCandles, ids, cacheAsLive) {
     : (typeof BN_PRICE_ALERT_KEY !== 'undefined' ? BN_PRICE_ALERT_KEY : {});
   const alertPtsByKey = typeof _alertPtsByKey !== 'undefined' ? _alertPtsByKey : {};
 
-  body.innerHTML = names.map(name => {
+  const bodyHtml = names.map(name => {
     const bars = reversedByName[name];   // newest first, like c.html
     const alertPts = alertPtsByKey[keyByStock[name]];
     let row = `<tr data-stock="${name}"><td class="card-title">${name}</td>`;
@@ -397,6 +410,15 @@ function renderStockCandles(stockCandles, ids, cacheAsLive) {
     row += `<td class="neutral">${buyQty}</td><td class="neutral">${sellQty}</td>`;
     return row + '</tr>';
   }).join('');
+  // Same whole-string guard as the header above (found in review,
+  // 2026-09-23) — this one also fixes a second, subtler issue: without it,
+  // an unchanged rebuild every 1s was overwriting applyStockTickPrices'
+  // in-place tick-flash styling (the 100ms TICK_UPDATE handler mutates
+  // .candle-cell directly via data-stock/data-col lookups) with the same,
+  // non-flashed HTML — visibly flickering the flash class on and off.
+  // Skipping the write when nothing changed preserves the live flash state
+  // instead of stomping it every second.
+  if (body._h !== bodyHtml) { body._h = bodyHtml; body.innerHTML = bodyHtml; }
 }
 
 function renderSrLevels(srLevels, ids) {
