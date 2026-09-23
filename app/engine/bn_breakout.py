@@ -265,7 +265,22 @@ def compute_global_signal(counts: List[Dict[str, int]], latest_by_token: Dict[st
     for token, weight_pct in weights.items():
         w = weight_pct / 100.0
         candle = latest_by_token.get(token)
-        pct = ((candle.close - candle.open) / candle.open) * 100.0 if candle and candle.open and candle.close else 0.0
+        if not candle or not candle.open or not candle.close:
+            # Exclude entirely rather than treat as 0% change (found in
+            # review, 2026-09-23): this is a WEIGHTED AVERAGE, so counting a
+            # no-data stock's full weight in total_weight while contributing
+            # 0 to the numerator is mathematically identical to assuming it
+            # was exactly unchanged — silently dragging weighted_pct toward
+            # neutral and potentially suppressing the STRONG BUY/SELL banner
+            # even while every stock that DOES have data is moving sharply
+            # (most likely early in a session, before every stock's first
+            # bar has arrived). Contrast with compute_weighted_red_green
+            # below, which deliberately keeps a fixed denominator — that
+            # function reports a fraction of a known total weight, not an
+            # average, so a missing-data stock legitimately still "counts"
+            # there; this one doesn't have an equivalent justification.
+            continue
+        pct = ((candle.close - candle.open) / candle.open) * 100.0
         weighted_pct += w * pct
         total_weight += w
     weighted_pct = weighted_pct / total_weight if total_weight else 0.0

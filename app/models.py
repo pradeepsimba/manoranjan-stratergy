@@ -89,7 +89,7 @@ def closed_tail_closes(candles: List[Candle], n: int) -> np.ndarray:
 
 @dataclass(slots=True)   # built once per fired entry, live and backtest
 class BNSignal:
-    direction:         str            # "BUY" (-> long ATM CE) | "SELL" (-> long ATM PE)
+    direction:         str            # "BUY" (-> long deep-ITM CE) | "SELL" (-> long deep-ITM PE) — see `strike`'s own comment below (2026-09-23 fix, found in review: this said "ATM" while `strike` correctly says "was ATM", contradicting itself)
     entry_index_price: float          # BankNifty spot at signal
     bar_time:          str            # start_time of the triggering 5m bar
     confidence:        float          # 0-100, leader-vote + qty-surge breadth

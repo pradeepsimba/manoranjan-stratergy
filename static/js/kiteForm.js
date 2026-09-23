@@ -6,8 +6,8 @@
 // (+/-nf) and /api/manual-exit(-nf), which place/close the SAME
 // st.active_trade/active_trade_nf the automated strategy uses
 // (app/services/bn_trade.py/nf_trade.py's place_manual_order/force_close) —
-// a manual trading-desk override, not a second trade slot. Pricing (ATM
-// strike/expiry/Black-Scholes premium) is computed server-side from the
+// a manual trading-desk override, not a second trade slot. Pricing (deep-
+// ITM strike/expiry/Black-Scholes premium) is computed server-side from the
 // real BankNifty/Nifty 50 spot + realized-vol estimate, same as an algo
 // fill — there's no client-side pricing preview to keep in sync anymore.
 //
@@ -21,9 +21,13 @@
 // display-only, not sent to the server.
 //
 // Order Type stays MARKET-only in effect: every fill in this engine is a
-// synthetic (or, once a real tick arrives, real-LTP) mark at/after the
-// moment of the click, so there's no real order book for a LIMIT price to
-// rest on.
+// synthetic Black-Scholes mark at the moment of the click, so there's no
+// real order book for a LIMIT price to rest on. (The "or, once a real tick
+// arrives, real-LTP" alternative this comment used to describe was the
+// real-option-LTP paper-trading feature — REMOVED 2026-09-22 after it
+// caused a real production bug on this strategy's tight premium bracket;
+// see CLAUDE.md. Settlement is unconditionally synthetic now, for a
+// trade's entire life.)
 
 const KITE_IDS_BN = {
   buy: 'kite-buy', sell: 'kite-sell', funds: 'kite-funds', status: 'kite-status',

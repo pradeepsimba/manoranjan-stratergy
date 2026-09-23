@@ -516,17 +516,18 @@ class SchedulerService:
         client-side version it replaces; never touches evaluate_entry/exit.
         """
         st = get_state()
+        has_clients = self._ws.count() > 0
         try:
             fired = price_alerts.check_consensus(
                 st, "BankNifty", cfg.BN_LEADER_STOCKS, cfg.BN_PRICE_ALERT_ATTR,
-                cfg.BN_ALERT_CONSENSUS_REQUIRED)
+                cfg.BN_ALERT_CONSENSUS_REQUIRED, has_clients=has_clients)
             fired += price_alerts.check_consensus(
                 st, "Nifty 50", cfg.NF_LEADER_STOCKS, cfg.NF_PRICE_ALERT_ATTR,
-                cfg.NF_ALERT_CONSENSUS_REQUIRED)
+                cfg.NF_ALERT_CONSENSUS_REQUIRED, has_clients=has_clients)
         except Exception as e:
             print(f"Alert check error: {e}")
             return
-        if fired and self._ws.count() > 0:
+        if fired and has_clients:
             for alert in fired:
                 await self._ws.broadcast(json.dumps({"type": "ALERT", **alert}, default=str))
 

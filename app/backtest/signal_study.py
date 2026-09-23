@@ -50,9 +50,13 @@ def _leader_signal(bar_by_token: Dict[str, Candle]) -> List[Dict[str, Any]]:
 
 
 def _leader_direction(bar_by_token: Dict[str, Candle]) -> List[Dict[str, Any]]:
-    """Plain green/red vote — mirrors bn_signals.leaders_momentum's direction
-    check (close vs open), no move-alert threshold/magnitude involved. Used
-    by mode="direction": "N of 6 leaders simply closed the same color"."""
+    """Plain green/red vote — a standalone close-vs-open direction check (no
+    move-alert threshold/magnitude involved), evaluated over history here.
+    Used by mode="direction": "N of 6 leaders simply closed the same color".
+    (2026-09-23 fix, found in review: this used to describe itself as
+    "mirrors bn_signals.leaders_momentum's direction check" — bn_signals.py
+    was fully deleted 2026-09-21, see CLAUDE.md; nothing here has imported
+    from it in a long time, this was just a stale pointer.)"""
     results = []
     for name, token in cfg.BN_LEADER_STOCKS.items():
         bar = bar_by_token.get(token)
@@ -73,18 +77,26 @@ async def run_bn_leader_consensus_study(
     — the exact condition app/services/price_alerts.py's check_consensus
     fires the live ALERT WebSocket push on.
     mode="direction": a leader counts on plain close-vs-open color alone, no
-    magnitude requirement — mirrors bn_signals.leaders_momentum's leader-vote
-    gate (BN_SAME_DIRECTION_REQUIRED), just evaluated standalone over history
-    instead of as one gate among several in the live entry decision.
+    magnitude requirement — a standalone direction-only variant of the same
+    N-of-6 consensus idea, evaluated over history here (not tied to any gate
+    in the live entry decision — the 2026-09-21 scalp rewrite replaced the
+    live engine's own leader-vote gate entirely; see CLAUDE.md).
 
     days_back=None (default) scans the full self-recorded bn_index_bars
     archive (this repo's only source of BankNifty index history — see
     CLAUDE.md); a number restricts to the most recent N days of it.
 
-    required=None uses the mode's own matching cfg default
-    (BN_ALERT_CONSENSUS_REQUIRED for threshold, BN_SAME_DIRECTION_REQUIRED
-    for direction) so this stays in sync with whatever the Settings page
-    currently has configured, rather than hardcoding a number here.
+    required=None defaults to cfg.BN_ALERT_CONSENSUS_REQUIRED for BOTH
+    modes (2026-09-23 fix, found in review: mode="direction" used to default
+    to cfg.BN_SAME_DIRECTION_REQUIRED, a constant sized for the OLD 14-stock
+    leader-vote population — this tool's _leader_direction/_leader_signal
+    both only ever iterate cfg.BN_LEADER_STOCKS, exactly 6 entries, so that
+    default of 9 was mathematically unreachable and silently returned
+    total_signals: 0 on every unparameterized "direction" call. The API
+    layer's own validation, dashboard.py's `1 <= required <= 6`, already
+    only accepts values sized for THIS 6-stock population when `required`
+    is passed explicitly — this default now matches that bound instead of
+    bypassing it).
     """
     if days_back is not None:
         from_iso = (datetime.now(IST) - timedelta(days=days_back)).isoformat()
@@ -110,7 +122,7 @@ async def run_bn_leader_consensus_study(
             leader_by_time.setdefault(b.start_time, {})[token] = b
 
     if required is None:
-        required = cfg.BN_SAME_DIRECTION_REQUIRED if mode == "direction" else cfg.BN_ALERT_CONSENSUS_REQUIRED
+        required = cfg.BN_ALERT_CONSENSUS_REQUIRED
     signals_up = signals_down = 0
     hits_up = hits_down = 0
     move_points_up: List[float] = []
@@ -149,13 +161,21 @@ async def run_bn_leader_consensus_study(
         max_up_count = max(max_up_count, up_count)
         max_down_count = max(max_down_count, down_count)
 
+        # Independent ifs, not if/elif (2026-09-23 fix, found in review):
+        # up_count + down_count <= 6, so both can independently clear a
+        # `required` of 3 or less on the same bar (e.g. 3 up / 3 down) — the
+        # old elif silently only ever counted that bar as an "up" signal,
+        # dropping a legitimate down-signal bar from signals_down/hits_down
+        # and skewing win_rate_down low. Unreachable at the current default
+        # (BN_ALERT_CONSENSUS_REQUIRED=4, and 4+4>6), but real for any
+        # smaller `required` passed explicitly.
         if up_count >= required:
             signals_up += 1
             move = next_bar.close - next_bar.open
             move_points_up.append(move)
             if next_bar.close > next_bar.open:
                 hits_up += 1
-        elif down_count >= required:
+        if down_count >= required:
             signals_down += 1
             move = next_bar.close - next_bar.open
             move_points_down.append(move)

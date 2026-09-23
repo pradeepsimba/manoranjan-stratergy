@@ -211,7 +211,17 @@ class DatabaseService:
                 """,
                 symbol, token,
                 trade.entry_index_price, trade.entry_time, trade.lot_size,
-                trade.current_sl, trade.target, trade.stoploss_points, target_offset,
+                trade.current_sl, trade.target,
+                # trade.stoploss_points (-> sl_offset column) is a vestigial
+                # field, always frozen at 0.0 under the 2026-09-21 scalp
+                # rewrite — target/stop are now absolute PREMIUM levels
+                # (target_rs/stop_rs), not index-point offsets. Every
+                # position row since that rewrite has sl_offset=0.00 with no
+                # real meaning; kept only for schema/column stability, not
+                # dropped (see this table's other "legacy column" notes
+                # above) — flagged here (found in review, 2026-09-23) so
+                # nobody reads a real signal into this column later.
+                trade.stoploss_points, target_offset,
                 trade.order_id, trade.status.value, trade.direction,
                 trade.strike, trade.option_type, trade.expiry,
                 trade.entry_premium, iv_used, instrument,
@@ -220,15 +230,28 @@ class DatabaseService:
     async def update_position_exit(self, order_id: str, exit_price: float,
                                    exit_time: str, pnl: float,
                                    exit_premium: Optional[float] = None) -> None:
+        # Wrapped in an explicit transaction (found in review, 2026-09-23,
+        # alongside the matched>1 guard below): raising INSIDE conn.
+        # transaction() makes asyncpg roll back automatically before the
+        # exception propagates — so an order_id collision that matches 2+
+        # rows gets its erroneous double-close UNDONE, not just detected
+        # after the fact. Without this, the UPDATE below would already be
+        # committed by the time matched>1 is noticed, and there'd be no way
+        # to undo closing an unrelated historical row.
         async with self._pool.acquire() as conn:
-            tag = await conn.execute(
-                """
-                UPDATE positions
-                SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3, exit_premium=$4
-                WHERE order_id=$5 AND status='OPEN'
-                """,
-                exit_price, exit_time, pnl, exit_premium, order_id,
-            )
+            async with conn.transaction():
+                tag = await conn.execute(
+                    """
+                    UPDATE positions
+                    SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3, exit_premium=$4
+                    WHERE order_id=$5 AND status='OPEN'
+                    """,
+                    exit_price, exit_time, pnl, exit_premium, order_id,
+                )
+                self._check_update_position_exit_tag(tag, order_id)
+
+    @staticmethod
+    def _check_update_position_exit_tag(tag: str, order_id: str) -> None:
         # asyncpg returns a command tag like "UPDATE 1"/"UPDATE 0" — a 0 here
         # (found in review, 2026-09-23) used to be indistinguishable from
         # success: the WHERE clause matches nothing if this order_id's entry
@@ -238,14 +261,38 @@ class DatabaseService:
         # (scheduler.py's _persist_closed_exit retries + logs CRITICAL on
         # exhaustion; the manual-exit endpoint returns a 500) instead of a
         # completely invisible gap in the trade audit log.
+        #
+        # matched > 1 is a second, related guard (also found in review,
+        # 2026-09-23): `positions.order_id` has NO unique constraint in the
+        # schema above, and the app-level generator (HHMMSS + an in-process
+        # counter that resets to 1 on every restart, no date component)
+        # doesn't actually guarantee uniqueness across days — a prior day's
+        # trade left stuck status='OPEN' (e.g. by this exact retry-exhaustion
+        # path) could in principle share an order_id with a new trade. If it
+        # ever does, this UPDATE's WHERE clause would silently match and
+        # close BOTH rows in one statement, corrupting an unrelated
+        # historical row's exit_price/pnl instead of raising. A real fix
+        # needs a DB-level uniqueness constraint (a schema migration, out of
+        # scope for this pass) — this is a narrower, pure-application-code
+        # safety net that at least turns silent corruption into a visible
+        # error the caller's retry/CRITICAL-log path already handles.
         try:
             matched = int(tag.split()[-1])
         except (ValueError, IndexError):
-            matched = None
+            raise RuntimeError(
+                f"update_position_exit: could not parse asyncpg command tag {tag!r} "
+                f"for order_id={order_id!r} — treating as failed rather than silently succeeding"
+            ) from None
         if matched == 0:
             raise RuntimeError(
                 f"update_position_exit: no OPEN position row matched order_id={order_id!r} "
                 f"— entry row missing or already closed"
+            )
+        if matched > 1:
+            raise RuntimeError(
+                f"update_position_exit: order_id={order_id!r} matched {matched} OPEN rows "
+                f"(expected exactly 1) — order_id collision; rolling back this exit rather "
+                f"than closing an unrelated row"
             )
 
     async def get_today_positions(self) -> List[Dict[str, Any]]:

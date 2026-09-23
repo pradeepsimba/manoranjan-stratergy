@@ -55,13 +55,27 @@ def _leader_results(st: AppState, leader_stocks: Dict[str, str],
 
 
 def check_consensus(st: AppState, instr_label: str, leader_stocks: Dict[str, str],
-                    price_alert_attr: Dict[str, str], required: int) -> List[dict]:
+                    price_alert_attr: Dict[str, str], required: int,
+                    has_clients: bool = True) -> List[dict]:
     """
     Evaluate the "N leaders crossed their own threshold AND agree on
     direction" condition for one instrument. Edge-triggered per direction
     (fires once when the count first reaches `required`, goes quiet until it
     drops back below and crosses again) — same semantics as the client-side
     checkConsensusAlert it replaces.
+
+    `has_clients` (2026-09-23, found in review): whether to COMMIT this
+    tick's met/not-met result into `_was_consensus`. Detection itself always
+    runs regardless of browser presence (the whole point of this module, per
+    its own docstring) — but if state were committed even while nobody's
+    connected, an edge detected with zero clients would be "consumed" and
+    never seen: a client connecting later, while the condition is STILL true
+    (never dropped back below threshold), would see met=True/was=True — no
+    new edge, so it never fires for them, contradicting the documented goal
+    of the condition being independent of whether/how often a browser is
+    watching. Skipping the commit while disconnected keeps the last
+    COMMITTED state frozen, so the first check after a client (re)connects
+    correctly sees it as a fresh edge if the condition is still active.
 
     Returns a list of {title, body} dicts for whichever direction(s) newly
     fired THIS call (usually 0, occasionally 1; both directions firing on
@@ -77,7 +91,8 @@ def check_consensus(st: AppState, instr_label: str, leader_stocks: Dict[str, str
         key = f"{instr_label}:{direction}"
         met = len(matching) >= required
         was = _was_consensus.get(key, False)
-        _was_consensus[key] = met
+        if has_clients:
+            _was_consensus[key] = met
         if met and not was:
             names = ", ".join(r["stock"] for r in matching)
             fired.append({

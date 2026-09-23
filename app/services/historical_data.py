@@ -33,18 +33,38 @@ async def _http() -> httpx.AsyncClient:
 # ── Candle parsing ─────────────────────────────────────────────────────────────
 
 def _parse_candles(arr: list) -> List[Candle]:
-    return [
-        Candle(
-            start_time=n.get("start_time", ""),
-            open=float(n.get("open",   0.0)),
-            close=float(n.get("close", 0.0)),
-            high=float(n.get("high",   0.0)),
-            low=float(n.get("low",     0.0)),
-            volume=float(n.get("volume", 0.0)),
-        )
-        for n in arr
-        if isinstance(n, dict)
-    ]
+    out: List[Candle] = []
+    for n in arr:
+        if not isinstance(n, dict):
+            continue
+        # A vendor response with an OHLC key PRESENT but explicit JSON
+        # `null` (a realistic partial-data bar) used to make float(None)
+        # raise TypeError here uncaught — and since this whole function ran
+        # as one list comprehension with no per-candle guard, ONE malformed
+        # candle for ONE stock crashed _build_result entirely, dropping
+        # every OTHER stock's perfectly good data in the same batch (this
+        # app's BN/NF universes both fit in a single batch, so that meant
+        # the WHOLE historical refresh, not just one stock — found in
+        # review, 2026-09-23). A null price field is genuinely "no data for
+        # this bar", not "zero" — drop the candle rather than fabricate a
+        # 0.0 price that could pollute VWAP/IV downstream (session_vwap
+        # only skips on volume<=0, not on price validity). `.get(key, 0.0)`
+        # for a genuinely ABSENT key is unchanged/pre-existing behavior.
+        if any(n.get(k) is None for k in ("open", "close", "high", "low")):
+            print(f"Historical fetch: skipping candle with null OHLC field: {n!r:.200}")
+            continue
+        try:
+            out.append(Candle(
+                start_time=n.get("start_time", ""),
+                open=float(n.get("open", 0.0)),
+                close=float(n.get("close", 0.0)),
+                high=float(n.get("high", 0.0)),
+                low=float(n.get("low", 0.0)),
+                volume=float(n.get("volume", 0.0)) if n.get("volume") is not None else 0.0,
+            ))
+        except (TypeError, ValueError) as e:
+            print(f"Historical fetch: skipping malformed candle {n!r:.200}: {e}")
+    return out
 
 
 # ── Core fetch (one batch) ─────────────────────────────────────────────────────
@@ -92,11 +112,19 @@ def _build_result(data: list, intervals: List[str]) -> Dict[str, Dict[str, List[
         symbol = node.get("stock_symbol", "")
         if not symbol:
             continue
-        result[symbol] = {}
-        for iv in intervals:
-            raw = node.get(f"{iv} data", [])
-            if isinstance(raw, list):
-                result[symbol][iv] = _parse_candles(raw)
+        try:
+            result[symbol] = {}
+            for iv in intervals:
+                raw = node.get(f"{iv} data", [])
+                if isinstance(raw, list):
+                    result[symbol][iv] = _parse_candles(raw)
+        except Exception as e:
+            # Defense-in-depth alongside _parse_candles' own per-candle
+            # guard above (found in review, 2026-09-23) — any OTHER
+            # unexpected shape for this one symbol's node must not take
+            # down every other symbol's already-parsed data in the batch.
+            print(f"Historical fetch: skipping malformed node for {symbol!r}: {e}")
+            result.pop(symbol, None)
     return result
 
 
@@ -128,6 +156,16 @@ async def _fetch_all(
     for r in responses:
         if isinstance(r, dict):
             merged.update(r)
+        else:
+            # _fetch's own except block already logs a network/HTTP-level
+            # failure, but a parse-level exception surfacing here (found in
+            # review, 2026-09-23 — before _build_result got its own guard
+            # above, a malformed candle could raise all the way out to this
+            # gather) was silently swallowed with zero log line, contra this
+            # function's own docstring claim of "silently dropped so healthy
+            # batches still populate state" (true for _fetch's network
+            # errors, was NOT true for this path). Log it too.
+            print(f"Historical fetch: batch failed and was dropped: {r!r}")
     return merged
 
 
