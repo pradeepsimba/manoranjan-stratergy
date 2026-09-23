@@ -32,6 +32,7 @@ from app.engine.nf_pricing import (
     time_to_expiry_years,
 )
 from app.engine.risk_guardrails import in_trading_window as _in_trading_window
+from app.engine.risk_guardrails import max_trades_ok as _max_trades_ok
 from app.engine.scalp_signals import compute_basket_reading
 from app.engine.wobi import compute_wobi, synthetic_depth
 from app.models import NFDiagnostic, NFSignal, NFTrade, Candle, PositionStatus
@@ -52,7 +53,7 @@ def _leader_qty_surge(leader_recent: Dict[str, List[Candle]]) -> Dict[str, bool]
     return out
 
 
-# _in_trading_window moved to app.engine.risk_guardrails.in_trading_window
+# _in_trading_window/_max_trades_ok moved to app.engine.risk_guardrails
 # 2026-09-23 — see bn_entry_exit.py's identical note.
 
 
@@ -85,7 +86,7 @@ def evaluate_entry(
     if no_trade_reason is None and not window_ok:
         no_trade_reason = "Outside scalp trading window (09:45-11:15 / 13:45-14:45 IST)"
 
-    max_trades_ok = trades_today < cfg.SCALP_MAX_TRADES_PER_DAY
+    max_trades_ok = _max_trades_ok(trades_today)
     if no_trade_reason is None and not max_trades_ok:
         no_trade_reason = f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached"
 

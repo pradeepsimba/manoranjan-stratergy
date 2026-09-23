@@ -370,12 +370,12 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         # separate step below, same as apply_and_persist/reset in
         # settings.py — otherwise an inverted window silently makes
         # _in_trading_window unsatisfiable for the whole backtest run with
-        # no error surfaced (found in review).
+        # no error surfaced (found in review). Reuses settings.effective_state
+        # (2026-09-23 fix, found in review: this used to hand-roll the same
+        # current-cfg-plus-overrides merge inline instead of calling the
+        # shared builder settings.py's own save/reset/startup paths use).
         attr_overrides = settings.expand_changes(req.overrides or {}, bt_only=True)
-        settings.validate_scalp_windows({
-            **{k: getattr(cfg, k) for k in cfg.dynamic_defaults()},
-            **attr_overrides,
-        })
+        settings.validate_scalp_windows(settings.effective_state(attr_overrides))
     except ValueError as e:
         raise HTTPException(400, f"overrides: {e}")
 

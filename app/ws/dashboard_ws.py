@@ -54,6 +54,26 @@ class DashboardWSManager:
         for ws, res in zip(clients, results):
             if isinstance(res, BaseException):
                 self._clients.discard(ws)
+                # 2026-09-23 fix, found in review: discarding from _clients
+                # only stops FUTURE broadcasts to this connection — it does
+                # NOT close it. Without this, a hung/half-open connection
+                # (the exact case _SEND_TIMEOUT_S targets) never gets a
+                # close frame, so the browser's WebSocket.onclose/reconnect
+                # logic never fires, and app/api/dashboard.py's dashboard_ws
+                # handler stays parked in `await websocket.receive_text()`
+                # forever — the task and its socket leak for the life of
+                # the process instead of being torn down. Fire-and-forget,
+                # bounded by its own timeout, so one broken client's cleanup
+                # never adds to this (already time-bounded) broadcast call's
+                # latency; best-effort only since the connection may already
+                # be fully dead.
+                asyncio.create_task(self._force_close(ws))
+
+    async def _force_close(self, ws: WebSocket) -> None:
+        try:
+            await asyncio.wait_for(ws.close(), timeout=_SEND_TIMEOUT_S)
+        except Exception:
+            pass  # already broken/closing — nothing more we can do
 
     def count(self) -> int:
         return len(self._clients)

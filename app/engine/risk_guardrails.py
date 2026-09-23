@@ -10,6 +10,12 @@ nf_entry_exit.py, each docstring calling it a "shared risk guardrail" while
 actually being two independently-editable copies — exactly the kind of
 drift this repo's shared-decision-core convention (CLAUDE.md) exists to
 prevent. One implementation now, imported by both.
+
+max_trades_ok joined it the same day (found in review): the same
+copy-paste-despite-being-"shared" pattern existed for the daily-trade-cap
+check (`trades_today < cfg.SCALP_MAX_TRADES_PER_DAY`), a few lines below
+in_trading_window in both files — the exact class of drift this module
+exists to prevent, just missed in the first pass.
 """
 
 from datetime import datetime, time
@@ -29,3 +35,9 @@ def in_trading_window(now: datetime) -> bool:
     w2 = (time(cfg.SCALP_WINDOW2_START_HOUR, cfg.SCALP_WINDOW2_START_MIN)
           <= t <= time(cfg.SCALP_WINDOW2_END_HOUR, cfg.SCALP_WINDOW2_END_MIN))
     return w1 or w2
+
+
+def max_trades_ok(trades_today: int) -> bool:
+    """Daily trade cap — one shared cap (`cfg.SCALP_MAX_TRADES_PER_DAY`), not
+    a pair per instrument, same as in_trading_window above."""
+    return trades_today < cfg.SCALP_MAX_TRADES_PER_DAY

@@ -266,7 +266,7 @@ def validate_scalp_windows(effective: Dict[str, Any]) -> None:
             raise ValueError(f"{label}: start time must be before end time")
 
 
-def _effective_state(overrides: Dict[str, Any]) -> Dict[str, Any]:
+def effective_state(overrides: Dict[str, Any]) -> Dict[str, Any]:
     """
     Current live value of every dynamic key, with `overrides` layered on
     top — the merged state any cross-field validator (currently just
@@ -340,7 +340,7 @@ async def load_and_apply(db) -> None:
 
     if valid:
         try:
-            validate_scalp_windows(_effective_state(valid))
+            validate_scalp_windows(effective_state(valid))
         except ValueError as e:
             print(f"Settings: stored Scalp Timing overrides invalid ({e}) — reverting that group to defaults")
             for k in _SCALP_TIMING_ATTRS:
@@ -356,7 +356,7 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     changes in code flow through). Returns the fresh describe() payload.
     """
     attr_changes = expand_changes(changes)
-    validate_scalp_windows(_effective_state(attr_changes))
+    validate_scalp_windows(effective_state(attr_changes))
 
     defaults   = cfg.dynamic_defaults()
     store      = {k: v for k, v in attr_changes.items() if v != defaults[k]}
@@ -388,7 +388,7 @@ async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
     # in a now-invalid combination with the other window attr's fresh
     # default — check the resulting effective state before committing.
     defaults = cfg.dynamic_defaults()
-    validate_scalp_windows(_effective_state({k: defaults[k] for k in attr_keys}))
+    validate_scalp_windows(effective_state({k: defaults[k] for k in attr_keys}))
 
     await db.delete_app_settings(attr_keys)
     cfg.clear_runtime_overrides(attr_keys)
