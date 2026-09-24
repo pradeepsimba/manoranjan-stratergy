@@ -296,12 +296,22 @@
           <table class="cardify">
             <thead>
               <tr>
-                <th>Instr</th><th>Dir</th><th>Option</th><th>Entry Time</th><th>Exit Time</th>
+                <th>Instr</th><th>Dir</th><th>Option</th><th>Qty</th><th>Entry Time</th><th>Exit Time</th>
                 <th>Entry Idx</th><th>Exit Idx</th><th>Entry Prem</th><th>Exit Prem</th><th>Outcome</th><th>P&amp;L ₹</th>
               </tr>
             </thead>
             <tbody id="closed-tbody">
-              <tr><td colspan="11" class="empty-cell">No trades yet today</td></tr>
+              <!-- 2026-09-24, found in review: added a Qty column (lot
+                   size — 1 lot is always 30 shares for BankNifty, 65 for
+                   Nifty 50, per CLAUDE.md's "Options are cash-only, always
+                   exactly 1 lot" — but the actual SHARE quantity behind
+                   that 1 lot varies per instrument and wasn't shown
+                   anywhere), and fixed Outcome to show the real exit
+                   reason (TARGET/STOP/TIME_SCRATCH/EOD/MANUAL) instead of
+                   just the trade's status, which is always "CLOSED" for
+                   every row in this table by definition — zero
+                   information. colspan bumped 11->12 to match. -->
+              <tr><td colspan="12" class="empty-cell">No trades yet today</td></tr>
             </tbody>
           </table>
         </div>
@@ -529,6 +539,6 @@
 <script src="/js/qtyAudit.js?v=49"></script>
 <script src="/js/kiteForm.js?v=50"></script>
 <script src="/js/alerts.js?v=50"></script>
-<script src="/js/dashboard.js?v=54"></script>
+<script src="/js/dashboard.js?v=55"></script>
 </body>
 </html>

@@ -234,6 +234,20 @@ class BNTrade:
     pending_exit_fill_after: Optional[str] = None   # ISO — when the delay elapses
     pending_exit_tick_seq:   Optional[int] = None   # st.bn_index_tick_seq snapshot when armed
 
+    # The trade's FINAL, permanent outcome label (2026-09-24, found in
+    # review) — e.g. "TARGET HIT"/"STOP HIT"/"TIME_SCRATCH HIT"/
+    # "EOD SQUARE-OFF"/"MANUAL EXIT". Distinct from pending_exit_reason
+    # above (which is cleared back to None once settled): this one is set
+    # once, in bn_trade._settle, and kept for the trade's lifetime — before
+    # this field existed, the `label` string passed all the way down to
+    # _settle was used only for a console print() and then discarded, so
+    # the dashboard's "Today's Trades" table had no way to show WHY a trade
+    # closed, only that it had (status is always "CLOSED" for every closed
+    # trade — zero information). The backtest side already tracks the
+    # equivalent concept (BTTrade.outcome, app/backtest/portfolio.py) —
+    # this brings the live side to parity.
+    exit_reason: Optional[str] = None
+
 
 @dataclass(slots=True)   # an algo-fired BN entry signal awaiting its simulated fill
 class PendingBNEntry:
@@ -320,6 +334,8 @@ class NFTrade:
     pending_exit_reason:     Optional[str] = None
     pending_exit_fill_after: Optional[str] = None
     pending_exit_tick_seq:   Optional[int] = None
+    # NF mirror of BNTrade's exit_reason above — see there.
+    exit_reason: Optional[str] = None
 
 
 @dataclass(slots=True)   # NF mirror of PendingBNEntry above

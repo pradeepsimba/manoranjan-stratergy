@@ -155,6 +155,9 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
 def _settle(trade: NFTrade, now: datetime, exit_index_price: float,
            exit_premium: float, label: str) -> NFTrade:
     finalize_exit(trade, now, exit_index_price, exit_premium)
+    # See bn_trade._settle's identical comment — persists the final outcome
+    # label onto the trade (2026-09-24, found in review).
+    trade.exit_reason = label
     # See bn_trade._settle's identical comment — clears any armed
     # pending-exit bookkeeping now that the trade is CLOSED either way.
     trade.pending_exit_reason = None

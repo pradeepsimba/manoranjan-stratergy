@@ -284,7 +284,11 @@ function renderClosedTrades(bnTrades, nfTrades) {
   _lastClosedBn = bnTrades;
   _lastClosedNf = nfTrades || [];
 
-  // "Today's Trades" panel was removed from the page — no-op once its DOM is gone.
+  // Guard kept even though the "Today's Trades" panel is a permanent part
+  // of the current page (stale comment removed 2026-09-24, found in
+  // review — it used to claim this panel was removed from index.html,
+  // which stopped being true once it was re-added 2026-09-19; see
+  // CLAUDE.md's history of these panels being dropped/restored).
   const countEl = document.getElementById('closed-count');
   const tbody = document.getElementById('closed-tbody');
   if (!countEl || !tbody) return;
@@ -297,24 +301,34 @@ function renderClosedTrades(bnTrades, nfTrades) {
 
   countEl.textContent = merged.length;
   if (!merged.length) {
-    const emptyHtml = '<tr><td colspan="11" class="empty-cell">No trades yet today</td></tr>';
+    const emptyHtml = '<tr><td colspan="12" class="empty-cell">No trades yet today</td></tr>';
     if (tbody._h !== emptyHtml) { tbody._h = emptyHtml; tbody.innerHTML = emptyHtml; }
     return;
   }
   const html = merged.slice().reverse().map(t => {
     const pnlCls = t.pnl > 0 ? 'pnl-pos' : t.pnl < 0 ? 'pnl-neg' : '';
-    const ocCls  = t.status === 'CLOSED' ? '' : '';
+    // Real exit reason (2026-09-24, found in review) — this used to show
+    // t.status, which is always "CLOSED" for every row in a CLOSED-trades
+    // table by definition (zero information). t.exitReason is the actual
+    // "TARGET HIT"/"STOP HIT"/"TIME_SCRATCH HIT"/"EOD SQUARE-OFF"/
+    // "MANUAL EXIT" label (see models.py's BNTrade.exit_reason) — reuses
+    // the same oc-target/oc-stop/oc-eod classes the Backtest trades table
+    // below already defines for the identical concept.
+    const reason = t.exitReason || '—';
+    const ocCls = reason.startsWith('TARGET') ? 'oc-target'
+                : reason.startsWith('STOP')   ? 'oc-stop' : 'oc-eod';
     return `<tr>
       <td data-label="Instr"><span class="badge ${t._instr === 'NF' ? 'blue' : 'gray'}">${t._instr}</span></td>
       <td data-label="Dir">${escHtml(t.direction)}</td>
       <td data-label="Option">${t.strike} ${escHtml(t.optionType)}</td>
+      <td data-label="Qty">${t.lotSize != null ? t.lotSize : '—'}</td>
       <td data-label="Entry Time" class="time-col">${fmtDTS(t.entryTime)}</td>
       <td data-label="Exit Time" class="time-col">${fmtDTS(t.exitTime)}</td>
       <td data-label="Entry Idx">${fmt2(t.entryIndexPrice)}</td>
       <td data-label="Exit Idx">${fmt2(t.exitIndexPrice)}</td>
       <td data-label="Entry Prem">${fmt2(t.entryPremium)}</td>
       <td data-label="Exit Prem">${fmt2(t.exitPremium)}</td>
-      <td data-label="Outcome" class="${ocCls}">${escHtml(t.status || '')}</td>
+      <td data-label="Outcome" class="${ocCls}">${escHtml(reason)}</td>
       <td data-label="P&L ₹" class="${pnlCls}">${(t.pnl >= 0 ? '+' : '') + fmt2(t.pnl)}</td>
     </tr>`;
   }).join('');

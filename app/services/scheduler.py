@@ -242,6 +242,11 @@ class SchedulerService:
                         order_id=closed.order_id, exit_price=closed.exit_index_price,
                         exit_time=closed.exit_time, pnl=closed.pnl,
                         exit_premium=closed.exit_premium,
+                        # 2026-09-24, found in review — see models.py's
+                        # BNTrade.exit_reason comment. Every exit path (tick
+                        # exit, EOD, manual) routes through this one shared
+                        # helper, so a single call site covers all of them.
+                        outcome=closed.exit_reason,
                     )
                     position_persisted = True
                 # NOT self._persist_funds() — that helper swallows its own
@@ -749,6 +754,11 @@ class SchedulerService:
                 exit_time=r.get("exit_time"),
                 exit_premium=float(r["exit_premium"]) if r.get("exit_premium") is not None else None,
                 pnl=_f(r.get("pnl")),
+                # 2026-09-24, found in review — a restart-recovered closed
+                # trade needs this backfilled from the DB same as every
+                # other field above, or "Today's Trades" would show a blank
+                # outcome for anything closed before the last restart.
+                exit_reason=r.get("outcome"),
             )
             if status == PositionStatus.CLOSED:
                 st.daily_pnl += trade.pnl   # shared account — every closed trade nets into the one daily_pnl
@@ -1220,6 +1230,11 @@ class SchedulerService:
                 # perfectly normal open position. None while no exit
                 # condition has fired yet.
                 "pendingExitReason": t.pending_exit_reason,
+                # The trade's final outcome label once closed (2026-09-24,
+                # found in review — see models.py's BNTrade.exit_reason
+                # comment) — "TARGET HIT"/"STOP HIT"/"TIME_SCRATCH HIT"/
+                # "EOD SQUARE-OFF"/"MANUAL EXIT". None while still open.
+                "exitReason": t.exit_reason,
             }
 
         active = None

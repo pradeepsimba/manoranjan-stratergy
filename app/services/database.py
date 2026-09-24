@@ -123,6 +123,13 @@ ALTER TABLE positions ADD COLUMN IF NOT EXISTS expiry         TEXT;
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_premium  NUMERIC(10,2);
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_premium   NUMERIC(10,2);
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS iv_used        NUMERIC(6,4);
+-- Final exit outcome label (2026-09-24, found in review) — e.g. "TARGET HIT"/
+-- "STOP HIT"/"TIME_SCRATCH HIT"/"EOD SQUARE-OFF"/"MANUAL EXIT". NULL for
+-- still-OPEN rows. See app/models.py's BNTrade.exit_reason comment for why
+-- this was missing: `status` alone (always 'CLOSED' once closed) carries no
+-- information about WHY, unlike backtest_trades' existing `outcome` column
+-- this brings live positions to parity with.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS outcome        VARCHAR(30);
 
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS direction      VARCHAR(4);
 ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS strike         INTEGER;
@@ -237,7 +244,8 @@ class DatabaseService:
 
     async def update_position_exit(self, order_id: str, exit_price: float,
                                    exit_time: str, pnl: float,
-                                   exit_premium: Optional[float] = None) -> None:
+                                   exit_premium: Optional[float] = None,
+                                   outcome: Optional[str] = None) -> None:
         # Wrapped in an explicit transaction (found in review, 2026-09-23,
         # alongside the matched>1 guard below): raising INSIDE conn.
         # transaction() makes asyncpg roll back automatically before the
@@ -251,10 +259,10 @@ class DatabaseService:
                 tag = await conn.execute(
                     """
                     UPDATE positions
-                    SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3, exit_premium=$4
-                    WHERE order_id=$5 AND status='OPEN'
+                    SET status='CLOSED', exit_price=$1, exit_time=$2, pnl=$3, exit_premium=$4, outcome=$5
+                    WHERE order_id=$6 AND status='OPEN'
                     """,
-                    exit_price, exit_time, pnl, exit_premium, order_id,
+                    exit_price, exit_time, pnl, exit_premium, outcome, order_id,
                 )
                 self._check_update_position_exit_tag(tag, order_id)
 

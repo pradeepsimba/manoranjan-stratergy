@@ -208,6 +208,11 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
 def _settle(trade: BNTrade, now: datetime, exit_index_price: float,
            exit_premium: float, label: str) -> BNTrade:
     finalize_exit(trade, now, exit_index_price, exit_premium)
+    # Persist the FINAL outcome label onto the trade (2026-09-24, found in
+    # review) — `label` used to only ever reach the print() below and then
+    # vanish; nothing downstream (dashboard, DB) could ever show WHY a
+    # trade closed. See models.py's BNTrade.exit_reason comment.
+    trade.exit_reason = label
     # Clear any armed pending-exit bookkeeping (found redundant otherwise —
     # the trade is CLOSED either way now, whether it got here via a filled
     # pending exit or an unconditional force_close that pre-empted one).
