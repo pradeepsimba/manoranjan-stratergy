@@ -344,7 +344,15 @@ def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(bn_closes_lookback)
-    bs = black_scholes(current_index_price, trade.strike, T, cfg.BN_RISK_FREE_RATE, iv, trade.option_type)
+    # >0 guard (2026-09-24, found in review) — evaluate_entry already guards
+    # its own black_scholes call this same way (`if bn_close > 0:` above);
+    # this one didn't, even though black_scholes' math.log(S/K) raises
+    # ValueError for S<=0. Not reachable today (every current caller already
+    # guards on ltp>0 or falls back to a real candle close before calling
+    # in), but the exit/settlement path is exactly where this invariant
+    # shouldn't depend on every future caller getting it right.
+    safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
+    bs = black_scholes(safe_price, trade.strike, T, cfg.BN_RISK_FREE_RATE, iv, trade.option_type)
     premium = bs["price"]
 
     entry_time = datetime.fromisoformat(trade.entry_time)

@@ -413,12 +413,24 @@ class SchedulerService:
 
     async def _tick_exits(self) -> None:
         st = get_state()
-        if st.active_trade is None or st.bn_index_ltp <= 0:
+        if st.active_trade is None:
             return
         with st._bn_index_lock:
             bn_candles = list(st.bn_index_candles_5m)
         if not bn_candles:
             return
+        # bn_index_ltp can legitimately be 0 here for a restart-recovered
+        # trade: _restore_from_db can repopulate st.active_trade before
+        # _run_wait_zone's historical load + the first live/synthetic tick
+        # ever arrive, and bn_index_ltp starts at 0.0 in a fresh process
+        # (state.py). Falling back to the last known candle close (bn_candles
+        # is already loaded by the time this runs) mirrors the EOD
+        # force-close fallback fixed 2026-09-23 for the identical ltp==0
+        # hazard (found in review, 2026-09-24) — without it, a restored open
+        # trade got ZERO target/stop/time-scratch checking for the entire
+        # reload window, easily longer than the strategy's own ~12s
+        # time-stop, defeating the whole ₹2-3 bracket it depends on.
+        price = st.bn_index_ltp if st.bn_index_ltp > 0 else bn_candles[-1].close
         # closed_tail_closes() excludes the still-forming last bar before
         # feeding estimate_iv — see its own docstring for why (this was the
         # actual root cause of a real production bug on the exit side, where
@@ -426,7 +438,7 @@ class SchedulerService:
         # IV-estimate inconsistency, not real price movement).
         lookback = iv_lookback_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
         try:
-            closed = bn_trade.check_tick_exit(_now(), st.bn_index_ltp, lookback)
+            closed = bn_trade.check_tick_exit(_now(), price, lookback)
             if closed:
                 await self._persist_closed_exit(closed, "BN")
         except Exception as e:
@@ -479,6 +491,18 @@ class SchedulerService:
         signal, diagnostic = evaluate_entry(now, bn_recent, bn_closes_lookback,
                                             basket_candles, last_exit_time, st.trades_today_combined,
                                             current_index_price=st.bn_index_ltp, basket_ltp=basket_ltp)
+        # trades_today_combined (above) is correctly what the GATE inside
+        # evaluate_entry checks against SCALP_MAX_TRADES_PER_DAY (the
+        # 2026-09-24 shared-cap fix) — but the DIAGNOSTIC's own trades_today
+        # field is meant to be a per-instrument DISPLAY value (see
+        # state.py's bn_trades_today comment), so overwrite it back to the
+        # true per-instrument count here (found in review, 2026-09-24: this
+        # was left holding the combined value, meaning BN's and NF's
+        # diagnostic panels would both silently show the identical combined
+        # number instead of each instrument's own — currently low-impact
+        # since dashboard.js doesn't render this field yet, but the data
+        # contract itself was wrong).
+        diagnostic.trades_today = st.bn_trades_today
         st.bn_diagnostic = diagnostic
 
         if signal is None:
@@ -495,16 +519,20 @@ class SchedulerService:
 
     async def _tick_exits_nf(self) -> None:
         st = get_state()
-        if st.active_trade_nf is None or st.nf_index_ltp <= 0:
+        if st.active_trade_nf is None:
             return
         with st._nf_index_lock:
             nf_candles = list(st.nf_index_candles_5m)
         if not nf_candles:
             return
+        # See the BN mirror's identical fallback comment above (found in
+        # review, 2026-09-24) — a restart-recovered NF trade gets the same
+        # ltp==0 hazard for the exact same reason.
+        price = st.nf_index_ltp if st.nf_index_ltp > 0 else nf_candles[-1].close
         # See the BN mirror's comment above — same forming-bar exclusion via closed_tail_closes().
         lookback = iv_lookback_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
         try:
-            closed = nf_trade.check_tick_exit(_now(), st.nf_index_ltp, lookback)
+            closed = nf_trade.check_tick_exit(_now(), price, lookback)
             if closed:
                 await self._persist_closed_exit(closed, "NF")
         except Exception as e:
@@ -543,6 +571,8 @@ class SchedulerService:
         signal, diagnostic = nf_evaluate_entry(now, nf_recent, nf_closes_lookback,
                                                basket_candles, last_exit_time, st.trades_today_combined,
                                                current_index_price=st.nf_index_ltp, basket_ltp=basket_ltp)
+        # See the BN mirror's identical comment above (2026-09-24, found in review).
+        diagnostic.trades_today = st.nf_trades_today
         st.nf_diagnostic = diagnostic
 
         if signal is None:
@@ -763,6 +793,17 @@ class SchedulerService:
         self._mkt.set_nf_atm_watch(None, None)
         self._bn_atm_watch_strike = None
         self._nf_atm_watch_strike = None
+
+        # Reset the leader-consensus alert's edge-trigger state at day
+        # boundary too (found in review, 2026-09-24) — previously only reset
+        # on a 0->positive dashboard-client reconnect (_tick_alerts), same as
+        # every other per-day counter/flag here. Without this, a condition
+        # still true at 15:30 close stays "already seen" into the next day,
+        # so an immediate gap-open repeat of the same condition at the next
+        # session's open would silently fail to fire — the same edge-case
+        # class as the reconnect bug already fixed for _was_consensus, just
+        # at the day boundary instead of the client-connection boundary.
+        price_alerts.reset_consensus_state()
 
         await self._mkt.stop()
         await self._persist_funds()

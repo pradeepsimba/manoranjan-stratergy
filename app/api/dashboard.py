@@ -146,7 +146,22 @@ async def manual_order(req: ManualOrderRequest) -> Dict[str, Any]:
     # running underneath them.
     if not await _sched._persist_new_position(trade, "BANKNIFTY", "BN manual"):
         st = get_state()
-        st.active_trade = None
+        # `is trade`, not unconditional (2026-09-24, found in review):
+        # _persist_new_position's retry loop awaits for up to ~0.8s (longer
+        # if the DB hangs rather than errors quickly), yielding the event
+        # loop — the 100ms tick loop keeps running underneath this request,
+        # so THIS trade could legitimately close on its own (target/stop
+        # hit) and, once the cooldown allows, a DIFFERENT new trade could
+        # open into st.active_trade before this retry loop finishes.
+        # Blindly clearing st.active_trade here would then orphan that
+        # unrelated, perfectly legitimate new trade — un-exitable via the
+        # UI, silently reintroducing the exact "invisible live trade"
+        # failure mode this whole fix exists to close, just for a
+        # different trade. The trades-today counter decrement below is
+        # unconditionally correct regardless (it only ever undoes THIS
+        # call's own increment), so it stays outside the identity check.
+        if st.active_trade is trade:
+            st.active_trade = None
         st.bn_trades_today = max(0, st.bn_trades_today - 1)
         raise HTTPException(500, "Order could not be saved after retries — rolled back, not placed.")
     return {
@@ -178,14 +193,13 @@ async def manual_exit() -> Dict[str, Any]:
     closed = bn_trade.force_close(datetime.now(IST), st.bn_index_ltp, lookback, label="MANUAL EXIT")
     if closed is None:
         raise HTTPException(400, "No active trade to exit")
-    try:
-        await _db.update_position_exit(
-            order_id=closed.order_id, exit_price=closed.exit_index_price,
-            exit_time=closed.exit_time, pnl=closed.pnl, exit_premium=closed.exit_premium,
-        )
-        await _db.set_app_settings({BN_FUNDS_KEY: st.funds})
-    except Exception as e:
-        raise HTTPException(500, f"Exit applied but DB persist failed: {e}")
+    # Routed through the same retry-hardened path the algo/EOD exits use
+    # (2026-09-24, found in review) — this used to be a single unretried
+    # update_position_exit call, unlike every other exit path in this app,
+    # so a transient DB blip here left the positions row permanently OPEN
+    # with no reconciler (the exact gap _persist_closed_exit was built to
+    # close everywhere else). It logs its own CRITICAL on exhausted retries.
+    await _sched._persist_closed_exit(closed, "BN manual")
     return {"orderId": closed.order_id, "exitPremium": closed.exit_premium, "pnl": closed.pnl}
 
 
@@ -202,11 +216,13 @@ async def manual_order_nf(req: ManualOrderRequest) -> Dict[str, Any]:
         trade = nf_trade.place_manual_order(req.direction.upper(), datetime.now(IST))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    # Retried + rolled-back-on-failure — see manual_order's identical fix
-    # above (2026-09-24, found in review) for the full rationale.
+    # Retried + rolled-back-on-failure, with the `is trade` identity guard
+    # — see manual_order's identical fix above (2026-09-24, found in review)
+    # for the full rationale.
     if not await _sched._persist_new_position(trade, "NIFTY50", "NF manual"):
         st = get_state()
-        st.active_trade_nf = None
+        if st.active_trade_nf is trade:
+            st.active_trade_nf = None
         st.nf_trades_today = max(0, st.nf_trades_today - 1)
         raise HTTPException(500, "Order could not be saved after retries — rolled back, not placed.")
     return {
@@ -235,14 +251,8 @@ async def manual_exit_nf() -> Dict[str, Any]:
     closed = nf_trade.force_close(datetime.now(IST), st.nf_index_ltp, lookback, label="MANUAL EXIT")
     if closed is None:
         raise HTTPException(400, "No active trade to exit")
-    try:
-        await _db.update_position_exit(
-            order_id=closed.order_id, exit_price=closed.exit_index_price,
-            exit_time=closed.exit_time, pnl=closed.pnl, exit_premium=closed.exit_premium,
-        )
-        await _db.set_app_settings({BN_FUNDS_KEY: st.funds})
-    except Exception as e:
-        raise HTTPException(500, f"Exit applied but DB persist failed: {e}")
+    # See manual_exit's identical fix above (2026-09-24, found in review).
+    await _sched._persist_closed_exit(closed, "NF manual")
     return {"orderId": closed.order_id, "exitPremium": closed.exit_premium, "pnl": closed.pnl}
 
 

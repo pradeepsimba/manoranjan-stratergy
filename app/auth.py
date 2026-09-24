@@ -119,7 +119,16 @@ def check_credentials(username: str, password: str) -> bool:
     # than "right username, wrong password", leaking which one was correct
     # through timing despite each compare_digest() call being constant-time.
     username_ok = hmac.compare_digest(username, cfg.SETTINGS_USER)
-    password_ok = bool(password) and bool(cfg.SETTINGS_PASSWORD) \
+    # `bool(password) and` removed (2026-09-24, found in review) — it used to
+    # short-circuit AROUND compare_digest for an empty submitted password,
+    # contradicting this function's own stated constant-time invariant (an
+    # empty password took a measurably different path than any non-empty
+    # wrong one). `bool(cfg.SETTINGS_PASSWORD) and` stays: that's a static
+    # SERVER-config fact, not per-request user input, so short-circuiting on
+    # it leaks nothing through timing — it's kept purely so an unset/empty
+    # SETTINGS_PASSWORD can never match an empty submitted password (which
+    # hmac.compare_digest("", "") would otherwise consider equal).
+    password_ok = bool(cfg.SETTINGS_PASSWORD) \
         and hmac.compare_digest(password, cfg.SETTINGS_PASSWORD)
     return username_ok and password_ok
 

@@ -123,12 +123,21 @@ SPEC: List[Dict[str, Any]] = [
     _s("SCALP_WINDOW2_END", "Trading window 2 — end", "time", "Scalp Timing",
        parts=("SCALP_WINDOW2_END_HOUR", "SCALP_WINDOW2_END_MIN"),
        help_="No new entries after this time for the rest of the day."),
+    # bt=False (2026-09-24, found in review): app/backtest/engine.py's
+    # _try_exit never reads pos.time_stop_s — per CLAUDE.md's documented
+    # backtest-fidelity limitation, backtest has no sub-5-minute data, so it
+    # always resolves on the entry bar's immediate next bar (open/high/low
+    # touch, else a TIME_SCRATCH at that bar's close) regardless of this
+    # value. Offering it as a per-run bt override silently misled whoever
+    # used it into thinking a longer/shorter time-stop would change the
+    # simulated outcome — it never did. Still a real, dynamic LIVE-only
+    # tunable; only the backtest per-run override is disabled.
     _s("BN_SCALP_TIME_STOP_S", "BankNifty time-stop (s)", "float", "Scalp Timing",
-       min_=1, max_=60, step=0.5,
-       help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade."),
+       min_=1, max_=60, step=0.5, bt=False,
+       help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade. Live-only: has no effect on backtest, which always resolves on the next 5m bar regardless of this value (no sub-5-minute historical data exists to simulate the real time-stop)."),
     _s("NF_SCALP_TIME_STOP_S", "Nifty 50 time-stop (s)", "float", "Scalp Timing",
-       min_=1, max_=60, step=0.5,
-       help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade."),
+       min_=1, max_=60, step=0.5, bt=False,
+       help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade. Live-only: has no effect on backtest, which always resolves on the next 5m bar regardless of this value (no sub-5-minute historical data exists to simulate the real time-stop)."),
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}

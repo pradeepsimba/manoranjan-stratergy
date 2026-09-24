@@ -909,6 +909,19 @@ function renderBtHistory(runs) {
 }
 
 function loadRun(runId) {
+  // Cancel any in-flight poll of a DIFFERENT run before repainting (2026-09-24,
+  // found in review) — pollBacktest's own guard (`runId !== _activePollRun`)
+  // only protects against a STALE poll after a NEWER run replaces it via
+  // startPolling; it never protected against the reverse case, where a
+  // currently-running backtest's poll interval is still live while the user
+  // clicks an older, already-completed run from the history strip to review
+  // it. Without this, the still-ticking interval's next success handler
+  // (up to 1.5s later) would silently overwrite the just-loaded historical
+  // run's summary/trades/export target the instant the active run finished.
+  if (_activePollRun !== null && _activePollRun !== runId) {
+    clearInterval(btPoll);
+    _activePollRun = null;
+  }
   fetch(`/api/backtest/${runId}`)
     .then(async r => {
       const run = await r.json();

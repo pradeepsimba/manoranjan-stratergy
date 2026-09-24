@@ -231,7 +231,9 @@ def evaluate_exit(trade: NFTrade, now: datetime, current_index_price: float,
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(nf_closes_lookback)
-    bs = black_scholes(current_index_price, trade.strike, T, cfg.NF_RISK_FREE_RATE, iv, trade.option_type)
+    # See bn_entry_exit.evaluate_exit's identical >0 guard (2026-09-24, found in review).
+    safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
+    bs = black_scholes(safe_price, trade.strike, T, cfg.NF_RISK_FREE_RATE, iv, trade.option_type)
     premium = bs["price"]
 
     entry_time = datetime.fromisoformat(trade.entry_time)

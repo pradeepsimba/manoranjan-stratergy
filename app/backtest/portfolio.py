@@ -57,7 +57,13 @@ class BTPosition:
     scratch_slippage_rs:   float = 0.0
     basket_score_at_entry: float = 0.0
     wobi_at_entry:         float = 0.0
-    lot_size:     int = 30
+    # cfg.BN_LOT_SIZE, not a hardcoded 30 (2026-09-24, found in review) —
+    # models.py's BNTrade.lot_size was fixed to reference cfg.BN_LOT_SIZE
+    # directly on 2026-09-24 for exactly this staleness reason (a real
+    # contract-spec value NSE revises periodically), but this duck-typed
+    # backtest twin was missed. Harmless today only because _open_position
+    # (engine.py) always passes lot_size=cfg.BN_LOT_SIZE explicitly.
+    lot_size:     int = cfg.BN_LOT_SIZE
     confidence:   float = 0.0
     iv_used:      float = 0.0
 
