@@ -223,9 +223,17 @@ body {
 .badge.blue   { background: var(--prime-container); color: var(--prime); border-color: var(--prime); }
 
 /* ── Stat strip ────────────────────────────────────────────────────────────── */
+/* auto-fit + minmax (2026-09-24, UI/UX modernization pass) — replaces the old
+   fixed repeat(4, 1fr): only 2 .stat-card elements actually exist in the DOM
+   (BankNifty/Nifty 50), so a hardcoded 4-column track left 2 columns of dead
+   grid space on any screen wider than ~960px. auto-fit sizes purely off the
+   minmax bounds, so it self-adapts at every width with no breakpoint needed:
+   cards sit at a natural 160-320px width on desktop instead of stretching
+   edge-to-edge or leaving a blank gap, and wrap to one per row automatically
+   on a phone narrow enough that two 160px cards + gap wouldn't fit. */
 .stat-strip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 320px));
   gap: 10px;
   padding: 10px 18px;
   background: var(--surf);
@@ -932,14 +940,32 @@ a:focus-visible, button:focus-visible, input:focus-visible,
 @keyframes flashNeg { 0%{background:var(--neg-bg);} 100%{background:transparent;} }
 
 /* ── Responsive ────────────────────────────────────────────────────────────── */
+/* .main-grid stays single-column below 860px (mobile/narrow-tablet) — the
+   explicit `1fr` here is now belt-and-suspenders (the unqualified base rule
+   already is 1fr) but kept so this block reads as the authoritative
+   "phone/narrow" layout on its own. .stat-strip needs no override any more
+   (2026-09-24) — its base rule is auto-fit/minmax now, so it already adapts
+   at every width without a breakpoint. */
 @media (max-width: 960px) {
   .main-grid  { grid-template-columns: 1fr; }
-  .stat-strip { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* App bar has 7 groups of content (brand, 3 status badges, clock, 2
+   nav-segs, alerts button, theme toggle) in one un-wrapped flex row — fine
+   on a real desktop width, but between roughly 640-1024px (tablets, small
+   laptops, a phone in landscape) that many groups packed into one row with
+   no wrap either overflowed or squeezed everything down to unreadable
+   sizes. Previously only <=640px ever wrapped it; this widens that to the
+   whole tablet range while leaving the tighter 640px block below (smaller
+   fonts/padding) to further condense things once the bar is down to a
+   genuinely narrow phone width. */
+@media (max-width: 1024px) {
+  .app-bar { height: auto; flex-wrap: wrap; row-gap: 8px; }
 }
 
 @media (max-width: 640px) {
   .app-bar { height: auto; flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
-  .stat-strip { grid-template-columns: repeat(2, 1fr); padding: 8px 12px; gap: 8px; }
+  .stat-strip { padding: 8px 12px; gap: 8px; }
   .stat-value { font-size: 17px; }
   .main-grid { padding: 8px 12px; gap: 10px; }
   .clock { font-size: 17px; }
@@ -969,6 +995,53 @@ a:focus-visible, button:focus-visible, input:focus-visible,
     border-bottom: 1px solid var(--edge-soft) !important; padding-bottom: 6px; margin-bottom: 4px;
   }
   table.cardify td.card-title::before { content: none; }
+}
+
+/* ── Desktop/wide-screen main layout (2026-09-24, UI/UX modernization pass) ──
+   .main-grid's base rule (near the top of this file) is a single column —
+   correct for mobile, but until now that was ALSO what every screen wider
+   than 960px got: a phone, a laptop and a 4K monitor all rendered the exact
+   same one-column stack, with the Active Trade / Today's Trades / Stock
+   Candles panels simply getting taller instead of using the extra width a
+   bigger screen actually has. The 3 `.col` children (in DOM order: Active
+   Trade, Today's Trades, Stock Candles) are re-flowed into real columns
+   above 860px — a compact trade sidebar next to the trade log + candle
+   tables (which need the width far more, given the Stock Candles panel's
+   12-50-stock × N-bar tables) — and into a plain 3-up row on very wide
+   monitors where there's room for all three side by side. Placed after the
+   max-width:960px/640px rules above so normal cascade order (not added
+   specificity) makes these win in their own min-width ranges without
+   having to fight the narrower rules. */
+@media (min-width: 860px) {
+  .main-grid {
+    grid-template-columns: minmax(300px, 380px) 1fr;
+    align-items: start;
+  }
+  /* Active Trade sidebar spans both rows of the right column's stack, and
+     sticks below the app bar while the (usually much taller) trade log /
+     candle tables scroll past it — the positions panel is exactly the kind
+     of content worth keeping in view while scanning the rest of the page. */
+  .main-grid > .col:nth-child(1) {
+    grid-column: 1; grid-row: 1 / span 2;
+    position: sticky; top: 68px;
+    max-height: calc(100vh - 80px);
+    overflow-y: auto;
+  }
+  .main-grid > .col:nth-child(2) { grid-column: 2; grid-row: 1; }
+  .main-grid > .col:nth-child(3) { grid-column: 2; grid-row: 2; }
+}
+
+@media (min-width: 1500px) {
+  /* Enough width for all 3 columns side by side — undo the 860px
+     breakpoint's row-spanning/stacking placement back to plain DOM order. */
+  .main-grid {
+    grid-template-columns: minmax(300px, 380px) minmax(340px, 480px) 1fr;
+    max-width: 2200px;
+    margin: 0 auto;
+  }
+  .main-grid > .col:nth-child(1) { grid-row: 1; }
+  .main-grid > .col:nth-child(2) { grid-column: 2; grid-row: 1; }
+  .main-grid > .col:nth-child(3) { grid-column: 3; grid-row: 1; }
 }
 
 /* ── c.html UI-parity additions ──────────────────────────────────────────────
