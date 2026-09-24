@@ -213,10 +213,14 @@ function _candleCellHtml(bar, showOC, alertPts) {
   const cls = diff > 0 ? 'positive' : diff < 0 ? 'negative' : 'neutral';
   const content = _floorToTwo(Math.abs(diff));
   const time = bar.startTime ? bar.startTime.substring(11, 16) : '';
-  // The number shown/here is a raw POINT difference, not a %, and the
-  // per-stock alert thresholds (Settings → BN/NF Alerts) are set in % —
-  // spell out the % here so it's not mistaken for one at a glance (see
-  // static/js/alerts.js's checkPriceAlerts, which uses this same % move).
+  // The number shown here is a raw POINT difference, but the tooltip below
+  // additionally spells out the % move for context (correction 2026-09-24,
+  // found in review: this comment used to say the per-stock alert
+  // thresholds themselves are set in % — they're not, they're raw points,
+  // labeled "(pts)" in Settings → BN/NF Alerts and keyed cfg.*_PRICE_ALERT_
+  // PTS_* — same points figure static/js/alerts.js's checkPriceAlerts
+  // compares against; the % shown here is purely an extra display
+  // convenience, unrelated to how the threshold itself is defined).
   const movePct = Math.abs(diff) / bar.open * 100;
   const title = `${time} Open:${bar.open.toFixed(2)} Close:${bar.close.toFixed(2)} (${movePct.toFixed(3)}% move)`;
   const ocLine = showOC
@@ -258,32 +262,43 @@ function renderStockCandles(stockCandles, ids, cacheAsLive) {
   const body = document.getElementById(ids.body);
   if (!head || !body || !stockCandles) return;
 
+  const names = Object.keys(stockCandles);
+
   // cacheAsLive === false (passed by the date-picker path) keeps historical
   // data out of the live cache, so clicking "Live" doesn't show a past day.
   if (cacheAsLive !== false) {
     if (ids === STOCK_IDS_NF) _lastStockCandlesNf = stockCandles;
     else _lastStockCandlesBn = stockCandles;
+
+    // Refresh the qty/open cache from every live tick BEFORE the
+    // date-filter early return below (2026-09-24, found in review) — this
+    // used to sit after that return, so while a user had a historical date
+    // picked for this panel, qtyAudit.js's recordTickForAudit kept logging
+    // that instrument's LIVE ltp (from TICK_UPDATE, unaffected by the date
+    // filter) against a frozen qty/open snapshot from whenever the date
+    // picker was opened — silently inconsistent audit rows for the whole
+    // time the historical view stayed open, with nothing marking them wrong.
+    // Shared with qtyAudit.js (window-level, no module system here) — the
+    // vendor's current protocol embeds a real per-trade quantity on live
+    // ticks (parsed server-side into Candle.last_qty); recordTickForAudit
+    // uses each stock's latest bar's last_qty as the real "quantity" figure.
+    window._lastQtyByStock = window._lastQtyByStock || {};
+    names.forEach(n => {
+      const bars = stockCandles[n] || [];
+      if (bars.length) {
+        _lastOpenByStock[n] = bars[bars.length - 1].open;
+        window._lastQtyByStock[n] = bars[bars.length - 1].lastQty;
+      }
+    });
+
     // A live call (STATE_UPDATE) while this panel is showing a picked date:
-    // keep the cache fresh but don't repaint over the historical view.
+    // caches above are now fresh, but don't repaint over the historical view.
     if (isDateFilterActive(ids.panel)) return;
   }
 
-  const names = Object.keys(stockCandles);
   // Merge (not replace) — this fn is called once per instrument, and a
   // stock shared between BN and NF should stay tracked either way.
   _lastStockOrder = Array.from(new Set(_lastStockOrder.concat(names)));
-  // Shared with qtyAudit.js (window-level, no module system here) — the
-  // vendor's current protocol embeds a real per-trade quantity on live
-  // ticks (parsed server-side into Candle.last_qty); recordTickForAudit
-  // uses each stock's latest bar's last_qty as the real "quantity" figure.
-  window._lastQtyByStock = window._lastQtyByStock || {};
-  names.forEach(n => {
-    const bars = stockCandles[n] || [];
-    if (bars.length) {
-      _lastOpenByStock[n] = bars[bars.length - 1].open;
-      window._lastQtyByStock[n] = bars[bars.length - 1].lastQty;
-    }
-  });
   const fullBars = Math.max(0, ...names.map(n => (stockCandles[n] || []).length));
   // Clamped to the "Last N bars" selector — the server sends up to 15 (see
   // scheduler.py's _STOCK_TABLE_BARS), this is purely a client-side view trim.

@@ -229,10 +229,19 @@ function updateSaveBar() {
 
 // Shared submit: every mutation endpoint returns the fresh describe() payload,
 // so success handling is identical — re-render from the response.
-// keepEdits: pending edits to PRESERVE across the re-render — resetting one key
-// must not silently discard the user's unsaved changes to OTHER keys (the
-// controls re-paint from `edits` first, so kept values stay visible).
-function submitSettings(method, url, body, okMsg, failLabel, keepEdits) {
+// keepMode: how to reconcile pending edits once the response arrives — 'all'
+// clears every pending edit (resetAll), or an array of the specific keys THIS
+// request touched (save / reset-some-keys). Applied against the LIVE `edits`
+// object at response time, not a snapshot captured when the request was sent
+// (2026-09-24, found in review) — the old snapshot-and-restore approach
+// (`edits = keepEdits || {}`) silently discarded any edit the user made to a
+// DIFFERENT key, or a newer edit to the SAME key, during the in-flight
+// request, with no warning — a real data-loss risk given these are live
+// trading risk parameters. For a save, a submitted key is only cleared if its
+// live value still matches what was actually sent (`submittedValues`) — if
+// the user changed it again mid-flight, that newer edit survives instead of
+// being silently wiped back to whatever was just saved.
+function submitSettings(method, url, body, okMsg, failLabel, keepMode, submittedValues) {
   return fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
@@ -241,7 +250,15 @@ function submitSettings(method, url, body, okMsg, failLabel, keepEdits) {
     .then(async r => {
       const d = await r.json();
       if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
-      specData = d; edits = keepEdits || {}; render();
+      specData = d;
+      if (keepMode === 'all') {
+        edits = {};
+      } else {
+        (keepMode || []).forEach(k => {
+          if (!submittedValues || edits[k] === submittedValues[k]) delete edits[k];
+        });
+      }
+      render();
       _settingsToast(okMsg, true);
     })
     .catch(e => _settingsToast(failLabel + ': ' + e.message, false));
@@ -249,27 +266,26 @@ function submitSettings(method, url, body, okMsg, failLabel, keepEdits) {
 
 function saveChanges() {
   const changes = { ...edits };
-  if (!Object.keys(changes).length) return;
+  const keys = Object.keys(changes);
+  if (!keys.length) return;
   const btn = document.getElementById('btn-save');
   btn.disabled = true;
   submitSettings('PUT', '/api/settings', { changes },
-                 'Settings saved — applied live', 'Save failed')
+                 'Settings saved — applied live', 'Save failed', keys, changes)
     .finally(() => { btn.disabled = false; });
 }
 
 function discardChanges() { loadSettings(); }
 
 function resetKeys(keys) {
-  const keep = { ...edits };
-  keys.forEach(k => delete keep[k]);   // only the reset key's own pending edit goes
   submitSettings('POST', '/api/settings/reset', { keys },
-                 'Reset to default', 'Reset failed', keep);
+                 'Reset to default', 'Reset failed', keys);
 }
 
 function resetAll() {
   if (!confirm('Reset ALL settings to their built-in defaults?')) return;
   submitSettings('POST', '/api/settings/reset', {},
-                 'All settings reset to defaults', 'Reset failed');
+                 'All settings reset to defaults', 'Reset failed', 'all');
 }
 
 // ── Toast / theme ──────────────────────────────────────────────────────────────

@@ -4,13 +4,13 @@ load_dotenv()
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.api.dashboard import router, set_services, ws_router
 from app.auth import (
-    COOKIE_NAME, SESSION_MAX_AGE_SEC, check_credentials, limiter as login_limiter,
-    make_session_token, require_login_page,
+    COOKIE_NAME, SESSION_MAX_AGE_SEC, check_credentials, is_logged_in,
+    limiter as login_limiter, make_session_token, require_login_page,
 )
 from app.services.database import DatabaseService
 from app.services.market_data import MarketDataService
@@ -53,6 +53,25 @@ app = FastAPI(title="Bank Nifty Options Paper Trader", lifespan=lifespan)
 
 app.include_router(router)
 app.include_router(ws_router)   # /ws/dashboard - deliberately NOT behind login
+
+
+@app.middleware("http")
+async def _gate_static_assets(request: Request, call_next):
+    # /css and /js below are Starlette StaticFiles mounts, not APIRouter
+    # routes - they can't take a `dependencies=[Depends(require_login_page)]`
+    # the way every other page/route in this app does, so they were a
+    # silent 4th exception to the login gate beyond the 3 CLAUDE.md documents
+    # (/ws/dashboard, /login, /healthz) until this fix (2026-09-24, found in
+    # review). No secrets live in these files, but serving the full
+    # client-side trading-dashboard/manual-order JS to a caller with no
+    # session cookie contradicts "every page and API route is login-gated"
+    # and is cheap to close with a request-level check here.
+    path = request.url.path
+    if (path.startswith("/css/") or path.startswith("/js/")) \
+            and not is_logged_in(request.cookies.get(COOKIE_NAME)):
+        return Response(status_code=401)
+    return await call_next(request)
+
 
 app.mount("/css", StaticFiles(directory="static/css"), name="css")
 app.mount("/js",  StaticFiles(directory="static/js"),  name="js")

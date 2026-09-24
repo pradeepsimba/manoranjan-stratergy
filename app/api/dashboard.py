@@ -389,11 +389,17 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         raise HTTPException(400, "from_date must be on or before to_date")
 
     try:
-        # As of 2026-09-23 the "Scalp Timing" group (trading windows + per-
-        # instrument time-stop) is dynamic and bt=True again (the 2026-09-09
-        # cleanup's "no SPEC key is bt=True" claim this comment used to make
-        # is stale — found in review), so a real override dict can reach
-        # here now. expand_changes only validates each key in isolation
+        # As of 2026-09-23 the "Scalp Timing" group's trading-window keys
+        # (SCALP_WINDOW1/2_*) are dynamic bt=True SPEC entries (the
+        # 2026-09-09 cleanup's "no SPEC key is bt=True" claim this comment
+        # used to make is stale — found in review), so a real override dict
+        # can reach here now. The group's two time-stop keys
+        # (BN_SCALP_TIME_STOP_S/NF_SCALP_TIME_STOP_S) are NOT among them —
+        # they were reverted to bt=False on 2026-09-24 (found in review:
+        # app/backtest/engine.py's _try_exit never reads BTPosition's frozen
+        # time_stop_s at all, so offering it as a per-run override silently
+        # did nothing; see CLAUDE.md's backtest fidelity limitation note).
+        # expand_changes only validates each key in isolation
         # (format/bounds); a window-pair cross-check (start < end) is a
         # separate step below, same as apply_and_persist/reset in
         # settings.py — otherwise an inverted window silently makes

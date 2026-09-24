@@ -360,6 +360,25 @@ def simulate(bn_index: SymbolSeries, stocks: Dict[str, SymbolSeries],
     """
     lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
     days = sorted(d for d in bn_index.by_day if lo_s <= d <= hi_s)
+    # Exclude implausibly-truncated recording days (2026-09-24, found in
+    # review) — the self-recorded bn_index_bars archive (see CLAUDE.md's
+    # "Self-recorded BankNifty history" note) has no guarantee a given day
+    # has a full ~75-bar session (09:15-15:30 5m bars): a live-engine
+    # restart/outage mid-session leaves that day with only however many bars
+    # were recorded before it stopped. Without this filter, _simulate_day_impl
+    # treated a handful of bars exactly like a full day — EOD-squaring off
+    # any open position at whatever its LAST available bar happened to be
+    # (e.g. 10:05 IST) and mislabeling the exit "EOD" as if it were a genuine
+    # end-of-session close, silently distorting that day's P&L/win-rate
+    # instead of being skipped. MIN_DAY_BARS is deliberately conservative
+    # (well under half a full session) so it only catches genuinely
+    # truncated days, not an ordinary shorter session.
+    MIN_DAY_BARS = 20
+    excluded_incomplete = [d for d in days if len(bn_index.by_day[d]) < MIN_DAY_BARS]
+    if excluded_incomplete:
+        days = [d for d in days if d not in excluded_incomplete]
+        print(f"Backtest: excluded {len(excluded_incomplete)} incomplete-recording "
+              f"day(s) with <{MIN_DAY_BARS} BankNifty bars: {excluded_incomplete}")
     if not days:
         return [], [], 0
 
@@ -408,6 +427,32 @@ async def run_backtest(
                         f"(the archive grows by one day at a time as the live engine runs — "
                         f"see app.services.database.bn_index_bars). Try a range that "
                         f"includes a day the engine has already completed.")
+            return
+
+        # Hard-fail on a missing/incomplete stock fetch (2026-09-24, found in
+        # review) — load_backtest_data's vendor REST call
+        # (historical_data.py's _fetch) swallows any HTTP/network failure
+        # into an empty dict rather than raising, so a single transient
+        # vendor error used to silently zero out `stocks` for the whole
+        # date range: every BN_SCALP_BASKET leg permanently missing means
+        # evaluate_entry's basket score is structurally always 0.0, so the
+        # run completes as an innocuous-looking "total_trades: 0" result
+        # instead of a visible failure — indistinguishable from "the
+        # strategy genuinely found no setups here". `stocks_loaded` was
+        # already computed for this but never surfaced anywhere (API/UI).
+        # Only the BN_SCALP_BASKET tokens are checked (not all 14
+        # BN_ALL_STOCKS) since those are the only ones evaluate_entry's
+        # score actually reads — a missing NON-basket stock doesn't affect
+        # the strategy and shouldn't fail the run.
+        missing_basket = [t for t in cfg.BN_SCALP_BASKET if t not in stocks]
+        if missing_basket:
+            missing_names = ", ".join(cfg.BN_NAME_BY_TOKEN.get(t, t) for t in missing_basket)
+            await db.fail_backtest_run(
+                run_id, f"Stock history fetch failed or returned no data for "
+                        f"{len(missing_basket)}/{len(cfg.BN_SCALP_BASKET)} scalp-basket "
+                        f"stocks ({missing_names}) over {from_d} → {to_d} — the vendor's "
+                        f"REST endpoint likely errored or timed out. This would otherwise "
+                        f"silently produce a misleading 0-trade result; retry the run.")
             return
 
         # Bounded to cfg.MAX_CONCURRENT_BACKTEST_RUNS total in-flight runs
