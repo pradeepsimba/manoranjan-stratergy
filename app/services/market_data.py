@@ -5,9 +5,11 @@ Live WebSocket feed from the custom market data server.
 
 Fixed universe: BankNifty index + its 14 stocks (the real NIFTY BANK
 index's full membership — see cfg.BN_ALL_STOCKS), plus Nifty 50 index + its
-50 stocks, deduped on the 11 stocks both strategies share (see
-_build_filters). That's ~55 symbol-interval pairs (2026-09-16/17: the Nifty
-50 universe grew toward all 50 official constituents in stages — 3 early
+51 stocks (corrected 2026-09-24, found in review — this said "50", stale
+since the universe grew further; see _build_filters's own docstring for the
+exact current count), deduped on the 11 stocks both strategies share (see
+_build_filters). That's ~56 symbol-interval pairs (2026-09-16/17: the Nifty
+50 universe grew toward all official constituents in stages — 3 early
 additions, LTIMindtree/Nestle India/ONGC, were removed after a direct vendor
 query confirmed zero data; 3 more, InterGlobe Aviation/Jio Financial
 Services/Max Healthcare, were added after a user-supplied official
@@ -297,12 +299,14 @@ class MarketDataService:
 
     def _build_filters(self) -> list:
         """
-        BankNifty index + its 14 stocks, and Nifty 50 index + its 50 stocks,
-        all at 5m. Stock filters are deduped by stock_symbol — 11 tokens are
-        shared between the two universes (BN's 6 leaders plus AU Small
-        Finance Bank/Federal Bank/IDFC First Bank/PNB/Canara Bank, which
-        NF_ALL_STOCKS also carries as its own BN-parity "extras"), so the
-        combined unique-stock count is 53, not BN's 14 + NF's 50 — each
+        BankNifty index + its 14 stocks, and Nifty 50 index + its 51 stocks
+        (corrected 2026-09-24, found in review — this said "50", stale since
+        the universe grew further; CLAUDE.md's own count was fixed the same
+        day), all at 5m. Stock filters are deduped by stock_symbol — 11
+        tokens are shared between the two universes (BN's 6 leaders plus AU
+        Small Finance Bank/Federal Bank/IDFC First Bank/PNB/Canara Bank,
+        which NF_ALL_STOCKS also carries as its own BN-parity "extras"), so
+        the combined unique-stock count is 54, not BN's 14 + NF's 51 — each
         token must be subscribed exactly once.
         """
         filters = [

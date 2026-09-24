@@ -96,9 +96,19 @@ class SchedulerService:
         self._eod_date:       str | None = None
         # Live ATM CE/PE watchlist (2026-09-18) — last strike the watch was
         # set to, so _tick_atm_watch only touches the WS subscription when
-        # the strike actually changes, not every 100ms tick.
+        # the strike actually changes, not every tick.
         self._bn_atm_watch_strike: int | None = None
         self._nf_atm_watch_strike: int | None = None
+        # Resubscribe-rate debounce (2026-09-24, found in review) — the
+        # engine became tick-DRIVEN that same day (see _run_active_phase),
+        # which can call _tick_atm_watch far more often than the old fixed
+        # 100ms timer ever did. Without a floor, spot hovering exactly at a
+        # round-100/round-50 strike boundary during a burst of real ticks
+        # could reconnect the option WS connection many times a second
+        # instead of the ~10/sec ceiling the old timer naturally imposed —
+        # see _tick_atm_watch for how this is used.
+        self._bn_atm_watch_last_resub_at: datetime | None = None
+        self._nf_atm_watch_last_resub_at: datetime | None = None
         # Previous tick's client-connected state, for _tick_alerts's
         # reconnect edge-reset (found in review, 2026-09-23) — see there.
         self._had_alert_clients = False
@@ -689,6 +699,18 @@ class SchedulerService:
             for alert in fired:
                 await self._ws.broadcast(json.dumps({"type": "ALERT", **alert}, default=str))
 
+    # Minimum real time between ATM-watch WS resubscriptions (2026-09-24,
+    # found in review) — see _tick_atm_watch's docstring. Reuses
+    # TICK_EVAL_INTERVAL_MS as the reference rate: that's the exact ceiling
+    # the old fixed-timer loop always imposed on this before the engine
+    # became tick-driven, so capping at the same rate is a genuine
+    # behavior-preserving fix, not an arbitrary new number.
+    @staticmethod
+    def _atm_resub_ok(now: datetime, last_resub_at: datetime | None) -> bool:
+        if last_resub_at is None:
+            return True
+        return (now - last_resub_at).total_seconds() * 1000.0 >= cfg.TICK_EVAL_INTERVAL_MS
+
     async def _tick_atm_watch(self) -> None:
         """
         Live ATM CE/PE watchlist (2026-09-18, explicit user decision) — keeps
@@ -697,25 +719,40 @@ class SchedulerService:
         trade option subscription (that one is FROZEN at entry; this one
         tracks the live, moving spot). Recomputing the ATM strike itself is
         cheap (no Black-Scholes — just round(spot/100)*100), so this runs
-        every 100ms tick; the WS subscription is only touched when the
-        strike actually changes (comparing against the last-set value),
-        since a reconnect is what changing it costs (see market_data.py's
-        set_bn_atm_watch/set_nf_atm_watch).
+        every pass of the tick-driven engine; the WS subscription is only
+        touched when the strike actually changes (comparing against the
+        last-set value), since a reconnect is what changing it costs (see
+        market_data.py's set_bn_atm_watch/set_nf_atm_watch) — AND at most
+        once per _ATM_WATCH_MIN_RESUB_S (2026-09-24, found in review): the
+        engine became tick-driven that same day, so this can now be called
+        far more often than the old fixed-100ms timer ever allowed. Without
+        this floor, spot sitting exactly at a strike boundary during a
+        burst of real ticks could flip strike->strike->strike and
+        reconnect the option WS connection many times a second. A skipped
+        change here is NOT lost — self._bn_atm_watch_strike is only updated
+        once the resubscribe actually happens, so the very next call still
+        sees `strike != self._bn_atm_watch_strike` and retries once the
+        debounce window passes; a real, sustained move still gets picked
+        up promptly, only pure oscillation-driven churn is capped.
         """
         st = get_state()
         now = _now()
         if st.bn_index_ltp > 0:
             strike = get_atm_strike(st.bn_index_ltp)
-            if strike != self._bn_atm_watch_strike:
+            if strike != self._bn_atm_watch_strike and self._atm_resub_ok(
+                    now, self._bn_atm_watch_last_resub_at):
                 self._bn_atm_watch_strike = strike
+                self._bn_atm_watch_last_resub_at = now
                 expiry = bn_get_next_expiry(now)
                 ce = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "CE")
                 pe = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "PE")
                 self._mkt.set_bn_atm_watch(ce, pe, strike=strike)
         if st.nf_index_ltp > 0:
             strike = nf_get_atm_strike(st.nf_index_ltp)
-            if strike != self._nf_atm_watch_strike:
+            if strike != self._nf_atm_watch_strike and self._atm_resub_ok(
+                    now, self._nf_atm_watch_last_resub_at):
                 self._nf_atm_watch_strike = strike
+                self._nf_atm_watch_last_resub_at = now
                 expiry = nf_get_next_expiry(now)
                 ce = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "CE")
                 pe = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "PE")
@@ -859,6 +896,8 @@ class SchedulerService:
         self._mkt.set_nf_atm_watch(None, None)
         self._bn_atm_watch_strike = None
         self._nf_atm_watch_strike = None
+        self._bn_atm_watch_last_resub_at = None
+        self._nf_atm_watch_last_resub_at = None
 
         # Reset the leader-consensus alert's edge-trigger state at day
         # boundary too (found in review, 2026-09-24) — previously only reset
