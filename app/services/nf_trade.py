@@ -25,7 +25,7 @@ from app.engine.nf_entry_exit import (
 )
 from app.engine.nf_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
 from app.engine.risk_guardrails import trading_window_description as _trading_window_description
-from app.models import NFSignal, NFTrade, PositionStatus, TradingPhase, closed_tail_closes
+from app.models import NFSignal, NFTrade, PositionStatus, TradingPhase, closed_tail_closes, iv_lookback_closes
 from app.state import get_state
 
 _order_seq = itertools.count(1)
@@ -41,7 +41,7 @@ def place_paper_order(signal: NFSignal, now: datetime) -> NFTrade:
     st = get_state()
     if not _in_trading_window(now):
         raise ValueError(f"Outside scalp trading window ({_trading_window_description()})")
-    if not _max_trades_ok(st.nf_trades_today):
+    if not _max_trades_ok(st.trades_today_combined):
         raise ValueError(f"Max {cfg.SCALP_MAX_TRADES_PER_DAY} trades/day reached")
 
     order_id = f"NF-{now.strftime('%H%M%S')}-{next(_order_seq)}"
@@ -80,7 +80,7 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
     # closed_tail_closes() excludes the still-forming bar so a manual
     # entry's premium is computed on the same basis the exit-tick checks
     # will later compare against.
-    lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
+    lookback = iv_lookback_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
 
     spot = st.nf_index_ltp
     option_type = "CE" if direction == "BUY" else "PE"

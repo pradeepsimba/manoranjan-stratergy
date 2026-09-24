@@ -71,7 +71,8 @@ def evaluate_entry(
     """NF mirror of bn_entry_exit.evaluate_entry — see there for the full gate
     walkthrough and the current_index_price/basket_ltp tick-wise-evaluation note."""
     nf_bar_time = nf_recent_candles[-1].start_time if nf_recent_candles else ""
-    nf_close = current_index_price if current_index_price else (
+    # `is not None`, not truthy — see bn_entry_exit.py's identical comment.
+    nf_close = current_index_price if current_index_price is not None else (
         nf_recent_candles[-1].close if nf_recent_candles else 0.0)
 
     no_trade_reason: Optional[str] = None

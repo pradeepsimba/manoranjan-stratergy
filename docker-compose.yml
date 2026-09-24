@@ -35,15 +35,31 @@ services:
   # not a second copy of it (the scheduler/WebSocket feed/AppState are an
   # in-process singleton; a second `uvicorn main:app` would duplicate the
   # live trading engine). Exists only so the dashboard can be reached over
-  # HTTPS on the LAN (http://192.168.x.x:8001 keeps working unchanged) —
-  # browsers restrict the Notification API (see static/js/alerts.js) to
-  # secure contexts, which a plain-HTTP LAN IP never satisfies.
+  # HTTPS on the LAN (see CLAUDE.md's "Run" section for the current port
+  # story — corrected 2026-09-24, this comment used to claim a stale
+  # http://192.168.x.x:8001 that hasn't existed since the app stopped
+  # publishing to the host directly) — browsers restrict the Notification
+  # API (see static/js/alerts.js) to secure contexts, which a plain-HTTP
+  # LAN IP never satisfies.
   caddy:
     image: caddy:2-alpine
     container_name: ${CADDY_CONTAINER_NAME:-mano-caddy}
     restart: unless-stopped
     depends_on:
-      - app
+      # condition: service_healthy (added 2026-09-24, found in review) —
+      # `app` defines a real HEALTHCHECK (Dockerfile) but nothing used to
+      # actually wait on it; a plain `depends_on: [app]` only waits for the
+      # container to START, not for Uvicorn to finish its lifespan startup
+      # (DB connect, historical load, WS subscribe — several seconds). A
+      # cold `docker compose up` could let caddy/nginx begin proxying
+      # before the app was actually accepting connections, producing
+      # transient 502s that resolved themselves once app finished starting
+      # (self-healing, so easy to miss) — the exact symptom class a stale
+      # .env misconfiguration separately, persistently produced this same
+      # session (a genuinely-down app, not a timing race, but identical
+      # user-visible 502).
+      app:
+        condition: service_healthy
     environment:
       # Docker's internal DNS name for the app container — see the Caddyfile's
       # {$UPSTREAM} note (running Caddy natively on the host needs no such var).
@@ -66,7 +82,9 @@ services:
     container_name: ${NGINX_CONTAINER_NAME:-mano-nginx}
     restart: unless-stopped
     depends_on:
-      - app
+      # See caddy's identical depends_on comment above (2026-09-24, found in review).
+      app:
+        condition: service_healthy
     ports:
       - "${APP_PORT:-8082}:8082"
     volumes:

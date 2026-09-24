@@ -22,9 +22,15 @@
 //
 // Browser note: the Notification API is restricted to secure contexts
 // (https, or http://localhost) in current Chrome/Firefox — opening the
-// dashboard as http://<lan-ip>:8001 will silently fail to request
-// permission. Use http://localhost:8001 (or set up HTTPS) if alerts don't
-// appear to do anything when enabled.
+// dashboard over a plain http://<lan-ip> will silently fail to request
+// permission. (Corrected 2026-09-24, found in review — this used to point
+// at http://localhost:8001, a port that no longer exists: as of 2026-09-23
+// the app container doesn't publish to the host directly any more. Use
+// http://localhost:8080 for `python main.py` locally, or one of the two
+// HTTPS front doors for Docker — Caddy on :8443 (LAN-only, self-signed) or
+// nginx on :8082 (the real public cert) — see CLAUDE.md's "Run" section.
+// Both HTTPS fronts already satisfy the secure-context requirement this
+// note is about, so this mostly only matters for local `python main.py`.)
 
 // Name -> settings key, mirroring app/config.py's BN_PRICE_ALERT_ATTR/
 // NF_PRICE_ALERT_ATTR exactly (kept in sync by hand, same as this file's

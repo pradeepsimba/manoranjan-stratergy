@@ -8,16 +8,37 @@ Bank Nifty instrument universe, and — as of 2026-09-09, explicit user
 decision — every strategy/risk/pricing/cost/session-timing parameter for
 both BN and NF) are plain module attributes and require a restart to change.
 
-Only the BN/NF Alerts settings (per-stock move-alert point thresholds +
+The BN/NF Alerts settings (per-stock move-alert point thresholds +
 consensus-required counts, purely client-side notification tuning — never
-read by the trading engine) remain dynamic, living in _DEFAULTS and resolved
-through the module-level __getattr__ (PEP 562) with this precedence:
+read by the trading engine) live dynamic in _DEFAULTS, resolved through the
+module-level __getattr__ (PEP 562) with this precedence:
 
-    1. thread-local overrides  — active only inside backtest worker threads;
-                                 moot now since no bt=True tunable remains
+    1. thread-local overrides  — active only inside a thread that shares
+                                 memory with the live event loop
     2. runtime overrides       — dashboard Settings page, persisted in the
                                  app_settings table and applied at startup
     3. the hard default below
+
+CORRECTED 2026-09-24 (found in review — this section was stale on two counts
+since the 2026-09-23 "Scalp Timing" Settings-page group was added): (a) Alerts
+are NOT the only dynamic group any more — SCALP_WINDOW1/2_START/END_HOUR/MIN
+and BN_SCALP_TIME_STOP_S/NF_SCALP_TIME_STOP_S are also in _DEFAULTS, and ARE
+read directly by the live trading engine every tick (app.engine.
+risk_guardrails.in_trading_window, which gates every evaluate_entry call).
+(b) "no bt=True tunable remains" is also false — the Scalp Timing SPEC
+entries (app/services/settings.py) don't set bt=False, so per _s()'s own
+default (bt: bool = True) they ARE currently valid per-backtest-run
+overrides. Do not copy either of these into a module-level constant or
+default-argument value on the strength of the old wording above — they are
+genuinely live-tunable, load-bearing risk parameters now, not inert
+notification config.
+
+(Thread-local overrides above are, separately, ALSO effectively moot now for
+an unrelated reason: app/backtest/engine.py's day-level parallelism moved
+from a ThreadPoolExecutor to real OS processes on 2026-09-23 — see
+CLAUDE.md's "Backtest day-level parallelism" note — so cfg.thread_overrides
+currently has zero real callers repo-wide, not because no bt=True tunable
+exists, but because nothing runs backtest workers as threads any more.)
 
 `import app.config as cfg; cfg.BN_ALERT_CONSENSUS_REQUIRED` therefore always
 returns the CURRENT value. Code must read a dynamic cfg attribute at call

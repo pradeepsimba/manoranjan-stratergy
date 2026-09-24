@@ -202,7 +202,17 @@ def _try_exit(port: Portfolio, bn_ss: SymbolSeries, gidx: int,
     # which correctly include their own bar since they price AT that bar's
     # close). Mirrors the live engine's closed_tail_closes fix for the same
     # class of bug (forming-bar IV leak).
-    lookback = bn_ss.closes[max(0, gidx - cfg.BN_IV_LOOKBACK_BARS):gidx]
+    #
+    # `- 1` extra (2026-09-24 fix, found in review — see app/models.py's
+    # iv_lookback_closes for the full explanation of this exact bug class):
+    # estimate_iv only re-slices its input down to BN_IV_LOOKBACK_BARS+1
+    # closes when handed MORE than BN_IV_LOOKBACK_BARS — passing exactly
+    # BN_IV_LOOKBACK_BARS (as this line used to) meant that re-slice never
+    # fired, giving one FEWER log-return here than the entry-side/EOD
+    # lookbacks in this same file use for the identical setting. The extra
+    # `-1` requests one more close (51, not 50) while still correctly
+    # excluding gidx's own close per the look-ahead fix above.
+    lookback = bn_ss.closes[max(0, gidx - cfg.BN_IV_LOOKBACK_BARS - 1):gidx]
     iv = estimate_iv(lookback)
     expiry_dt = datetime.fromisoformat(pos.expiry)
     T = time_to_expiry_years(now, expiry_dt)
@@ -222,8 +232,16 @@ def _try_exit(port: Portfolio, bn_ss: SymbolSeries, gidx: int,
         return
 
     # Neither touched within this bar's premium range — force the scratch
-    # exit at this bar's own close (see the module docstring).
-    exit_premium = slip_sell_premium(max(0.0, _premium(bar.close) - cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS), slippage_bps)
+    # exit at this bar's own close (see the module docstring). Reads
+    # pos.scratch_slippage_rs (frozen onto BTPosition at open, matching
+    # BNTrade/NFTrade's own entry-freeze convention — see _open_position
+    # above), NOT cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS directly (2026-09-24 fix,
+    # found in review): harmless today only because this setting is
+    # currently static, but the frozen field existed specifically so this
+    # read wouldn't silently follow a live/per-run value mid-trade if it's
+    # ever promoted to dynamic — exactly the bug class CLAUDE.md documents
+    # as already having caused a real production incident on the live side.
+    exit_premium = slip_sell_premium(max(0.0, _premium(bar.close) - pos.scratch_slippage_rs), slippage_bps)
     port.close_position(now, bar.close, exit_premium, "TIME_SCRATCH")
 
 

@@ -136,7 +136,13 @@ def evaluate_entry(
     pure function tracks itself.
     """
     bn_bar_time = bn_recent_candles[-1].start_time if bn_recent_candles else ""
-    bn_close = current_index_price if current_index_price else (
+    # `is not None`, not truthy (2026-09-24, found in review) — a genuine
+    # current_index_price of exactly 0.0 must still fall through to the bar
+    # close, not be treated as "a live price of 0.0 was given". Currently
+    # unreachable in practice (both scheduler.py call sites already guard on
+    # st.bn_index_ltp > 0 before calling this), but that's an invariant this
+    # function's own signature shouldn't have to trust its caller to hold.
+    bn_close = current_index_price if current_index_price is not None else (
         bn_recent_candles[-1].close if bn_recent_candles else 0.0)
 
     no_trade_reason: Optional[str] = None

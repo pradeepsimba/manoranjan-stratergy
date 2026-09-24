@@ -8,24 +8,20 @@ ENV TZ=Asia/Kolkata \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# tzdata so zoneinfo can resolve Asia/Kolkata; curl for the healthcheck;
-# build-essential + wget to compile the TA-Lib C library the Python wheel binds to.
+# tzdata so zoneinfo can resolve Asia/Kolkata; curl for the healthcheck.
+# (build-essential/wget + the TA-Lib C library compile that used to live here
+# were REMOVED 2026-09-24 — TA-Lib's own gate module, app/engine/bn_signals.py/
+# nf_signals.py, was fully deleted 2026-09-21; a repo-wide grep confirmed zero
+# remaining `talib` imports anywhere across several independent review rounds
+# before this was finally acted on — every rebuild was paying for a full
+# native C compile, plus build-essential/wget staying baked into the final
+# runtime image, for a dependency nothing imported any more. See CLAUDE.md's
+# former "TA-Lib is now dead weight" gotcha, now removed alongside this.)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata curl wget build-essential \
+ && apt-get install -y --no-install-recommends tzdata curl \
  && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
  && echo $TZ > /etc/timezone \
  && rm -rf /var/lib/apt/lists/*
-
-# ── TA-Lib C library (required by the `TA-Lib` Python package) ──────────────────
-RUN wget -q https://github.com/TA-Lib/ta-lib/releases/download/v0.6.4/ta-lib-0.6.4-src.tar.gz \
- && tar -xzf ta-lib-0.6.4-src.tar.gz \
- && cd ta-lib-0.6.4 \
- && ./configure --prefix=/usr \
- && make -j"$(nproc)" \
- && make install \
- && cd .. \
- && rm -rf ta-lib-0.6.4 ta-lib-0.6.4-src.tar.gz \
- && ldconfig
 
 WORKDIR /app
 

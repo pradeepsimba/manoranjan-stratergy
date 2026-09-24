@@ -15,7 +15,7 @@ function loadSettings() {
   fetch('/api/settings')
     .then(r => r.json())
     .then(d => { specData = d; edits = {}; render(); })
-    .catch(e => toast('Failed to load settings: ' + e.message, false));
+    .catch(e => _settingsToast('Failed to load settings: ' + e.message, false));
 }
 
 // (escHtml lives in the shared /js/util.js)
@@ -242,9 +242,9 @@ function submitSettings(method, url, body, okMsg, failLabel, keepEdits) {
       const d = await r.json();
       if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
       specData = d; edits = keepEdits || {}; render();
-      toast(okMsg, true);
+      _settingsToast(okMsg, true);
     })
-    .catch(e => toast(failLabel + ': ' + e.message, false));
+    .catch(e => _settingsToast(failLabel + ': ' + e.message, false));
 }
 
 function saveChanges() {
@@ -273,9 +273,15 @@ function resetAll() {
 }
 
 // ── Toast / theme ──────────────────────────────────────────────────────────────
-
+// Renamed from toast() to _settingsToast() (2026-09-24, found in review) —
+// this was silently SHADOWING static/js/util.js's shared global toast(msg,
+// type, ms) (settings.html loads util.js first, so the later settings.js
+// declaration always won). Targets THIS page's own real #toast element
+// (settings.html) rather than util.js's dynamically-created #toast-host —
+// kept as-is functionally, just renamed so it stops hiding the shared one
+// from any future code on this page that expects util.js's version.
 let toastTimer = null;
-function toast(msg, ok) {
+function _settingsToast(msg, ok) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = 'toast show ' + (ok ? 'ok' : 'err');

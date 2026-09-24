@@ -6,6 +6,8 @@ from typing import List, Optional
 
 import numpy as np
 
+import app.config as cfg
+
 
 # ── Enumerations ──────────────────────────────────────────────────────────────
 
@@ -85,6 +87,32 @@ def closed_tail_closes(candles: List[Candle], n: int) -> np.ndarray:
     return np.fromiter((c.close for c in tail), np.float64, len(tail))
 
 
+def iv_lookback_closes(candles: List[Candle], iv_lookback_bars: int) -> np.ndarray:
+    """
+    The exact array to feed bn_pricing.estimate_iv/nf_pricing.estimate_iv
+    for a GIVEN `*_IV_LOOKBACK_BARS` setting — NOT just closed_tail_closes(
+    candles, iv_lookback_bars) (2026-09-24 fix, found in review, the same
+    off-by-one CLASS the closed_tail_closes helper above was created to
+    prevent, just one call deeper). estimate_iv internally re-slices its
+    input to `iv_lookback_bars + 1` closes ONLY when handed MORE than
+    `iv_lookback_bars` closes (`closes.size > lookback`) — the entry-side
+    callers (scheduler.py's _tick_entries/_tick_entries_nf) happen to pass
+    the much larger BN_INDICATOR_LOOKBACK_BARS/NF_INDICATOR_LOOKBACK_BARS
+    (200) buffer for an unrelated reason (the basket VWAP/momentum
+    diagnostic needs that much history), which incidentally triggers this
+    re-slice and yields exactly `iv_lookback_bars` log-returns. Every
+    EXIT-side caller (tick exits, EOD square-off, manual exit) instead
+    requested EXACTLY `iv_lookback_bars` closes directly — `closes.size >
+    lookback` is then False, so estimate_iv's re-slice never fires and it
+    uses the array as-is: `iv_lookback_bars` closes, `iv_lookback_bars - 1`
+    log-returns — ONE FEWER return than the entry-side estimate for the
+    identical setting, on every single trade. Request one extra close here
+    so the `size > lookback` branch reliably triggers for exit-side callers
+    too, making entry and exit IV estimates use the same sample depth.
+    """
+    return closed_tail_closes(candles, iv_lookback_bars + 1)
+
+
 # ── Bank Nifty options strategy ───────────────────────────────────────────────
 
 @dataclass(slots=True)   # built once per fired entry, live and backtest
@@ -156,7 +184,15 @@ class BNTrade:
     # settlement, purely for the dashboard/trade log.
     basket_score_at_entry: float = 0.0
     wobi_at_entry:         float = 0.0
-    lot_size:     int             = 30
+    # cfg.BN_LOT_SIZE, not a hardcoded 30 (2026-09-24, found in review) —
+    # was a duplicated magic number; harmless today since open_trade_from_
+    # signal is the sole trade-construction path and always passes
+    # lot_size=cfg.BN_LOT_SIZE explicitly, but this default would silently
+    # go stale if the lot size were ever changed without updating both.
+    # BN_LOT_SIZE is a STATIC cfg attribute (not dynamic), so referencing it
+    # in a dataclass default is safe — it's the DYNAMIC-cfg-into-a-default
+    # pattern CLAUDE.md warns against, not a static one.
+    lot_size:     int             = cfg.BN_LOT_SIZE
     order_id:     str             = ""
     sl_stage:     str             = "Initial"   # "Initial" | "Breakeven" | "Trail"
     current_premium: float        = 0.0    # live mark, refreshed every exit-check tick
@@ -231,7 +267,7 @@ class NFTrade:
     scratch_slippage_rs:   float = 0.0   # frozen at entry — see BNTrade's comment above
     basket_score_at_entry: float = 0.0
     wobi_at_entry:         float = 0.0
-    lot_size:     int             = 65
+    lot_size:     int             = cfg.NF_LOT_SIZE   # see BNTrade's identical comment above
     order_id:     str             = ""
     sl_stage:     str             = "Initial"
     current_premium: float        = 0.0

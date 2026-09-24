@@ -73,6 +73,16 @@ class AppState:
         # for cfg.SCALP_MAX_TRADES_PER_DAY — reset every EOD alongside
         # closed_trades. Shared trading-window guardrail needs no state
         # (pure function of wall-clock time — see bn_entry_exit._in_trading_window).
+        # NOTE (2026-09-24 fix, found in review): SCALP_MAX_TRADES_PER_DAY is
+        # documented (risk_guardrails.max_trades_ok's own docstring) as ONE
+        # shared cap across both instruments, "not a pair per instrument" —
+        # but every caller used to check bn_trades_today/nf_trades_today
+        # against the cap SEPARATELY, silently doubling the real daily limit
+        # (5+5=10 instead of a true 5 combined). This field still tracks
+        # each instrument's own count (still needed for the per-instrument
+        # tradesToday/maxTradesToday diagnostic display) — see
+        # trades_today_combined below for the value the gate actually
+        # checks now.
         self.bn_trades_today: int = 0
 
         # ── Live-price ticker push (100ms delta broadcast) ────────────────────
@@ -167,6 +177,17 @@ class AppState:
         # NEW strike's ce/pe symbols paired with the PREVIOUS strike's
         # stale LTP (2026-09-23 fix, found in review).
         self._atm_watch_lock: threading.Lock = threading.Lock()
+
+    @property
+    def trades_today_combined(self) -> int:
+        """
+        The value SCALP_MAX_TRADES_PER_DAY actually gates on (2026-09-24 fix,
+        found in review) — one shared count across BOTH instruments, matching
+        risk_guardrails.max_trades_ok's own documented intent ("one shared
+        cap... not a pair per instrument"). bn_trades_today/nf_trades_today
+        individually still exist for the per-instrument diagnostic display.
+        """
+        return self.bn_trades_today + self.nf_trades_today
 
     def candle_lock(self, token: str) -> threading.Lock:
         """Return (and lazily create) the per-token candle lock."""

@@ -17,7 +17,7 @@ import app.services.settings as settings
 from app.auth import require_login
 from app.backtest.engine import run_backtest
 from app.backtest.signal_study import run_bn_leader_consensus_study
-from app.models import closed_tail_closes
+from app.models import closed_tail_closes, iv_lookback_closes
 from app.services import bn_trade, nf_trade
 from app.services.historical_data import fetch_candles_for_date
 from app.services.settings import BN_FUNDS_KEY
@@ -130,10 +130,25 @@ async def manual_order(req: ManualOrderRequest) -> Dict[str, Any]:
         trade = bn_trade.place_manual_order(req.direction.upper(), datetime.now(IST))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    try:
-        await _db.save_position(trade, instrument="BANKNIFTY")
-    except Exception as e:
-        raise HTTPException(500, f"Order placed but DB save failed: {e}")
+    # Retried (bounded, matching the algo entry path's own persistence — see
+    # SchedulerService._persist_new_position) instead of one bare attempt,
+    # AND rolled back on total failure (found in review, 2026-09-24): a
+    # single-shot save that failed used to leave st.active_trade set with
+    # NO positions row ever written — the trade still ran/exited correctly
+    # in memory, but the update_position_exit at exit time would later
+    # match zero rows and the trade would permanently never appear in
+    # "Today's Trades"/DB history, an invisible accounting gap. Now: retry
+    # first (covers the common transient case silently), and if persistence
+    # is still down after retries, actually UNDO the in-memory order (clear
+    # active_trade, decrement the trades-today counter place_manual_order
+    # bumped) so the human sees a genuine 500 for a genuinely-not-placed
+    # order, instead of a false "failed" while a live untracked trade keeps
+    # running underneath them.
+    if not await _sched._persist_new_position(trade, "BANKNIFTY", "BN manual"):
+        st = get_state()
+        st.active_trade = None
+        st.bn_trades_today = max(0, st.bn_trades_today - 1)
+        raise HTTPException(500, "Order could not be saved after retries — rolled back, not placed.")
     return {
         "orderId": trade.order_id, "direction": trade.direction,
         "strike": trade.strike, "optionType": trade.option_type,
@@ -158,7 +173,7 @@ async def manual_exit() -> Dict[str, Any]:
     # check_tick_exit caller (found in review 2026-09-22) applies here too:
     # a human clicking Exit must get the same IV basis the automated tick
     # loop would have used.
-    lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
+    lookback = iv_lookback_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
 
     closed = bn_trade.force_close(datetime.now(IST), st.bn_index_ltp, lookback, label="MANUAL EXIT")
     if closed is None:
@@ -187,10 +202,13 @@ async def manual_order_nf(req: ManualOrderRequest) -> Dict[str, Any]:
         trade = nf_trade.place_manual_order(req.direction.upper(), datetime.now(IST))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    try:
-        await _db.save_position(trade, instrument="NIFTY50")
-    except Exception as e:
-        raise HTTPException(500, f"Order placed but DB save failed: {e}")
+    # Retried + rolled-back-on-failure — see manual_order's identical fix
+    # above (2026-09-24, found in review) for the full rationale.
+    if not await _sched._persist_new_position(trade, "NIFTY50", "NF manual"):
+        st = get_state()
+        st.active_trade_nf = None
+        st.nf_trades_today = max(0, st.nf_trades_today - 1)
+        raise HTTPException(500, "Order could not be saved after retries — rolled back, not placed.")
     return {
         "orderId": trade.order_id, "direction": trade.direction,
         "strike": trade.strike, "optionType": trade.option_type,
@@ -212,7 +230,7 @@ async def manual_exit_nf() -> Dict[str, Any]:
         nf_candles = list(st.nf_index_candles_5m)
     # See manual_exit's identical comment above — closed_tail_closes()
     # excludes the still-forming last bar.
-    lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
+    lookback = iv_lookback_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
 
     closed = nf_trade.force_close(datetime.now(IST), st.nf_index_ltp, lookback, label="MANUAL EXIT")
     if closed is None:

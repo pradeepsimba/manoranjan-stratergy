@@ -30,7 +30,7 @@ from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
 from app.engine.nf_pricing import build_weekly_option_symbol
 from app.engine.nf_pricing import get_atm_strike as nf_get_atm_strike
 from app.engine.nf_pricing import get_next_expiry as nf_get_next_expiry
-from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase, closed_tail_closes
+from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase, closed_tail_closes, iv_lookback_closes
 from app.services import bn_trade, nf_trade, price_alerts
 from app.services.historical_data import fetch_indicator_history
 from app.services.market_data import MarketDataService
@@ -117,6 +117,17 @@ class SchedulerService:
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        # Was missing entirely (found in review, 2026-09-24) — this only
+        # ever cancelled this service's OWN 4 tasks; MarketDataService's WS
+        # connections (self._mkt) were previously stopped only from
+        # _run_eod's 15:30 teardown or a WAIT_ZONE reconnect, never from
+        # here. A mid-session graceful shutdown (e.g. `docker compose
+        # restart`/SIGTERM outside the 15:30 EOD window, which main.py's
+        # lifespan routes straight to this method) left every WS task/socket
+        # running uncancelled while main.py's very next line
+        # (db_service.close()) tore down the asyncpg pool underneath them —
+        # any in-flight tick write could race a closing pool.
+        await self._mkt.stop()
 
     async def _load_funds(self) -> None:
         st = get_state()
@@ -255,7 +266,7 @@ class SchedulerService:
                   f"order_id={closed.order_id} — positions row NOT updated, "
                   f"funds NOT persisted for this exit: {last_exc}")
 
-    async def _persist_new_position(self, trade, instrument: str, label: str) -> None:
+    async def _persist_new_position(self, trade, instrument: str, label: str) -> bool:
         """
         Persists a freshly-opened trade's entry row, with the same short
         bounded retry as _persist_closed_exit (found in review, 2026-09-23:
@@ -270,6 +281,14 @@ class SchedulerService:
         zero rows and raises — surfacing as a confusing "positions row NOT
         updated" CRITICAL log instead of a clear "entry save failed" one,
         for what was really an entry-side failure all along.
+
+        Returns True/False (2026-09-24, found in review) — the algo tick-loop
+        callers still just fire-and-forget this (a human isn't waiting on an
+        HTTP response there), but app/api/dashboard.py's manual-order
+        endpoints DO have a human waiting for a response and need to know
+        whether persistence actually succeeded, to decide what to tell them
+        (and, more importantly, whether to roll back st.active_trade/
+        active_trade_nf on total failure — see dashboard.py's manual_order).
         """
         delays = (0.0, 0.2, 0.6)
         last_exc: Optional[Exception] = None
@@ -278,12 +297,13 @@ class SchedulerService:
                 await asyncio.sleep(delay)
             try:
                 await self._db.save_position(trade, instrument=instrument)
-                return
+                return True
             except Exception as e:
                 last_exc = e
         print(f"CRITICAL: {label} entry DB persist failed after retries for "
               f"order_id={trade.order_id} — positions row NOT written for this "
               f"entry: {last_exc}")
+        return False
 
     # ── Phase driver ──────────────────────────────────────────────────────────
 
@@ -404,7 +424,7 @@ class SchedulerService:
         # actual root cause of a real production bug on the exit side, where
         # the tight ~₹2-3 target/stop bracket got blown through by pure
         # IV-estimate inconsistency, not real price movement).
-        lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
+        lookback = iv_lookback_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
         try:
             closed = bn_trade.check_tick_exit(_now(), st.bn_index_ltp, lookback)
             if closed:
@@ -457,7 +477,7 @@ class SchedulerService:
                           if st.last_exit_time else None)
         now = _now()
         signal, diagnostic = evaluate_entry(now, bn_recent, bn_closes_lookback,
-                                            basket_candles, last_exit_time, st.bn_trades_today,
+                                            basket_candles, last_exit_time, st.trades_today_combined,
                                             current_index_price=st.bn_index_ltp, basket_ltp=basket_ltp)
         st.bn_diagnostic = diagnostic
 
@@ -482,7 +502,7 @@ class SchedulerService:
         if not nf_candles:
             return
         # See the BN mirror's comment above — same forming-bar exclusion via closed_tail_closes().
-        lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
+        lookback = iv_lookback_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
         try:
             closed = nf_trade.check_tick_exit(_now(), st.nf_index_ltp, lookback)
             if closed:
@@ -521,7 +541,7 @@ class SchedulerService:
                           if st.last_exit_time_nf else None)
         now = _now()
         signal, diagnostic = nf_evaluate_entry(now, nf_recent, nf_closes_lookback,
-                                               basket_candles, last_exit_time, st.nf_trades_today,
+                                               basket_candles, last_exit_time, st.trades_today_combined,
                                                current_index_price=st.nf_index_ltp, basket_ltp=basket_ltp)
         st.nf_diagnostic = diagnostic
 
@@ -716,7 +736,7 @@ class SchedulerService:
             # ltp was 0, yet active_trade was still unconditionally cleared).
             fallback_price = st.bn_index_ltp if st.bn_index_ltp > 0 else (
                 bn_candles[-1].close if bn_candles else st.active_trade.entry_index_price)
-            lookback = closed_tail_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
+            lookback = iv_lookback_closes(bn_candles, cfg.BN_IV_LOOKBACK_BARS)
             closed = bn_trade.force_close(_now(), fallback_price, lookback)
             if closed:
                 # Reuses the same bounded-retry persistence as _tick_exits
@@ -731,7 +751,7 @@ class SchedulerService:
                 nf_candles = list(st.nf_index_candles_5m)
             fallback_price = st.nf_index_ltp if st.nf_index_ltp > 0 else (
                 nf_candles[-1].close if nf_candles else st.active_trade_nf.entry_index_price)
-            lookback = closed_tail_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
+            lookback = iv_lookback_closes(nf_candles, cfg.NF_IV_LOOKBACK_BARS)
             closed = nf_trade.force_close(_now(), fallback_price, lookback)
             if closed:
                 await self._persist_closed_exit(closed, "NF EOD square-off")
@@ -829,6 +849,25 @@ class SchedulerService:
         st.nf_trades_today = 0
         st.daily_pnl = 0.0
         st.ltp.clear()
+        # bn_index_ltp/nf_index_ltp were NEVER reset here (found in review,
+        # 2026-09-24) — unlike st.ltp above, which the individual-stock
+        # candles depend on. They're only ever assigned from a real/
+        # synthetic tick (market_data.py), never zeroed anywhere else, so
+        # they silently held yesterday's last close/synthetic value all the
+        # way through CLOSED/PRE_MARKET and into the next day's WAIT_ZONE,
+        # until the first real tick of the new day happened to arrive.
+        # Every "no live price yet" guard in this codebase (place_paper_
+        # order's manual-order check, _tick_entries'/_tick_entries_nf's own
+        # gate, _tick_atm_watch's strike computation) tests `> 0`, which a
+        # stale-but-positive value from yesterday silently passes — a
+        # manual order placed in the seconds before today's first tick (or
+        # an algo entry racing a WS reconnect gap) could price off
+        # yesterday's close instead of being correctly rejected. Reset to
+        # 0.0 so those guards work as intended for the first tick of a
+        # fresh day; bn_synthetic_anchor/nf_synthetic_anchor are untouched
+        # (deliberately preserved across days — see _seed_synthetic_anchor).
+        st.bn_index_ltp = 0.0
+        st.nf_index_ltp = 0.0
         # Re-fetch each stock's history right away (2026-09-16, explicit user
         # decision) instead of leaving st.candles_5m empty until the next
         # 09:15 WAIT_ZONE reload — the vendor DOES fully archive multi-day
