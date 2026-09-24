@@ -4,12 +4,27 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Login - Bank Nifty Options Paper Trader</title>
+<!-- PWA installability (2026-09-24) — see static/manifest.json / static/sw.js.
+     Included here too (not just index.html/settings.html) so a browser
+     landing on /login first (no session yet) can still offer "Install app". -->
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="BN Options">
 <script>
   (function () {
     var saved = localStorage.getItem('theme');
     var theme = saved || 'dark';
     document.documentElement.setAttribute('data-theme', theme);
   })();
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
+    });
+  }
 </script>
 <style>
   :root {

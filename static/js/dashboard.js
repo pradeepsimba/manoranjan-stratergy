@@ -94,8 +94,8 @@ function render(d) {
   const nfSynBadge = document.getElementById('nf-synthetic-badge');
   if (nfSynBadge) nfSynBadge.style.display = d.nfIndexSynthetic ? '' : 'none';
 
-  renderTrade(d.activeTrade, TRADE_IDS_BN, d.entryLoop);
-  renderTrade(d.activeTradeNf, TRADE_IDS_NF, d.entryLoopNf);
+  renderTrade(d.activeTrade, TRADE_IDS_BN, d.entryLoop, d.pendingEntry);
+  renderTrade(d.activeTradeNf, TRADE_IDS_NF, d.entryLoopNf, d.pendingEntryNf);
   renderAtmWatch(d.bnAtmWatch, TRADE_IDS_BN);
   renderAtmWatch(d.nfAtmWatch, TRADE_IDS_NF);
   renderClosedTrades(d.closedTrades || [], d.closedTradesNf || []);
@@ -164,7 +164,7 @@ function renderAtmWatch(watch, ids) {
   `;
 }
 
-function renderTrade(t, ids, diag) {
+function renderTrade(t, ids, diag, pendingEntry) {
   ids = ids || TRADE_IDS_BN;
   const badge = document.getElementById(ids.badge);
   const empty = document.getElementById(ids.empty);
@@ -172,6 +172,21 @@ function renderTrade(t, ids, diag) {
   if (!badge || !empty || !card) return;
 
   if (!t) {
+    // Pending entry — an algo signal fired but hasn't filled yet
+    // (2026-09-24 execution-simulation feature: BN_ENTRY_FILL_DELAY_MS/
+    // NF_ENTRY_FILL_DELAY_MS, ~300ms by default, plus waiting for a
+    // genuinely new live tick — see CLAUDE.md's "Execution simulation"
+    // section). Surfaced here (found in review, 2026-09-24) so the
+    // dashboard doesn't flip straight from "No active trade" to a full
+    // trade card with nothing in between — a human watching had no way to
+    // tell "the algo is about to enter" from "nothing is happening."
+    if (pendingEntry) {
+      badge.textContent = 'armed'; badge.className = 'badge yellow';
+      empty.style.display = ''; card.style.display = 'none';
+      empty.innerHTML = `<span class="badge yellow">${escHtml(pendingEntry.direction)} signal armed</span>`
+        + ` <span class="muted-text">filling shortly…</span>`;
+      return;
+    }
     badge.textContent = 'none'; badge.className = 'badge gray';
     empty.style.display = ''; card.style.display = 'none';
     // Live ITM entry quote (2026-09-18, renamed from "ATM" 2026-09-23 — see
@@ -195,8 +210,21 @@ function renderTrade(t, ids, diag) {
     }
     return;
   }
-  badge.textContent = `${t.direction} ${t.optionType}`;
-  badge.className = 'badge ' + (t.direction === 'BUY' ? 'green' : 'red');
+  // Pending exit (2026-09-24 execution-simulation feature) — target/stop/
+  // time-scratch has already triggered but the actual settlement is still
+  // waiting out BN_EXIT_FILL_DELAY_MS/NF_EXIT_FILL_DELAY_MS for the next
+  // live tick (found in review, 2026-09-24 — this state existed server-side
+  // from day one but was never surfaced): without this, the card kept
+  // showing a perfectly normal open position with no cue it's about to
+  // close. `t.pendingExitReason` is null/undefined until the first
+  // condition fires.
+  if (t.pendingExitReason) {
+    badge.textContent = `${t.direction} ${t.optionType} — exiting (${t.pendingExitReason})`;
+    badge.className = 'badge yellow';
+  } else {
+    badge.textContent = `${t.direction} ${t.optionType}`;
+    badge.className = 'badge ' + (t.direction === 'BUY' ? 'green' : 'red');
+  }
   empty.style.display = 'none'; card.style.display = '';
 
   const livePnl = (t.currentPremium - t.entryPremium) * t.lotSize;

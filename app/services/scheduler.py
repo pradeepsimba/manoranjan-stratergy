@@ -1212,6 +1212,14 @@ class SchedulerService:
                 "optionSymbol": t.option_symbol,
                 "targetRs": t.target_rs, "stopRs": t.stop_rs, "timeStopS": t.time_stop_s,
                 "basketScoreAtEntry": t.basket_score_at_entry, "wobiAtEntry": t.wobi_at_entry,
+                # Pending-exit fill delay (2026-09-24 execution-simulation
+                # feature — see CLAUDE.md) was computed server-side from day
+                # one but never sent to the frontend at all (found in
+                # review, 2026-09-24) — the dashboard had no way to
+                # distinguish "armed to exit, settling any moment" from a
+                # perfectly normal open position. None while no exit
+                # condition has fired yet.
+                "pendingExitReason": t.pending_exit_reason,
             }
 
         active = None
@@ -1388,6 +1396,20 @@ class SchedulerService:
             "dailyPnl":     round(st.daily_pnl, 2),   # shared account — BN + NF combined
             "funds":        round(st.funds, 2),        # shared account — BN + NF combined
             "activeTrade":  active,
+            # Pending entry (2026-09-24 execution-simulation feature — see
+            # CLAUDE.md) — armed but not yet filled, same "computed server-
+            # side, never sent" gap as pendingExitReason above. A single
+            # reference read of st.pending_entry is safe here (matches how
+            # bnLtp/nfLtp etc. below are already read directly in this
+            # worker-thread function) — the PendingBNEntry instance itself
+            # is never mutated in place, only ever atomically replaced
+            # wholesale (armed) or set to None (resolved/abandoned).
+            "pendingEntry": (
+                {"direction": st.pending_entry.signal.direction,
+                 "armedAt": st.pending_entry.armed_at,
+                 "fillAfter": st.pending_entry.fill_after}
+                if st.pending_entry is not None else None
+            ),
             "closedTrades": [_trade_dict(t) for t in closed_trades],
             "entryLoop":    diag,
             "bnAtmWatch": {
@@ -1396,6 +1418,13 @@ class SchedulerService:
                 "ceLtp": _bn_atm_ce_ltp, "peLtp": _bn_atm_pe_ltp,
             },
             "activeTradeNf":  active_nf,
+            # NF mirror of pendingEntry above.
+            "pendingEntryNf": (
+                {"direction": st.pending_entry_nf.signal.direction,
+                 "armedAt": st.pending_entry_nf.armed_at,
+                 "fillAfter": st.pending_entry_nf.fill_after}
+                if st.pending_entry_nf is not None else None
+            ),
             "closedTradesNf": [_trade_dict(t) for t in closed_trades_nf],
             "entryLoopNf":    diag_nf,
             "nfAtmWatch": {

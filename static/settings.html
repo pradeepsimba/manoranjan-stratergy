@@ -5,12 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Settings · Bank Nifty Options Paper Trader</title>
   <meta name="description" content="Runtime strategy, risk and session settings">
-  <link rel="stylesheet" href="/css/dashboard.css?v=39">
+  <!-- PWA installability (2026-09-24) — see static/manifest.json / static/sw.js -->
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#111111">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="BN Options">
+  <link rel="stylesheet" href="/css/dashboard.css?v=53">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
       document.documentElement.setAttribute('data-theme', t);
     })();
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
+      });
+    }
   </script>
   <style>
     .settings-wrap {
@@ -204,7 +217,7 @@
 <div class="toast" id="toast"></div>
 
 
-<script src="/js/util.js?v=26"></script>
+<script src="/js/util.js?v=49"></script>
 <script src="/js/settings.js?v=27"></script>
 </body>
 </html>

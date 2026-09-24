@@ -76,6 +76,38 @@ async def _gate_static_assets(request: Request, call_next):
 app.mount("/css", StaticFiles(directory="static/css"), name="css")
 app.mount("/js",  StaticFiles(directory="static/js"),  name="js")
 
+# ── PWA installability (2026-09-24) — manifest/service-worker/icons ──────────
+# Deliberately NOT behind login, unlike /css and /js above: these carry no
+# business logic or secrets (just icon images and app metadata), and the
+# browser needs to be able to fetch the manifest/icons to offer "Install
+# app" even from /login before a session exists. app.mount's own path
+# (/icons) can't collide with the gated /css or /js prefixes above, so the
+# _gate_static_assets middleware's startswith() checks never touch it.
+app.mount("/icons", StaticFiles(directory="static/icons"), name="icons")
+
+
+@app.get("/manifest.json")
+def manifest() -> FileResponse:
+    return FileResponse("static/manifest.json", media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker() -> Response:
+    # no-store (not just a short max-age) — this file is small and rarely
+    # changes, but a stale cached copy of the ONE file responsible for
+    # picking up every future update is the one thing in a PWA setup worth
+    # being deliberately paranoid about; most browsers already special-case
+    # service-worker fetches to bypass HTTP cache, but not all versions do.
+    with open("static/sw.js", "rb") as f:
+        body = f.read()
+    return Response(body, media_type="application/javascript",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/favicon.ico")
+def favicon() -> FileResponse:
+    return FileResponse("static/favicon.ico")
+
 
 @app.get("/healthz")
 def healthz() -> dict:
