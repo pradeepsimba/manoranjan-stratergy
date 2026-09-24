@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     quantity    INTEGER,
     stop_loss   NUMERIC(12,2),
     target      NUMERIC(12,2),
-    outcome     VARCHAR(10),
+    outcome     VARCHAR(20),
     gross_pnl   NUMERIC(12,2),
     costs       NUMERIC(12,2),
     net_pnl     NUMERIC(12,2),
@@ -105,6 +105,19 @@ CREATE TABLE IF NOT EXISTS app_settings (
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
 CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
+
+-- outcome widened 10->20 chars (2026-09-24, found in review) — the CREATE
+-- TABLE IF NOT EXISTS above only affects a brand-new database; an already-
+-- existing deployment's table keeps whatever width it was first created
+-- with, so this ALTER is what actually fixes it for a live database. The
+-- narrower VARCHAR(10) silently fit "TARGET"/"STOP"/"EOD" but not
+-- "TIME_SCRATCH" (12 chars) — the CURRENT (2026-09-21+) scalp strategy's
+-- most common backtest outcome, not an edge case (see app/backtest/
+-- engine.py's _try_exit) — so save_backtest_trades raised a Postgres
+-- StringDataRightTruncation error on essentially the first real backtest
+-- run of a range that produced any TIME_SCRATCH trade, surfacing to the
+-- user only as an opaque "StringDataRightTruncation: ..." failure message.
+ALTER TABLE backtest_trades ALTER COLUMN outcome TYPE VARCHAR(20);
 
 -- Legacy equity-indicator columns (inert under the BN options strategy — left
 -- in place, nullable, rather than destructively dropped).

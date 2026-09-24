@@ -79,7 +79,7 @@ class BTTrade:
     qty:         int            # lot size
     stop_loss:   float          # final (possibly trailed) index SL level
     target:      float          # index target level
-    outcome:     str            # "TARGET" | "STOP" | "EOD"
+    outcome:     str            # "TARGET" | "STOP" | "EOD" | "TIME_SCRATCH" (2026-09-24 fix, found in review — this comment omitted TIME_SCRATCH, the 2026-09-21+ scalp strategy's most common outcome; the DB column that stores this was undersized for exactly this reason, see database.py)
     gross_pnl:   float
     costs:       float
     net_pnl:     float

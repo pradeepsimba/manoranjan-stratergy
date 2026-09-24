@@ -1,8 +1,11 @@
 """
 Throwaway dev smoke test — NOT shipped functionality.
 
-Fetches real historical 5m data for BankNifty + the 11 BN stocks over a
-recent window and runs it through the backtest replay (the same
+Fetches real historical 5m data for BankNifty + its BN stocks (14, per
+cfg.BN_ALL_STOCKS — corrected 2026-09-24, found in review: this said "11",
+stale since the universe grew to its full real membership on 2026-09-17;
+harmless either way, the script itself already sizes off len(cfg.BN_ALL_STOCKS)
+dynamically) over a recent window and runs it through the backtest replay (the same
 evaluate_entry/evaluate_exit pure functions the live scheduler calls),
 printing every fired signal and a plausibility summary. Run manually:
 
