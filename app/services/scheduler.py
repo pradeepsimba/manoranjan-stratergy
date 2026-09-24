@@ -386,15 +386,38 @@ class SchedulerService:
 
     async def _run_active_phase(self) -> None:
         """
-        Tick-wise engine. Every TICK_EVAL_INTERVAL_MS:
-          • Exit management for the active trade (always, if one is open).
-          • Entry evaluation the instant a NEW BankNifty 5m bar closes.
-        Only 7 instruments' RSI/MACD/EMA math — cheap enough to run directly
-        on the event loop, no thread pool needed (unlike the equity engine's
-        hundreds-of-symbols scan).
+        Tick-DRIVEN engine (2026-09-24, explicit user decision — replaces
+        the old fixed 100ms poll with "react to every live WebSocket tick
+        directly"). Each iteration below runs the instant
+        MarketDataService._process_tick sets st.tick_event for a real 5m
+        tick (see there), not on a timer — so a real price move is seen
+        within one event-loop turn instead of up to TICK_EVAL_INTERVAL_MS
+        (100ms) later.
+
+        TICK_EVAL_INTERVAL_MS is still very much load-bearing as a BOUNDED
+        FALLBACK, not a leftover: several things this loop drives are
+        wall-clock conditions that must be re-checked even when the feed
+        goes quiet and no new tick ever arrives — the 12s TIME_SCRATCH exit
+        timer, the pending-entry/pending-exit FILL_MAX_WAIT_MS fallback, the
+        cooldown window, and even TradingPhase transitioning on schedule. A
+        pure event-wait with no timeout would let all of those silently
+        stall during a feed outage. asyncio.wait_for(...) below waits for
+        EITHER the event OR the timeout, whichever comes first, so both
+        properties hold simultaneously: near-zero latency on a real tick,
+        and the exact same worst-case cadence as before if ticks stop.
+
+        Every iteration still runs the full pass (exits, entries, alerts,
+        ATM watch) for both instruments — a tick from ANY tracked symbol
+        wakes it, not just BN/NF index ticks, since basket-score entries
+        depend on 8 other stocks each and there's no cheap way to know in
+        advance which single tick might flip a gate. The extra evaluations
+        this causes for an unrelated symbol's tick are cheap (no I/O, pure
+        in-memory math over ~15 instruments) — see the module's own history
+        of running this at 100ms already being "cheap enough."
         """
-        print("=== ACTIVE: tick-wise engine open ===")
+        print("=== ACTIVE: tick-driven engine open ===")
         st = get_state()
+        fallback_s = max(0.01, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)
 
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
             try:
@@ -414,7 +437,11 @@ class SchedulerService:
             except Exception as e:
                 print(f"Tick loop error: {e}")
 
-            await asyncio.sleep(max(0.0, cfg.TICK_EVAL_INTERVAL_MS / 1000.0))
+            try:
+                await asyncio.wait_for(st.tick_event.wait(), timeout=fallback_s)
+            except asyncio.TimeoutError:
+                pass
+            st.tick_event.clear()
 
     async def _tick_exits(self) -> None:
         st = get_state()

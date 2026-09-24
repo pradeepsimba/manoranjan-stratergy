@@ -679,7 +679,14 @@ BN_COST_TXN_PCT        = 0.0005      # exchange transaction charge
 BN_COST_GST_PCT        = 0.18        # GST on (brokerage + txn)
 BN_COST_SEBI_PCT       = 0.000001    # SEBI turnover fee
 
-# Tick-wise engine
+# Tick-wise engine — the BOUNDED-FALLBACK cadence, not the primary trigger
+# any more (2026-09-24, explicit user decision): SchedulerService.
+# _run_active_phase now wakes immediately on every real WebSocket tick
+# (st.tick_event, set by MarketDataService._process_tick) and only falls
+# back to this interval when the feed goes quiet, so wall-clock-only
+# conditions (TIME_SCRATCH, FILL_MAX_WAIT, cooldown, phase transitions)
+# still get checked on schedule. See scheduler.py's _run_active_phase
+# docstring for the full reasoning.
 TICK_EVAL_INTERVAL_MS = 100
 
 # ── Static: NF (Nifty 50) Strategy — parallel to the BN block above.
@@ -845,14 +852,16 @@ NF_SCALP_TARGET_RS   = 2.75
 NF_SCALP_STOP_RS     = 2.00
 
 # Hard time-stop (seconds) — if neither target nor stop is touched first,
-# force a scratch exit the instant this elapses. Checked every
-# TICK_EVAL_INTERVAL_MS (100ms) tick against (now - trade.entry_time), NOT
-# a separate asyncio.sleep(12)-based task — see the handover note on why:
-# short version, the existing 100ms tick loop already re-evaluates every
-# open trade ~120x within a 12s window, so a second concurrent timer task
-# racing to mutate the SAME st.active_trade/st.active_trade_nf (this
-# engine's hard "at most one active trade" invariant, see CLAUDE.md) would
-# only add risk, not precision.
+# force a scratch exit the instant this elapses. Checked every tick-loop
+# pass against (now - trade.entry_time), NOT a separate asyncio.sleep(12)-
+# based task — see the handover note on why: short version, a second
+# concurrent timer task racing to mutate the SAME st.active_trade/
+# st.active_trade_nf (this engine's hard "at most one active trade"
+# invariant, see CLAUDE.md) would only add risk, not precision. The tick
+# loop itself is now tick-DRIVEN, not purely a 100ms timer (2026-09-24 —
+# see scheduler.py's _run_active_phase), but TICK_EVAL_INTERVAL_MS is still
+# the worst-case bound this 12s window gets checked against even during a
+# quiet feed with no new ticks at all.
 # DYNAMIC (2026-09-23, explicit user decision — Settings page time
 # management) — see _DEFAULTS below / app/services/settings.py's "Scalp
 # Timing" group. Frozen onto the trade at entry like every other risk

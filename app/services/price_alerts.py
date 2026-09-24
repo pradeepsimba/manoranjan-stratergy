@@ -6,8 +6,10 @@ Server-side leader-consensus price-move alert check.
 Moved here from static/js/alerts.js (explicit user decision, 2026-09-09):
 that version only re-evaluated once/second, off the dashboard's own
 STATE_UPDATE push, and only ran at all while a browser tab had the
-dashboard open. This version runs every TICK_EVAL_INTERVAL_MS inside
-SchedulerService's tick loop (scheduler.py's _tick_alerts), directly off
+dashboard open. This version runs every pass of SchedulerService's tick loop (scheduler.py's
+_tick_alerts) — tick-DRIVEN since 2026-09-24 (wakes on every real live
+price tick, TICK_EVAL_INTERVAL_MS is now just the bounded fallback cadence
+during a quiet feed — see _run_active_phase), directly off
 the same live st.candles_5m data the trading engine itself reads — so it
 fires the instant the condition is met on the server, independent of
 whether/how often any browser is watching, and the browser only has to

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections import deque
 from typing import Deque, Dict, List, Optional
@@ -208,6 +209,29 @@ class AppState:
         # session — any of the ~54 tracked symbols' very first tick) at the
         # same moment the executor thread is mid-iteration over it.
         self._ltp_lock: threading.Lock = threading.Lock()
+
+        # Tick-driven wakeup for the strategy loop (2026-09-24, explicit user
+        # decision — replaces pure 100ms polling with "react to the live
+        # feed directly"). MarketDataService._process_tick calls .set() on
+        # this for every real 5m tick it processes (see there);
+        # SchedulerService._run_active_phase awaits it (with a bounded
+        # timeout — see there for why a pure event-wait alone isn't enough:
+        # TIME_SCRATCH/FILL_MAX_WAIT/cooldown are wall-clock conditions that
+        # must still get checked even if the feed goes quiet) instead of an
+        # unconditional asyncio.sleep. Safe to construct here at AppState
+        # singleton-creation time even before the event loop is running —
+        # same reasoning already established for _BACKTEST_RUN_SEM in
+        # app/backtest/engine.py: Python 3.10+ no longer binds an Event to a
+        # specific event loop at construction, only at first await, and
+        # AppState is only ever used within this one ASGI server process's
+        # single event loop. Both .set()/.clear() are plain synchronous
+        # calls (no lock needed) for the same reason every other
+        # event-loop-only field in this class needs none — _process_tick
+        # and the tick loop are both event-loop-only code that can't
+        # interleave with each other, only with the REAL executor-thread
+        # code _atm_watch_lock/_ltp_lock above actually guard against, and
+        # this field is never read from that side.
+        self.tick_event: asyncio.Event = asyncio.Event()
 
     @property
     def trades_today_combined(self) -> int:

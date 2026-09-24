@@ -380,6 +380,19 @@ class MarketDataService:
         if interval != "5m":
             return
 
+        # Wake the strategy tick loop immediately (2026-09-24, explicit user
+        # decision — "every tick from websocket", not a fixed 100ms poll).
+        # Set unconditionally for every real 5m tick (BN/NF index or any
+        # tracked stock) — see state.py's tick_event comment for why a plain
+        # .set() needs no lock here, and scheduler.py's _run_active_phase
+        # for the bounded-timeout wait on the other end. A tick for a stock
+        # outside either scalp basket still wakes the loop (st.bn_index_ltp/
+        # st.ltp haven't necessarily changed in a way that flips a gate),
+        # which only costs one extra cheap evaluation pass — simpler and
+        # safer than trying to filter to "only baskets-relevant symbols"
+        # here and risk missing one.
+        st.tick_event.set()
+
         # Real per-trade quantity, embedded as "...qty N..." inside the
         # feed's `quote` text field (confirmed against the live server,
         # 2026-07-23) — historical REST bars never carry this, only live
