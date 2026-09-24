@@ -462,7 +462,14 @@ class MarketDataService:
             else:
                 name = self._token_to_name.get(symbol)
                 if name:
-                    self.state.ltp[name] = ltp
+                    # Locked (2026-09-24, found in review) — see state.py's
+                    # _ltp_lock comment: GET /api/prices reads this dict from
+                    # a real executor thread via dict.update(), which can
+                    # race a brand-new key being inserted here on the event
+                    # loop. This single-key write is cheap enough that
+                    # locking it on every tick has no meaningful cost.
+                    with self.state._ltp_lock:
+                        self.state.ltp[name] = ltp
 
         # Live-price ticker push — every 5m tick (index or stock) refreshes the
         # dashboard delta; the BN engine's entry/exit evaluation runs on its own

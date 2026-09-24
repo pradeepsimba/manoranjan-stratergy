@@ -196,6 +196,19 @@ class AppState:
         # stale LTP (2026-09-23 fix, found in review).
         self._atm_watch_lock: threading.Lock = threading.Lock()
 
+        # Guards self.ltp (2026-09-24, found in review) — MarketDataService.
+        # _process_tick's write (`self.state.ltp[name] = ltp`) is event-loop-
+        # only and can't interleave with itself, same reasoning as every
+        # other unlocked event-loop-only field here, but app/api/dashboard.
+        # py's `GET /api/prices` is a sync `def` route — FastAPI/Starlette
+        # runs those in a REAL executor thread, the exact same class of
+        # boundary _atm_watch_lock above was added for. That handler builds
+        # its response via `prices.update(st.ltp)`, which can start
+        # inserting a brand-new key into st.ltp (routine early in a
+        # session — any of the ~54 tracked symbols' very first tick) at the
+        # same moment the executor thread is mid-iteration over it.
+        self._ltp_lock: threading.Lock = threading.Lock()
+
     @property
     def trades_today_combined(self) -> int:
         """

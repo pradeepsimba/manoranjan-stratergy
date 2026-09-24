@@ -149,12 +149,16 @@ BN_QTY_THRESHOLD_ATTR: Dict[str, str] = {
     "INDUSIND BANK":        "BN_QTY_THRESHOLD_INDUSIND",
 }
 
-# Per-stock dashboard price-move alert threshold wiring (client-side only —
-# see static/js/alerts.js) — same "which stock uses which settings key" shape
-# as BN_QTY_THRESHOLD_ATTR above, not itself a tunable. Values are in raw
-# index/stock POINTS (matching the Stock Candles table's own cell numbers
-# directly), not a % — an explicit user decision, since % obscures the
-# relationship to what's actually displayed on screen.
+# Per-stock dashboard price-move alert threshold wiring — same "which stock
+# uses which settings key" shape as BN_QTY_THRESHOLD_ATTR above, not itself a
+# tunable. Values are in raw index/stock POINTS (matching the Stock Candles
+# table's own cell numbers directly), not a % — an explicit user decision,
+# since % obscures the relationship to what's actually displayed on screen.
+# The alert-firing check itself moved server-side 2026-09-09 into
+# app/services/price_alerts.py (see CLAUDE.md's "Server-side price alerts"
+# section) — this comment used to say "client-side only" (static/js/
+# alerts.js), which stopped being true that day; static/js/alerts.js still
+# reads the same shape purely for its own cosmetic per-leader badge.
 BN_PRICE_ALERT_ATTR: Dict[str, str] = {
     "HDFC BANK":            "BN_PRICE_ALERT_PTS_HDFC",
     "ICICI BANK":           "BN_PRICE_ALERT_PTS_ICICI",
@@ -272,10 +276,15 @@ BN_INDEX_WEIGHTS.update(_BN_REAL_WEIGHTS)
 # — no weight ever supplied) are deliberately excluded, and so are all 11
 # non-index "extras" above, which have no real weight at all, only the
 # equal-weight placeholder.
-BN_INDEX_WEIGHTS_CONFIRMED = {
-    "HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK",
-    "FEDERALBNK", "INDUSINDBK", "AUBANK", "IDFCFIRSTB", "BANKBARODA",
-}
+# Derived from _BN_REAL_WEIGHTS_CONFIRMED_RAW's own keys (2026-09-24, found
+# in review), not hand-duplicated — this used to be a separate hardcoded set
+# literal that had to be kept manually in sync with that dict's keys, the
+# exact drift risk NF's mirror (NF_INDEX_WEIGHTS_CONFIRMED below) already
+# avoids by deriving the same way. A future edit to
+# _BN_REAL_WEIGHTS_CONFIRMED_RAW that forgot to also update a separate
+# hardcoded set here would have silently desynced BN_SCALP_BASKET's ranking
+# pool from compute_weighted_red_green's confirmed-weight badge.
+BN_INDEX_WEIGHTS_CONFIRMED = set(_BN_REAL_WEIGHTS_CONFIRMED_RAW.keys())
 
 # BankNifty exchange lot size — a contract-spec fact, not a user tunable.
 BN_LOT_SIZE = 30

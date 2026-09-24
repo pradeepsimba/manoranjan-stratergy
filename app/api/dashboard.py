@@ -287,7 +287,16 @@ async def reset_funds() -> Dict[str, Any]:
 def get_prices() -> Dict[str, float]:
     st = get_state()
     prices = {cfg.BN_INDEX_NAME: st.bn_index_ltp, cfg.NF_INDEX_NAME: st.nf_index_ltp}
-    prices.update(st.ltp)
+    # Locked (2026-09-24, found in review) — this is a sync `def` route,
+    # which FastAPI/Starlette runs in a real executor thread, not on the
+    # event loop. market_data.py's _process_tick writes st.ltp[name] = ltp
+    # from the event loop, unlocked reasoning that's only valid against
+    # OTHER event-loop-only code — it doesn't cover this handler. Without
+    # the lock, a brand-new key being inserted mid-update() here (routine
+    # early in a session, any tracked symbol's first tick of the run) races
+    # this thread's iteration over the same dict.
+    with st._ltp_lock:
+        prices.update(st.ltp)
     return prices
 
 

@@ -918,7 +918,13 @@ class SchedulerService:
         st.nf_diagnostic = None
         st.nf_trades_today = 0
         st.daily_pnl = 0.0
-        st.ltp.clear()
+        # Locked (2026-09-24, found in review) — same race as market_data.py's
+        # st.ltp[name] = ltp write and dashboard.py's get_prices() read: a
+        # size-changing mutation here could land mid-iteration of that sync
+        # `def` handler's dict.update(st.ltp) call, running in a real
+        # executor thread. See state.py's _ltp_lock comment.
+        with st._ltp_lock:
+            st.ltp.clear()
         # Defensive cleanup (2026-09-24) — a pending entry armed via
         # bn_trade.arm_pending_entry/nf_trade.arm_pending_entry always
         # resolves within BN_FILL_MAX_WAIT_MS/NF_FILL_MAX_WAIT_MS of its

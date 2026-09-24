@@ -60,12 +60,18 @@ def detect_swing_breakouts(candles: List[Candle], swings: Dict[str, List[Dict]])
 
 
 def detect_sr_breakouts(candles: List[Candle], sr_levels: Dict[str, List[float]]) -> Dict:
-    """Port of c.html's detectSRBreakouts — uses the nearest (last) support/resistance."""
+    """Port of c.html's detectSRBreakouts — uses the nearest support/resistance
+    to the latest close (2026-09-24 fix, found in review: this used to take
+    index [0] of sr_levels["supports"/"resistances"], which detect_support_
+    resistance builds as the 3 numerically-HIGHEST clustered levels sliced
+    with [-3:] — still ascending within that slice, so [0] was the SMALLEST
+    of those top-3, not necessarily anywhere near the current price at all,
+    contradicting this function's own "nearest" docstring)."""
     if not candles or not sr_levels["supports"] or not sr_levels["resistances"]:
         return {"type": None, "direction": None, "details": {}}
     latest = candles[-1]
-    support    = sr_levels["supports"][0]
-    resistance = sr_levels["resistances"][0]
+    support    = min(sr_levels["supports"],    key=lambda lvl: abs(lvl - latest.close))
+    resistance = min(sr_levels["resistances"], key=lambda lvl: abs(lvl - latest.close))
     if latest.close < support and latest.low < support:
         return {"type": "support", "direction": "bearish", "details": {"level": support}}
     if latest.close > resistance and latest.high > resistance:
@@ -108,7 +114,15 @@ def cluster_levels(levels: List[float], threshold_pct: float = 0.2) -> List[floa
     clusters: List[float] = []
     group = [levels[0]]
     for lvl in levels[1:]:
-        if abs(lvl - group[-1]) / group[-1] < threshold_pct / 100.0:
+        # `group[-1] and` guard (2026-09-24, found in review) — a zero/falsy
+        # price level (Candle's own float default, or genuinely-missing
+        # data) would otherwise raise ZeroDivisionError here; the sibling
+        # functions in this same file (compute_global_signal/
+        # compute_weighted_red_green) already skip falsy-price candles for
+        # exactly this reason, this function just lacked the equivalent
+        # guard. Not currently known to be reachable (historical data loads
+        # before this runs), purely defensive.
+        if group[-1] and abs(lvl - group[-1]) / group[-1] < threshold_pct / 100.0:
             group.append(lvl)
         else:
             clusters.append(average(group))
@@ -246,13 +260,30 @@ def compute_global_signal(counts: List[Dict[str, int]], latest_by_token: Dict[st
     """
     Port of c.html's updateGlobalSignal. `counts` from compute_column_counts;
     `latest_by_token` is each stock's single most-recent candle (index/leader
-    stocks alike, keyed by token) — c.html's asymmetric allGreen(>=4)/
-    allRed(>=5) thresholds are intentional quirks of the source, kept as-is.
+    stocks alike, keyed by token) — c.html's asymmetric allGreen/allRed
+    thresholds (originally 4/5, out of BankNifty's own ~15-instrument
+    universe) are an intentional quirk of the source, kept as-is FOR BN.
     `weights` is cfg.BN_INDEX_WEIGHTS or cfg.NF_INDEX_WEIGHTS.
+
+    Scaled proportionally to the universe size actually passed in
+    (2026-09-24 fix, found in review) — this function is shared verbatim
+    between BN (~15 instruments) and NF (~52), but the fixed 4/5 counts were
+    never revisited as NF_ALL_STOCKS grew over time (see CLAUDE.md's
+    architecture history) to its current size. Needing only ~4/52 (7.7%)
+    green made NF's countSignal badge show BUY/SELL on almost every bar
+    instead of a meaningful "leaders aligned" signal, while BN's identical
+    ~4/15 (27%) bar was a real one. Scaling preserves BN's exact original
+    4/5 thresholds unchanged (15 is its own reference universe size) and
+    only NF's are affected. Purely informational — never feeds evaluate_entry/
+    evaluate_exit.
     """
     num_candles = len(counts)
-    all_green = num_candles > 0 and all(c["g"] >= 4 for c in counts)
-    all_red   = num_candles > 0 and all(c["r"] >= 5 for c in counts)
+    _REFERENCE_UNIVERSE_SIZE = 15   # BN's own instrument count (14 stocks + index) — what 4/5 below were calibrated against
+    universe_size = len(latest_by_token) or _REFERENCE_UNIVERSE_SIZE
+    green_threshold = max(1, round(4 / _REFERENCE_UNIVERSE_SIZE * universe_size))
+    red_threshold   = max(1, round(5 / _REFERENCE_UNIVERSE_SIZE * universe_size))
+    all_green = num_candles > 0 and all(c["g"] >= green_threshold for c in counts)
+    all_red   = num_candles > 0 and all(c["r"] >= red_threshold for c in counts)
 
     count_signal, count_color = "NEUTRAL", "#777"
     if all_green:
