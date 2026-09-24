@@ -451,8 +451,14 @@ class MarketDataService:
         if ltp > 0:
             if symbol == cfg.BN_INDEX_TOKEN:
                 self.state.bn_index_ltp = ltp
+                # Execution-simulation fill delay (2026-09-24) — see state.py's
+                # bn_index_tick_seq comment: this is what lets a pending
+                # entry/exit tell "a genuinely new tick arrived" apart from
+                # "the 100ms tick loop just re-polled the same stale price".
+                self.state.bn_index_tick_seq += 1
             elif symbol == cfg.NF_INDEX_TOKEN:
                 self.state.nf_index_ltp = ltp
+                self.state.nf_index_tick_seq += 1
             else:
                 name = self._token_to_name.get(symbol)
                 if name:
@@ -541,6 +547,7 @@ class MarketDataService:
             self._upsert_list(idx_candles, synthetic)
 
         self.state.bn_index_ltp = close_
+        self.state.bn_index_tick_seq += 1   # see state.py's bn_index_tick_seq comment
 
     def _update_synthetic_nf_index(self) -> None:
         """NF mirror of _update_synthetic_index — same anchor-and-weighted-% logic, cfg.NF_*."""
@@ -589,6 +596,7 @@ class MarketDataService:
             self._upsert_list(idx_candles, synthetic)
 
         self.state.nf_index_ltp = close_
+        self.state.nf_index_tick_seq += 1   # see state.py's bn_index_tick_seq comment (NF mirror)
 
     @staticmethod
     def _warn_if_gap(label: str, prev_start: str, new_start: str) -> None:

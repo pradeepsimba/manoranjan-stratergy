@@ -138,10 +138,36 @@ SPEC: List[Dict[str, Any]] = [
     _s("NF_SCALP_TIME_STOP_S", "Nifty 50 time-stop (s)", "float", "Scalp Timing",
        min_=1, max_=60, step=0.5, bt=False,
        help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade. Live-only: has no effect on backtest, which always resolves on the next 5m bar regardless of this value (no sub-5-minute historical data exists to simulate the real time-stop)."),
+
+    # ── Execution simulation (2026-09-24, explicit user decision) — see
+    # config.py's own comment on these same keys in _DEFAULTS. No "BN "/"NF "
+    # prefix on the group name (mixed per-instrument settings, same
+    # convention as "Scalp Timing" above), so it always shows regardless of
+    # the Settings page's instrument filter. All bt=False: backtest has no
+    # tick stream to simulate a delayed/slipped fill against, same fidelity
+    # gap as BN_SCALP_TIME_STOP_S/NF_SCALP_TIME_STOP_S above.
+    _s("BN_ENTRY_FILL_DELAY_MS", "BankNifty entry fill delay (ms)", "float", "Execution Delay",
+       min_=0, max_=5000, step=10, bt=False,
+       help_="Simulated order-placement lag: an algo entry signal waits this long, then fills at the next live tick's price (not the signal's own price) — realistic slippage. Does not apply to a manual order. Live-only."),
+    _s("NF_ENTRY_FILL_DELAY_MS", "Nifty 50 entry fill delay (ms)", "float", "Execution Delay",
+       min_=0, max_=5000, step=10, bt=False,
+       help_="Simulated order-placement lag: an algo entry signal waits this long, then fills at the next live tick's price (not the signal's own price) — realistic slippage. Does not apply to a manual order. Live-only."),
+    _s("BN_EXIT_FILL_DELAY_MS", "BankNifty exit fill delay (ms)", "float", "Execution Delay",
+       min_=0, max_=5000, step=10, bt=False,
+       help_="Simulated close-order lag: an automatic target/stop/time-scratch exit waits this long, then fills at the next live tick's price — realistic slippage, symmetric with the entry delay above. Does not apply to a manual Exit click or the 15:30 EOD square-off, both immediate. Live-only."),
+    _s("NF_EXIT_FILL_DELAY_MS", "Nifty 50 exit fill delay (ms)", "float", "Execution Delay",
+       min_=0, max_=5000, step=10, bt=False,
+       help_="Simulated close-order lag: an automatic target/stop/time-scratch exit waits this long, then fills at the next live tick's price — realistic slippage, symmetric with the entry delay above. Does not apply to a manual Exit click or the 15:30 EOD square-off, both immediate. Live-only."),
+    _s("BN_FILL_MAX_WAIT_MS", "BankNifty fill max wait (ms)", "float", "Execution Delay",
+       min_=0, max_=20000, step=100, bt=False,
+       help_="If no genuinely new live tick arrives this long after a delayed entry/exit's fill time elapses, fill at whatever price is current instead of waiting indefinitely (feed momentarily idle)."),
+    _s("NF_FILL_MAX_WAIT_MS", "Nifty 50 fill max wait (ms)", "float", "Execution Delay",
+       min_=0, max_=20000, step=100, bt=False,
+       help_="If no genuinely new live tick arrives this long after a delayed entry/exit's fill time elapses, fill at whatever price is current instead of waiting indefinitely (feed momentarily idle)."),
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
-GROUP_ORDER = ["Scalp Timing", "BN Alerts", "NF Alerts"]
+GROUP_ORDER = ["Scalp Timing", "Execution Delay", "BN Alerts", "NF Alerts"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.

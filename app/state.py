@@ -5,7 +5,9 @@ from collections import deque
 from typing import Deque, Dict, List, Optional
 
 import app.config as cfg
-from app.models import BNDiagnostic, BNTrade, Candle, NFDiagnostic, NFTrade, TradingPhase
+from app.models import (
+    BNDiagnostic, BNTrade, Candle, NFDiagnostic, NFTrade, PendingBNEntry, PendingNFEntry, TradingPhase,
+)
 
 
 class AppState:
@@ -52,6 +54,22 @@ class AppState:
         # archive (see scheduler.py's startup sequence). ──────────────────────
         self.bn_index_synthetic: bool = True
         self.bn_synthetic_anchor: float = 0.0
+
+        # ── Execution-simulation fill delay (2026-09-24, explicit user
+        # decision) — see bn_entry_exit.fill_delayed_entry/resolve_delayed_
+        # exit_premium and bn_trade.py's arm_pending_entry/try_fill_pending_
+        # entry/check_tick_exit. bn_index_tick_seq/nf_index_tick_seq are
+        # incremented every time bn_index_ltp/nf_index_ltp is actually
+        # WRITTEN (market_data.py, real or synthetic tick alike) — the only
+        # way a pending fill can tell "a genuinely new tick arrived" apart
+        # from "the 100ms tick loop just re-polled the same still-stale
+        # price". Deliberately unlocked, same reasoning as dirty_ticks_push
+        # below (market_data._process_tick is fully synchronous, single
+        # event loop, can't interleave with itself).
+        self.bn_index_tick_seq: int = 0
+        self.nf_index_tick_seq: int = 0
+        self.pending_entry:    Optional[PendingBNEntry] = None
+        self.pending_entry_nf: Optional[PendingNFEntry] = None
 
         # ── The single active Bank Nifty options trade ────────────────────────
         self.active_trade:   Optional[BNTrade] = None

@@ -933,6 +933,28 @@ _DEFAULTS: Dict[str, Any] = {
     "SCALP_WINDOW2_END_HOUR":   14, "SCALP_WINDOW2_END_MIN":   45,
     "BN_SCALP_TIME_STOP_S": 12.0,
     "NF_SCALP_TIME_STOP_S": 12.0,
+
+    # ── Execution simulation (2026-09-24, explicit user decision) — realistic
+    # order-placement lag. An algo-fired entry signal does not fill instantly
+    # at the signal's own price: it waits ENTRY_FILL_DELAY_MS (simulated API
+    # lag), then fills at whatever the NEXT genuinely-new live tick shows —
+    # not the price the signal fired at (realistic slippage). The automatic
+    # target/stop/time-scratch exit gets the same treatment via
+    # EXIT_FILL_DELAY_MS, symmetric fill-at-next-tick semantics. Neither
+    # delay applies to a manual order/exit or the 15:30 EOD square-off — see
+    # bn_trade.py/nf_trade.py's arm_pending_entry/try_fill_pending_entry and
+    # check_tick_exit. FILL_MAX_WAIT_MS is a bounded fallback: if no
+    # genuinely new tick arrives this long after the delay elapses (a
+    # momentarily idle feed), fill at whatever price is current rather than
+    # stalling the single-trade slot indefinitely. Live-only (bt=False in
+    # settings.py's "Execution Delay" group) — backtest has no tick stream to
+    # simulate any of this against, same fidelity gap as BN_SCALP_TIME_STOP_S.
+    "BN_ENTRY_FILL_DELAY_MS": 300.0,
+    "NF_ENTRY_FILL_DELAY_MS": 300.0,
+    "BN_EXIT_FILL_DELAY_MS":  200.0,
+    "NF_EXIT_FILL_DELAY_MS":  200.0,
+    "BN_FILL_MAX_WAIT_MS":    1500.0,
+    "NF_FILL_MAX_WAIT_MS":    1500.0,
 }
 
 _runtime_overrides: Dict[str, Any] = {}

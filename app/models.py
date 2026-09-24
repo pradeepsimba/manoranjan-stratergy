@@ -220,6 +220,39 @@ class BNTrade:
     # value. Backtest's BTPosition has no equivalent fields; this only ever
     # applied to a live BNTrade.
     option_symbol:      str  = ""
+    # ── Pending-exit fill delay (2026-09-24, explicit user decision: "200ms
+    # Exit Delay") — see bn_trade.check_tick_exit's docstring. None while no
+    # exit condition has fired yet. The instant evaluate_exit's target/stop/
+    # time-scratch first triggers, these three freeze the reason + fill
+    # timing so the ACTUAL settlement (bn_entry_exit.resolve_delayed_exit_
+    # premium) happens BN_EXIT_FILL_DELAY_MS later, priced off the next
+    # genuinely-new live tick — not the premium at the instant the condition
+    # first fired (realistic slippage, symmetric with the entry-side delay
+    # below). Does NOT apply to force_close (EOD square-off / manual Exit) —
+    # both settle immediately, unconditionally.
+    pending_exit_reason:     Optional[str] = None   # "TARGET" | "STOP" | "TIME_SCRATCH"
+    pending_exit_fill_after: Optional[str] = None   # ISO — when the delay elapses
+    pending_exit_tick_seq:   Optional[int] = None   # st.bn_index_tick_seq snapshot when armed
+
+
+@dataclass(slots=True)   # an algo-fired BN entry signal awaiting its simulated fill
+class PendingBNEntry:
+    """
+    Holds a signal `evaluate_entry` just fired while it waits out
+    BN_ENTRY_FILL_DELAY_MS (2026-09-24, explicit user decision: "300ms Entry
+    Delay ... Realistic Slippage"). `signal` carries the trading DECISION
+    (direction/strike/expiry) made at fire time; entry_index_price/
+    entry_premium on it are OVERWRITTEN at actual fill time with whatever
+    the next genuinely-new live tick shows
+    (bn_entry_exit.fill_delayed_entry) — never reused from signal time,
+    that's the whole point of this simulated lag.
+    """
+    signal:          BNSignal
+    armed_at:        str    # ISO — when evaluate_entry fired this signal
+    fill_after:      str    # ISO — armed_at + BN_ENTRY_FILL_DELAY_MS
+    tick_seq_at_arm: int    # st.bn_index_tick_seq snapshot at arm time — a
+                            # later fill must observe a STRICTLY newer tick,
+                            # not just re-read the same stale price N polls later
 
 
 # ── Nifty 50 options strategy — parallel to the BN dataclasses above, same
@@ -283,6 +316,18 @@ class NFTrade:
     # NF mirror of BNTrade's option_symbol comment above — see there
     # (including why premium_synthetic used to live here too).
     option_symbol:      str  = ""
+    # NF mirror of BNTrade's pending-exit fill-delay fields above — see there.
+    pending_exit_reason:     Optional[str] = None
+    pending_exit_fill_after: Optional[str] = None
+    pending_exit_tick_seq:   Optional[int] = None
+
+
+@dataclass(slots=True)   # NF mirror of PendingBNEntry above
+class PendingNFEntry:
+    signal:          NFSignal
+    armed_at:        str
+    fill_after:      str
+    tick_seq_at_arm: int
 
 
 @dataclass(slots=True)

@@ -446,7 +446,7 @@ class SchedulerService:
 
     async def _tick_entries(self) -> None:
         st = get_state()
-        if st.phase != TradingPhase.ACTIVE or st.active_trade is not None:
+        if st.active_trade is not None:
             return
 
         with st._bn_index_lock:
@@ -466,12 +466,33 @@ class SchedulerService:
         # trade opens, the `st.active_trade is not None` guard above blocks
         # every subsequent tick until it closes + cooldown — no risk of
         # firing twice off one live signal.
-        bn_recent = bn_candles[-5:]
         # closed_tail_closes() excludes the still-forming last bar (see its
         # own docstring) even though the live tick price is deliberately
         # used elsewhere in this function (current_index_price/basket_ltp
         # below).
         bn_closes_lookback = closed_tail_closes(bn_candles, cfg.BN_INDICATOR_LOOKBACK_BARS)
+
+        # An armed signal is waiting out its simulated entry-fill lag
+        # (2026-09-24, explicit user decision: "300ms Entry Delay ...
+        # Realistic Slippage") — no new evaluate_entry call while one is
+        # pending, same as the active_trade-is-not-None guard above; see
+        # bn_trade.try_fill_pending_entry for the actual fill condition
+        # (delay elapsed + a genuinely new live tick, or the bounded
+        # max-wait fallback). Resolved regardless of phase — an order armed
+        # a moment before the 15:00 cutoff must still fill/abandon rather
+        # than get stuck forever the instant phase flips to CUTOFF (the
+        # phase gate below only blocks arming a NEW signal, not resolving
+        # one already in flight).
+        if st.pending_entry is not None:
+            trade = bn_trade.try_fill_pending_entry(_now(), st.bn_index_ltp, bn_closes_lookback)
+            if trade is not None:
+                await self._persist_new_position(trade, "BANKNIFTY", "BN")
+            return
+
+        if st.phase != TradingPhase.ACTIVE:
+            return
+
+        bn_recent = bn_candles[-5:]
 
         # Top-8 weighted-basket scalp strategy (2026-09-21) — only these 8
         # tokens (cfg.BN_SCALP_BASKET), not the full 14-stock BN_ALL_STOCKS
@@ -508,12 +529,9 @@ class SchedulerService:
         if signal is None:
             return
 
-        try:
-            trade = bn_trade.place_paper_order(signal, now)
-        except ValueError as e:
-            print(f"BN order rejected: {e}")
-            return
-        await self._persist_new_position(trade, "BANKNIFTY", "BN")
+        # Arm the fill-delay pending entry instead of placing it instantly —
+        # see bn_trade.arm_pending_entry/try_fill_pending_entry above.
+        bn_trade.arm_pending_entry(signal, now)
 
     # ── Nifty 50 — mirrors _tick_exits/_tick_entries above ───────────────────
 
@@ -540,7 +558,7 @@ class SchedulerService:
 
     async def _tick_entries_nf(self) -> None:
         st = get_state()
-        if st.phase != TradingPhase.ACTIVE or st.active_trade_nf is not None:
+        if st.active_trade_nf is not None:
             return
 
         with st._nf_index_lock:
@@ -548,12 +566,26 @@ class SchedulerService:
         if not nf_candles or st.nf_index_ltp <= 0:
             return
 
-        # Evaluated every tick, not once per closed bar — see the BN
-        # mirror's comment in _tick_entries above.
-        nf_recent = nf_candles[-5:]
         # See the BN mirror's comment in _tick_entries above —
         # closed_tail_closes() excludes the still-forming last bar.
         nf_closes_lookback = closed_tail_closes(nf_candles, cfg.NF_INDICATOR_LOOKBACK_BARS)
+
+        # See the BN mirror's identical comment in _tick_entries above
+        # (2026-09-24) — no new nf_evaluate_entry call while a signal is
+        # waiting out its simulated entry-fill lag; resolved regardless of
+        # phase (an order armed just before cutoff must still fill/abandon).
+        if st.pending_entry_nf is not None:
+            trade = nf_trade.try_fill_pending_entry(_now(), st.nf_index_ltp, nf_closes_lookback)
+            if trade is not None:
+                await self._persist_new_position(trade, "NIFTY50", "NF")
+            return
+
+        if st.phase != TradingPhase.ACTIVE:
+            return
+
+        # Evaluated every tick, not once per closed bar — see the BN
+        # mirror's comment in _tick_entries above.
+        nf_recent = nf_candles[-5:]
 
         # 2026-09-21: Top-8 weighted-basket tokens (cfg.NF_SCALP_BASKET),
         # not the 12-stock NF_LEADER_STOCKS the old rule used.
@@ -578,12 +610,9 @@ class SchedulerService:
         if signal is None:
             return
 
-        try:
-            trade = nf_trade.place_paper_order(signal, now)
-        except ValueError as e:
-            print(f"NF order rejected: {e}")
-            return
-        await self._persist_new_position(trade, "NIFTY50", "NF")
+        # Arm the fill-delay pending entry instead of placing it instantly —
+        # see nf_trade.arm_pending_entry/try_fill_pending_entry above.
+        nf_trade.arm_pending_entry(signal, now)
 
     async def _tick_alerts(self) -> None:
         """
@@ -890,6 +919,18 @@ class SchedulerService:
         st.nf_trades_today = 0
         st.daily_pnl = 0.0
         st.ltp.clear()
+        # Defensive cleanup (2026-09-24) — a pending entry armed via
+        # bn_trade.arm_pending_entry/nf_trade.arm_pending_entry always
+        # resolves within BN_FILL_MAX_WAIT_MS/NF_FILL_MAX_WAIT_MS of its
+        # delay elapsing (a few seconds at most — see _tick_entries/
+        # _tick_entries_nf's cutoff-boundary comment), so this should never
+        # actually be non-None here; cleared anyway so a stuck one from some
+        # unforeseen edge case can't silently carry into tomorrow's session
+        # (bn_index_ltp/nf_index_ltp reset to 0.0 just below would otherwise
+        # permanently block its own resolution — see try_fill_pending_entry's
+        # `if not bn_candles or st.bn_index_ltp <= 0: return` guard).
+        st.pending_entry = None
+        st.pending_entry_nf = None
         # bn_index_ltp/nf_index_ltp were NEVER reset here (found in review,
         # 2026-09-24) — unlike st.ltp above, which the individual-stock
         # candles depend on. They're only ever assigned from a real/

@@ -16,7 +16,7 @@ own version had no other reader (no NF equivalent of signal_study.py
 exists), so it's gone entirely, not kept for any standalone tool.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -291,6 +291,32 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
         entry_signal=signal,
         option_symbol=option_symbol,
     )
+
+
+def fill_delayed_entry(signal: NFSignal, now: datetime, current_index_price: float,
+                       nf_closes_lookback: np.ndarray) -> NFSignal:
+    """NF mirror of bn_entry_exit.fill_delayed_entry — see there."""
+    option_type = "CE" if signal.direction == "BUY" else "PE"
+    expiry = datetime.fromisoformat(signal.expiry)
+    T = time_to_expiry_years(now, expiry)
+    iv = estimate_iv(nf_closes_lookback)
+    bs = black_scholes(current_index_price, signal.strike, T, cfg.NF_RISK_FREE_RATE, iv, option_type)
+    return replace(signal, entry_index_price=current_index_price,
+                   entry_premium=bs["price"], iv_used=iv)
+
+
+def resolve_delayed_exit_premium(trade: NFTrade, now: datetime, current_index_price: float,
+                                 nf_closes_lookback: np.ndarray) -> float:
+    """NF mirror of bn_entry_exit.resolve_delayed_exit_premium — see there."""
+    expiry = datetime.fromisoformat(trade.expiry)
+    T = time_to_expiry_years(now, expiry)
+    iv = estimate_iv(nf_closes_lookback)
+    safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
+    bs = black_scholes(safe_price, trade.strike, T, cfg.NF_RISK_FREE_RATE, iv, trade.option_type)
+    premium = bs["price"]
+    if trade.pending_exit_reason == "TIME_SCRATCH":
+        premium = max(0.0, premium - trade.scratch_slippage_rs)
+    return premium
 
 
 def finalize_exit(trade: NFTrade, now: datetime, exit_index_price: float,
