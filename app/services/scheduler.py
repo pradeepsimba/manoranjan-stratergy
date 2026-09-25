@@ -14,6 +14,7 @@ Timing orchestrator — drives the Bank Nifty options paper-trading session:
 import asyncio
 import copy
 import json
+import math
 from collections import deque as _deque
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, List, Optional
@@ -147,7 +148,33 @@ class SchedulerService:
             print(f"Funds load failed (using default): {e}")
             stored = {}
         funds = stored.get(BN_FUNDS_KEY)
-        st.funds = float(funds) if isinstance(funds, (int, float)) else cfg.BN_STARTING_FUNDS
+        loaded = float(funds) if isinstance(funds, (int, float)) else None
+        # Sanity guard (2026-09-25, found in review) — a real, unexplained
+        # corruption was found live in production: the persisted _BN_FUNDS
+        # value had somehow become roughly a billion times its real
+        # magnitude (₹100,000 starting capital showing as
+        # ₹100,000,000,001,579.97 on the dashboard) despite every code path
+        # that touches st.funds (this load, _settle's `+= trade.pnl` in
+        # bn_trade.py/nf_trade.py, dashboard.reset_funds) checking out
+        # correct on inspection — the exact mechanism could not be traced
+        # back further than this process's own history. Rather than
+        # silently keep trusting whatever value is sitting in the DB
+        # forever once that happens, refuse anything that isn't a finite
+        # number within a generous sane ceiling (1000x starting capital —
+        # this scalp strategy's ~₹2-3/trade brackets and daily trade cap
+        # make legitimately exceeding that essentially impossible) and fall
+        # back to the configured starting capital instead, loudly, so a
+        # recurrence is immediately visible in logs rather than silently
+        # displayed forever on every dashboard load.
+        ceiling = 1000.0 * max(cfg.BN_STARTING_FUNDS, 1.0)
+        if loaded is not None and math.isfinite(loaded) and abs(loaded) <= ceiling:
+            st.funds = loaded
+        else:
+            print(f"CRITICAL: persisted funds value {funds!r} is missing/non-finite/"
+                  f"implausible (sane range ±₹{ceiling:,.2f}) — falling back to starting "
+                  f"capital ₹{cfg.BN_STARTING_FUNDS:,.2f}. This should never happen from "
+                  f"normal trading; if it recurs, treat it as a real bug to re-investigate.")
+            st.funds = cfg.BN_STARTING_FUNDS
 
     async def _seed_synthetic_anchor(self) -> None:
         """
