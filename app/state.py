@@ -174,9 +174,11 @@ class AppState:
         self.nf_atm_ce_ltp: Optional[float] = None
         self.nf_atm_pe_ltp: Optional[float] = None
         # The strike these symbols were derived from — kept here (not just as
-        # SchedulerService._bn_atm_watch_strike/_nf_atm_watch_strike, a plain
-        # unlocked instance int used only for that method's own cheap
-        # did-it-change check) so _build_payload can read strike + symbols +
+        # SchedulerService._bn_atm_watch_symbols/_nf_atm_watch_symbols — renamed
+        # 2026-09-25 from _bn_atm_watch_strike/_nf_atm_watch_strike, now a plain
+        # unlocked `tuple[str, str] | None` of the built (ce, pe) symbol pair,
+        # used only for that method's own cheap did-it-change check) so
+        # _build_payload can read strike + symbols +
         # LTP as ONE atomic group under _atm_watch_lock below. Reading the
         # scheduler's own unlocked copy here used to let _build_payload pair
         # the NEW strike (written first, before set_bn_atm_watch/set_nf_atm_
