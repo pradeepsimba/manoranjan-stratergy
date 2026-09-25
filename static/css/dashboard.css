@@ -1053,7 +1053,21 @@ a:focus-visible, button:focus-visible, input:focus-visible,
      Loop Monitor (both moderate-width diagnostic/log panels) stack inside
      the medium column rather than each claiming a full column — updated
      2026-09-25 alongside the 4th .col above; Stock Candles/Backtest keeps
-     its own dedicated wide column exactly as before. */
+     its own dedicated wide column exactly as before.
+
+     nth-child(4) spans both rows, same as nth-child(1) (found in review,
+     2026-09-25, confirmed by an actual rendered screenshot — this was
+     shipped as `grid-row: 1` only, a real bug, not a hypothetical one):
+     CSS Grid sizes an implicit row to fit the tallest item that does NOT
+     span past it, so a single-row Stock-Candles/Backtest column (by far
+     the tallest content on the page — 2 candle tables + Backtest) forced
+     row 1 itself to balloon to that full height, shoving row 2 (Entry Loop
+     Monitor) hundreds of pixels below "Today's Trades" with a giant empty
+     gap between them — looked like the panel had fallen out of the layout
+     entirely, not just a rows/columns cosmetic-height mismatch. Spanning
+     both rows lets the grid distribute its extra height into row 2 (the
+     spec's default target for a spanning item's overflow), which is what
+     actually keeps row 1 sized to "Today's Trades"/col1's own content. */
   .main-grid {
     grid-template-columns: minmax(300px, 380px) minmax(340px, 480px) 1fr;
     max-width: 2200px;
@@ -1062,7 +1076,7 @@ a:focus-visible, button:focus-visible, input:focus-visible,
   .main-grid > .col:nth-child(1) { grid-row: 1 / span 2; }
   .main-grid > .col:nth-child(2) { grid-column: 2; grid-row: 1; }
   .main-grid > .col:nth-child(3) { grid-column: 2; grid-row: 2; }
-  .main-grid > .col:nth-child(4) { grid-column: 3; grid-row: 1; }
+  .main-grid > .col:nth-child(4) { grid-column: 3; grid-row: 1 / span 2; }
 }
 
 /* ── c.html UI-parity additions ──────────────────────────────────────────────
