@@ -155,13 +155,17 @@ function renderAtmWatch(watch, ids) {
   ids = ids || TRADE_IDS_BN;
   const el = document.getElementById(ids.atmWatch);
   if (!el) return;
-  if (!watch || watch.strike == null) { el.innerHTML = ''; return; }
+  if (!watch || watch.strike == null) {
+    if (el._h !== '') { el._h = ''; el.innerHTML = ''; }
+    return;
+  }
   const ceVal = watch.ceLtp != null ? `₹${fmt2(watch.ceLtp)}` : '— (waiting for live tick)';
   const peVal = watch.peLtp != null ? `₹${fmt2(watch.peLtp)}` : '— (waiting for live tick)';
-  el.innerHTML = `
+  const html = `
     <div class="atm-watch-row"><span class="lbl">ATM ${watch.strike} CE — ${escHtml(watch.ceSymbol || '')}</span><span class="val">${ceVal}</span></div>
     <div class="atm-watch-row"><span class="lbl">ATM ${watch.strike} PE — ${escHtml(watch.peSymbol || '')}</span><span class="val">${peVal}</span></div>
   `;
+  if (el._h !== html) { el._h = html; el.innerHTML = html; }
 }
 
 function renderTrade(t, ids, diag, pendingEntry) {
@@ -232,8 +236,8 @@ function renderTrade(t, ids, diag, pendingEntry) {
   const stageCls = t.slStage === 'Trail' ? 'pnl-pos' : t.slStage === 'Breakeven' ? '' : '';
 
   const cells = [
-    ['Strike', t.strike + ' ' + t.optionType],
-    ['Option Symbol', t.optionSymbol || '—'],
+    ['Strike', t.strike + ' ' + escHtml(t.optionType)],
+    ['Option Symbol', escHtml(t.optionSymbol || '—')],
     ['Expiry', fmtDT(t.expiry)],
     ['Entry Index', fmt2(t.entryIndexPrice)],
     ['Current Index', fmt2(t.currentIndexPrice)],
@@ -312,11 +316,12 @@ function renderClosedTrades(bnTrades, nfTrades) {
     // table by definition (zero information). t.exitReason is the actual
     // "TARGET HIT"/"STOP HIT"/"TIME_SCRATCH HIT"/"EOD SQUARE-OFF"/
     // "MANUAL EXIT" label (see models.py's BNTrade.exit_reason) — reuses
-    // the same oc-target/oc-stop/oc-eod classes the Backtest trades table
-    // below already defines for the identical concept.
+    // the same oc-target/oc-stop/oc-scratch/oc-eod classes the Backtest
+    // trades table below already defines for the identical concept.
     const reason = t.exitReason || '—';
-    const ocCls = reason.startsWith('TARGET') ? 'oc-target'
-                : reason.startsWith('STOP')   ? 'oc-stop' : 'oc-eod';
+    const ocCls = reason.startsWith('TARGET')       ? 'oc-target'
+                : reason.startsWith('STOP')         ? 'oc-stop'
+                : reason.startsWith('TIME_SCRATCH') ? 'oc-scratch' : 'oc-eod';
     return `<tr>
       <td data-label="Instr"><span class="badge ${t._instr === 'NF' ? 'blue' : 'gray'}">${t._instr}</span></td>
       <td data-label="Dir">${escHtml(t.direction)}</td>
@@ -858,7 +863,9 @@ function renderBacktestTrades(trades) {
   }
   tbody.innerHTML = trades.map(t => {
     const pnlCls  = Number(t.net_pnl) > 0 ? 'pnl-pos' : Number(t.net_pnl) < 0 ? 'pnl-neg' : '';
-    const ocCls   = t.outcome === 'TARGET' ? 'oc-target' : t.outcome === 'STOP' ? 'oc-stop' : 'oc-eod';
+    const ocCls   = t.outcome === 'TARGET' ? 'oc-target'
+                  : t.outcome === 'STOP'   ? 'oc-stop'
+                  : t.outcome === 'TIME_SCRATCH' ? 'oc-scratch' : 'oc-eod';
     const entryT  = fmtDT(t.entry_time);
     const exitT   = fmtDT(t.exit_time);
     return `<tr>

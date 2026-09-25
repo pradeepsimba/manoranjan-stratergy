@@ -13,7 +13,7 @@
   <meta name="theme-color" content="#111111">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="BN Options">
-  <link rel="stylesheet" href="/css/dashboard.css?v=53">
+  <link rel="stylesheet" href="/css/dashboard.css?v=54">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -125,8 +125,14 @@
       border-radius: var(--r-sm); font-size: 12px; padding: 8px 14px; cursor: pointer;
     }
 
-    /* Toast */
-    .toast {
+    /* This page's own toast element — scoped to #toast (not the bare
+       .toast class) so it can't collide with util.js's shared toast()
+       system, which creates its own .toast elements inside a dynamically
+       appended #toast-host and is also reachable from this page (found in
+       review, 2026-09-25: identical bare-.toast selectors here used to win
+       the cascade over dashboard.css's .toast-host rules for ANY .toast
+       element on this page, not just this one). */
+    #toast {
       position: fixed; top: 74px; right: 20px; z-index: 60;
       padding: 10px 16px; border-radius: var(--r);
       font-size: 12px; font-weight: 600;
@@ -134,9 +140,9 @@
       transition: opacity .2s ease, transform .2s ease;
       pointer-events: none;
     }
-    .toast.show { opacity: 1; transform: none; }
-    .toast.ok  { background: var(--pos-bg); color: var(--pos); border: 1px solid var(--pos-edge); }
-    .toast.err { background: var(--neg-bg); color: var(--neg); border: 1px solid var(--neg-edge); }
+    #toast.show { opacity: 1; transform: none; }
+    #toast.ok  { background: var(--pos-bg); color: var(--pos); border: 1px solid var(--pos-edge); }
+    #toast.err { background: var(--neg-bg); color: var(--neg); border: 1px solid var(--neg-edge); }
 
     .hdr-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .grp-badge { font-size: 10px; }

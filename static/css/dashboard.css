@@ -585,6 +585,7 @@ tbody tr:hover td      { background: var(--surf-hover); }
 /* ── Backtest trade outcome coloring ───────────────────────────────────────── */
 .oc-target { color: var(--pos); font-weight: 600; }
 .oc-stop   { color: var(--neg); font-weight: 600; }
+.oc-scratch { color: var(--warn); }
 .oc-eod    { color: var(--txt-2); }
 
 /* ── Backtest trade table compact columns ──────────────────────────────────── */
@@ -722,6 +723,14 @@ tbody tr:hover td      { background: var(--surf-hover); }
   border-color: var(--prime);
   color: var(--prime);
 }
+
+/* ── Small inline action buttons (alerts/exit/date-filter/expand — index.html) ── */
+.btn-mini {
+  background: none; border: 1px solid var(--edge); color: var(--txt-2);
+  border-radius: var(--r-sm); font-size: 10px; padding: 3px 7px;
+  cursor: pointer; white-space: nowrap;
+}
+.btn-mini:hover { color: var(--neg); border-color: var(--neg-edge); }
 
 /* ── Scrollbar styling ─────────────────────────────────────────────────────── */
 ::-webkit-scrollbar              { width: 5px; height: 5px; }

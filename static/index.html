@@ -13,7 +13,7 @@
   <meta name="theme-color" content="#111111">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="BN Options">
-  <link rel="stylesheet" href="/css/dashboard.css?v=53">
+  <link rel="stylesheet" href="/css/dashboard.css?v=54">
   <script>
     (function(){
       var t = localStorage.getItem('theme') || 'dark';
@@ -232,6 +232,12 @@
           <label class="field-label">Avail. Funds
             <input class="field-input" id="kite-funds" readonly>
           </label>
+          <!-- /api/reset-funds has existed since 2026-09-19 with no frontend
+               control anywhere in the app until now (found in review,
+               2026-09-25) — one shared button since funds/dailyPnl are a
+               single combined BN+NF account, not per-instrument. -->
+          <button class="btn-mini" id="reset-funds-btn" onclick="resetFunds()"
+            title="Reset the shared paper account back to starting capital">↺ Reset Funds</button>
         </div>
         <div class="kite-actions">
           <button class="btn-run" id="kite-submit-btn" onclick="kiteSubmitOrder(KITE_IDS_BN)">Submit</button>
@@ -315,6 +321,69 @@
             </tbody>
           </table>
         </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Entry Loop Monitor ("why didn't it fire") — markup was deleted in the
+       2026-09-09 settings-purge commit (4488246) along with the Backtest
+       panel and the S/R table, but unlike those two, never restored until
+       now (found in review, 2026-09-25). dashboard.js's renderEntryLoop()
+       kept running against these exact ids the whole time (a graceful
+       `if (!timeEl) return` no-op), and the backend's BNDiagnostic/
+       NFDiagnostic have deliberately mirrored the now-removed leader-vote/
+       RSI/MACD/EMA fields onto the current basket-score condition since the
+       2026-09-21 scalp rewrite (see bn_entry_exit.py's own "kept for the
+       (currently unused) Entry Loop Monitor UI" comment) specifically so
+       this panel would show genuinely live, current data if it were ever
+       reconnected — this is that reconnection, not a resurrection of stale
+       leader-vote-era markup. ─────────────────────────────────────────── -->
+  <div class="col">
+
+    <div class="panel" data-instr="bn">
+      <div class="panel-header">
+        <span class="panel-title">Entry Loop Monitor</span>
+        <div>
+          <span id="entry-time" class="badge gray">—</span>
+          <button class="dash-toggle" data-target="entry-loop-body" onclick="toggleSection(this)">▼</button>
+        </div>
+      </div>
+      <div class="panel-body dash-body" id="entry-loop-body">
+        <div id="entry-summary" class="entry-summary">—</div>
+        <div class="tbl-wrap">
+          <table class="cardify">
+            <thead><tr><th>Leader</th><th>Open</th><th>Close</th><th>Volume</th><th>Surge</th></tr></thead>
+            <tbody id="leader-tbody">
+              <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="gate-rows"></div>
+        <div id="no-trade-reason" class="no-trade-reason">—</div>
+      </div>
+    </div>
+
+    <div class="panel" data-instr="nf">
+      <div class="panel-header">
+        <span class="panel-title">Nifty 50 Entry Loop Monitor</span>
+        <div>
+          <span id="entry-time-nf" class="badge gray">—</span>
+          <button class="dash-toggle" data-target="entry-loop-nf-body" onclick="toggleSection(this)">▼</button>
+        </div>
+      </div>
+      <div class="panel-body dash-body" id="entry-loop-nf-body">
+        <div id="entry-summary-nf" class="entry-summary">—</div>
+        <div class="tbl-wrap">
+          <table class="cardify">
+            <thead><tr><th>Leader</th><th>Open</th><th>Close</th><th>Volume</th><th>Surge</th></tr></thead>
+            <tbody id="leader-tbody-nf">
+              <tr><td colspan="5" class="empty-cell">Waiting for data…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="gate-rows-nf"></div>
+        <div id="no-trade-reason-nf" class="no-trade-reason">—</div>
       </div>
     </div>
 
@@ -535,10 +604,10 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="/js/util.js?v=49"></script>
-<script src="/js/breakout.js?v=54"></script>
+<script src="/js/breakout.js?v=55"></script>
 <script src="/js/qtyAudit.js?v=49"></script>
-<script src="/js/kiteForm.js?v=50"></script>
+<script src="/js/kiteForm.js?v=51"></script>
 <script src="/js/alerts.js?v=50"></script>
-<script src="/js/dashboard.js?v=55"></script>
+<script src="/js/dashboard.js?v=56"></script>
 </body>
 </html>

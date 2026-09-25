@@ -100,6 +100,36 @@ function kiteSubmitOrder(ids) {
     .finally(() => _kiteSetSubmitting(ids, false));
 }
 
+// Reset Funds (2026-09-19 backend endpoint, /api/reset-funds — see
+// app/api/dashboard.py) had no frontend control anywhere in the app until
+// now (found in review, 2026-09-25): the button/wiring this comment implies
+// existed was referenced by config.py's/CLAUDE.md's own dated comments but
+// was never actually built. Resets the SHARED paper account back to
+// cfg.BN_STARTING_FUNDS — funds/dailyPnl are one combined BN+NF balance
+// (see kiteUpdateFundsDisplay above, which already renders the same
+// window._lastFunds into both instruments' funds fields), so there is
+// deliberately only ONE button for this, not a per-instrument pair, and the
+// backend itself refuses while EITHER instrument has an open trade.
+let _resetFundsInFlight = false;
+function resetFunds() {
+  if (_resetFundsInFlight) return;
+  if (!confirm('Reset the paper account back to its starting capital? This clears the shown balance and today\'s running P&L — it does not touch trade history.')) return;
+  _resetFundsInFlight = true;
+  const btn = document.getElementById('reset-funds-btn');
+  if (btn) btn.disabled = true;
+  fetch('/api/reset-funds', { method: 'POST' })
+    .then(r => r.json().then(body => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok) { toast(`Reset failed: ${body.detail || 'unknown error'}`, 'err'); return; }
+      window._lastFunds = body.funds;
+      kiteUpdateFundsDisplay(KITE_IDS_BN);
+      kiteUpdateFundsDisplay(KITE_IDS_NF);
+      toast(`Funds reset to ₹${Number(body.funds).toFixed(2)}`, 'ok');
+    })
+    .catch(e => toast(`Reset failed: ${e.message}`, 'err'))
+    .finally(() => { _resetFundsInFlight = false; if (btn) btn.disabled = false; });
+}
+
 function manualExit(ids) {
   ids = ids || KITE_IDS_BN;
   const key = _kiteKey(ids);

@@ -33,6 +33,16 @@ IST = ZoneInfo("Asia/Kolkata")
 router = APIRouter(dependencies=[Depends(require_login)])
 ws_router = APIRouter()
 
+# Strong references for fire-and-forget background tasks started from a
+# request handler (found in review, 2026-09-25) — asyncio only holds a WEAK
+# reference to a task created via create_task, so an unreferenced task can
+# be garbage-collected mid-run. Every other create_task call in this repo
+# (scheduler.py's self._tasks, market_data.py's self._tasks/_option_task)
+# already keeps one; this set is the equivalent for the one-off backtest run
+# task below, which is a real, potentially tens-of-seconds computation, not
+# a fire-and-forget the app can afford to silently lose.
+_background_tasks: set = set()
+
 _db    = None
 _sched = None
 
@@ -438,10 +448,12 @@ async def start_backtest(req: BacktestRequest) -> Dict[str, Any]:
         run_id, req.from_date, req.to_date,
         {"slippage_bps": slippage, "overrides": attr_overrides},
     )
-    asyncio.create_task(
+    task = asyncio.create_task(
         run_backtest(_db, run_id, req.from_date, req.to_date,
                      slippage, overrides=attr_overrides)
     )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"run_id": run_id, "status": "running"}
 
 

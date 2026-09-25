@@ -24,6 +24,7 @@ Add a new tunable by adding its default to app.config._DEFAULTS AND an entry
 here — nothing else is required for it to appear on the Settings page.
 """
 
+import math
 import re
 from typing import Any, Dict, List, Optional
 
@@ -262,6 +263,12 @@ def _coerce(spec: Dict[str, Any], raw: Any) -> Any:
         val = float(raw)
     except (TypeError, ValueError):
         raise ValueError(f"{key}: expected a number") from None
+    if not math.isfinite(val):
+        # NaN/Infinity: Python's json module accepts these non-standard
+        # literals by default, and NaN compares False against every bound
+        # below — a bare min/max check alone would silently let it through
+        # and poison a live tunable (found in review, 2026-09-25).
+        raise ValueError(f"{key}: must be a finite number")
     if typ == "int":
         if val != int(val):
             raise ValueError(f"{key}: expected an integer")

@@ -218,7 +218,15 @@ def _try_exit(port: Portfolio, bn_ss: SymbolSeries, gidx: int,
     T = time_to_expiry_years(now, expiry_dt)
 
     def _premium(index_price: float) -> float:
-        return black_scholes(index_price, pos.strike, T, cfg.BN_RISK_FREE_RATE, iv, pos.option_type)["price"]
+        # Guard against a zero/negative bar price (a still-forming synthetic
+        # index day or a corrupted bn_index_bars row) — black_scholes calls
+        # math.log(S/K) unconditionally once T>0 and sigma>0, which raises
+        # ValueError for S<=0. Mirrors the live side's safe_price fallback
+        # in bn_entry_exit.evaluate_exit/fill_delayed_entry (found in
+        # review, 2026-09-25 — this was the one Black-Scholes call site in
+        # the app without the guard the other two already have).
+        safe_price = index_price if index_price > 0 else pos.entry_index_price
+        return black_scholes(safe_price, pos.strike, T, cfg.BN_RISK_FREE_RATE, iv, pos.option_type)["price"]
 
     p_open = _premium(bar.open)
     p_a, p_b = _premium(bar.high), _premium(bar.low)
@@ -288,7 +296,8 @@ def _simulate_day_impl(day: str, bn_ss: SymbolSeries, stocks: Dict[str, SymbolSe
         iv = estimate_iv(lookback)
         expiry_dt = datetime.fromisoformat(port.active.expiry)
         T = time_to_expiry_years(now, expiry_dt)
-        bs = black_scholes(last_bar.close, port.active.strike, T, cfg.BN_RISK_FREE_RATE,
+        safe_close = last_bar.close if last_bar.close > 0 else port.active.entry_index_price
+        bs = black_scholes(safe_close, port.active.strike, T, cfg.BN_RISK_FREE_RATE,
                            iv, port.active.option_type)
         exit_premium = slip_sell_premium(bs["price"], slippage_bps)
         port.close_position(now, last_bar.close, exit_premium, "EOD")

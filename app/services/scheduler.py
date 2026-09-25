@@ -385,8 +385,19 @@ class SchedulerService:
                         st.phase = TradingPhase.WAIT_ZONE
 
                     # Mid-session restart: rebuild today's trade/PnL state from
-                    # the DB BEFORE the WS starts.
-                    if not st.closed_trades and st.active_trade is None:
+                    # the DB BEFORE the WS starts. Must check BOTH instruments'
+                    # empty-state, not just BN's (found in review, 2026-09-25):
+                    # _restore_from_db() itself restores BN+NF together and has
+                    # no dedup against rows already reflected in memory, so a
+                    # BN-only guard re-fires and double-appends NF's already-
+                    # live closed trades into st.closed_trades_nf on any day BN
+                    # happens to have zero trades (a realistic outcome given
+                    # the strategy's narrow windows/cooldown/daily cap) — this
+                    # silently doubled NF's daily_pnl/trade count and, via
+                    # _run_eod's own identical bug below, corrupted the
+                    # persisted daily_stats row for NIFTY50.
+                    if (not st.closed_trades and not st.closed_trades_nf
+                            and st.active_trade is None and st.active_trade_nf is None):
                         await self._restore_from_db()
 
                     if not self._mkt._running:
@@ -898,7 +909,11 @@ class SchedulerService:
     async def _run_eod(self) -> None:
         st = get_state()
 
-        if not st.closed_trades and st.active_trade is None:
+        # Same combined-instrument guard as the mid-session-restart call site
+        # above — see its comment for why a BN-only check double-counts NF's
+        # (or vice versa) already-in-memory trades on re-entry.
+        if (not st.closed_trades and not st.closed_trades_nf
+                and st.active_trade is None and st.active_trade_nf is None):
             await self._restore_from_db()
 
         if st.active_trade is not None:
@@ -1389,8 +1404,21 @@ class SchedulerService:
                 "targetRs": d.target_rs, "stopRs": d.stop_rs, "timeStopS": d.time_stop_s,
             }
 
-        diag = _diag_dict(st.bn_diagnostic, active_trade is None) if st.bn_diagnostic is not None else None
-        diag_nf = _diag_dict(st.nf_diagnostic, active_trade_nf is None) if st.nf_diagnostic is not None else None
+        # Single local-variable capture of each AppState reference (found in
+        # review, 2026-09-25) — st.bn_diagnostic/nf_diagnostic/pending_entry/
+        # pending_entry_nf are only ever atomically replaced wholesale or set
+        # to None by the event loop, never mutated in place, so a captured
+        # reference stays internally consistent for the rest of this executor-
+        # thread function even if the event loop reassigns the AppState
+        # attribute itself in the meantime. The bug this replaces wasn't the
+        # object being unsafe to read — it was reading st.bn_diagnostic (etc.)
+        # from AppState two-or-more separate times each below, which COULD
+        # observe a None in between an `is not None` check and the dict-
+        # literal access that followed, raising AttributeError.
+        bn_diag_snap = st.bn_diagnostic
+        nf_diag_snap = st.nf_diagnostic
+        diag = _diag_dict(bn_diag_snap, active_trade is None) if bn_diag_snap is not None else None
+        diag_nf = _diag_dict(nf_diag_snap, active_trade_nf is None) if nf_diag_snap is not None else None
 
         # ── Stock Candles panel data (breakout banner / weighted global signal /
         # S-R table) — a c.html UI-parity port, entirely separate from the BN
@@ -1512,6 +1540,11 @@ class SchedulerService:
             _nf_atm_ce_symbol, _nf_atm_pe_symbol = st.nf_atm_ce_symbol, st.nf_atm_pe_symbol
             _nf_atm_ce_ltp, _nf_atm_pe_ltp = st.nf_atm_ce_ltp, st.nf_atm_pe_ltp
 
+        # Single local capture, same reasoning as bn_diag_snap/nf_diag_snap
+        # above — used by pendingEntry/pendingEntryNf below.
+        pending_entry_snap = st.pending_entry
+        pending_entry_nf_snap = st.pending_entry_nf
+
         return {
             "type":         "STATE_UPDATE",
             "clock":        clock,
@@ -1527,17 +1560,20 @@ class SchedulerService:
             "activeTrade":  active,
             # Pending entry (2026-09-24 execution-simulation feature — see
             # CLAUDE.md) — armed but not yet filled, same "computed server-
-            # side, never sent" gap as pendingExitReason above. A single
-            # reference read of st.pending_entry is safe here (matches how
-            # bnLtp/nfLtp etc. below are already read directly in this
-            # worker-thread function) — the PendingBNEntry instance itself
-            # is never mutated in place, only ever atomically replaced
-            # wholesale (armed) or set to None (resolved/abandoned).
+            # side, never sent" gap as pendingExitReason above. Captured into
+            # a local once, below, before this dict is built (found in
+            # review, 2026-09-25 — this used to read st.pending_entry
+            # directly, multiple separate times, inside this dict literal;
+            # the PendingBNEntry instance itself is never mutated in place,
+            # only ever atomically replaced wholesale (armed) or set to None
+            # (resolved/abandoned) by the event loop, but THAT reassignment
+            # could land between this dict's `is not None` check and its
+            # field access, raising AttributeError on a None read).
             "pendingEntry": (
-                {"direction": st.pending_entry.signal.direction,
-                 "armedAt": st.pending_entry.armed_at,
-                 "fillAfter": st.pending_entry.fill_after}
-                if st.pending_entry is not None else None
+                {"direction": pending_entry_snap.signal.direction,
+                 "armedAt": pending_entry_snap.armed_at,
+                 "fillAfter": pending_entry_snap.fill_after}
+                if pending_entry_snap is not None else None
             ),
             "closedTrades": [_trade_dict(t) for t in closed_trades],
             "entryLoop":    diag,
@@ -1549,10 +1585,10 @@ class SchedulerService:
             "activeTradeNf":  active_nf,
             # NF mirror of pendingEntry above.
             "pendingEntryNf": (
-                {"direction": st.pending_entry_nf.signal.direction,
-                 "armedAt": st.pending_entry_nf.armed_at,
-                 "fillAfter": st.pending_entry_nf.fill_after}
-                if st.pending_entry_nf is not None else None
+                {"direction": pending_entry_nf_snap.signal.direction,
+                 "armedAt": pending_entry_nf_snap.armed_at,
+                 "fillAfter": pending_entry_nf_snap.fill_after}
+                if pending_entry_nf_snap is not None else None
             ),
             "closedTradesNf": [_trade_dict(t) for t in closed_trades_nf],
             "entryLoopNf":    diag_nf,

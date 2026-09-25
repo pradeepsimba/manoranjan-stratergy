@@ -143,14 +143,19 @@ function renderGlobalSignal(gs, ids) {
   ids = ids || STOCK_IDS_BN;
   const box = document.getElementById(ids.signal);
   if (!box) return;
-  if (!gs) { box.innerHTML = 'GLOBAL SIGNAL: —'; return; }
+  if (!gs) {
+    const html = 'GLOBAL SIGNAL: —';
+    if (box._h !== html) { box._h = html; box.innerHTML = html; }
+    return;
+  }
   const pts = gs.points !== null && gs.points !== undefined
     ? ` (≈ ${gs.points > 0 ? '+' : ''}${gs.points} pts)` : '';
-  box.innerHTML = `
+  const html = `
     GLOBAL SIGNAL: <b style="color:${gs.color}">${gs.signal}</b>
     <small>Count: <span style="color:${gs.countColor}">${gs.countSignal}</span> |
     Weighted: ${gs.weightedPct > 0 ? '+' : ''}${gs.weightedPct}%${pts}</small>
   `;
+  if (box._h !== html) { box._h = html; box.innerHTML = html; }
 }
 
 // User-supplied weightage badge: on the LATEST bar, how much of the index
@@ -168,30 +173,32 @@ function renderWeightedRedGreen(wrg, ids) {
   box.hidden = false;
   const neutral = Math.max(0, wrg.total - wrg.red - wrg.green);
   const neutralText = neutral > 0.005 ? ` <span class="muted-text">(${neutral.toFixed(2)} unchanged)</span>` : '';
-  box.innerHTML = `
+  const html = `
     <span class="muted-text">Weightage (confirmed stocks):</span>
     <span class="pnl-neg">🔴 ${wrg.red.toFixed(2)}/${wrg.total.toFixed(2)}</span>
     <span class="pnl-pos">🟢 ${wrg.green.toFixed(2)}/${wrg.total.toFixed(2)}</span>${neutralText}
   `;
+  if (box._h !== html) { box._h = html; box.innerHTML = html; }
 }
 
 function renderBreakoutBanner(b, ids) {
   ids = ids || STOCK_IDS_BN;
   const box = document.getElementById(ids.banner);
   if (!box) return;
-  if (!b || !b.type) { box.innerHTML = '<b>No Breakout Detected</b>'; return; }
-  if (!b.valid) { box.innerHTML = '<b>No Valid Breakout</b> (insufficient contributions)'; return; }
+  const setHtml = (html) => { if (box._h !== html) { box._h = html; box.innerHTML = html; } };
+  if (!b || !b.type) { setHtml('<b>No Breakout Detected</b>'); return; }
+  if (!b.valid) { setHtml('<b>No Valid Breakout</b> (insufficient contributions)'); return; }
   const dirText = b.direction === 'bullish' ? 'Bullish' : 'Bearish';
   const level = b.level !== null && b.level !== undefined ? Number(b.level).toFixed(2) : 'N/A';
   const contribText = (b.contributors || [])
     .filter(c => c.significant)
-    .map(c => `${c.token} (${c.points > 0 ? '+' : ''}${c.points} pts, ${c.change}%)`)
+    .map(c => `${escHtml(c.token)} (${c.points > 0 ? '+' : ''}${c.points} pts, ${c.change}%)`)
     .join(', ');
   const typeLabel = b.type.charAt(0).toUpperCase() + b.type.slice(1);
-  box.innerHTML = `
+  setHtml(`
     <b>${typeLabel} Breakout:</b> ${dirText} (${level})
     <br><small>Contributors: ${contribText || '—'}</small>
-  `;
+  `);
 }
 
 // Port of c.html's formatToTwoDecimals — TRUNCATES (floor), not rounds, and
