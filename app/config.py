@@ -659,7 +659,14 @@ BN_INDICATOR_LOOKBACK_BARS = 200
 # STOP_RS/TIME_STOP_S under "Static: Scalping strategy" below, which are
 # premium-₹-denominated, not index-points, and frozen into the trade the
 # same way these used to be.
-BN_STARTING_FUNDS     = 100_000.0   # ₹ — seeds the persisted funds balance once
+# DYNAMIC (2026-09-25, explicit user decision — Settings page paper capital
+# control) — see _DEFAULTS below / app/services/settings.py's "Paper
+# Account" group. Read live by scheduler._load_funds (first-ever startup
+# seed, before any `_BN_FUNDS` row exists in app_settings) and dashboard.
+# reset_funds (the "Reset Funds" button) — both already read this via
+# cfg.BN_STARTING_FUNDS at call time, so making it dynamic needed no other
+# code change. Does NOT retroactively change an already-running balance —
+# same "new decisions only" contract every other dynamic setting has.
 
 # BN Options Pricing — synthetic Black-Scholes premium, no real option data
 BN_RISK_FREE_RATE      = 0.065
@@ -846,10 +853,15 @@ NF_WOBI_MIN_RATIO = 2.5
 # ₹target = win, premium down ₹stop = loss" needs no direction branching
 # (unlike the old index-points target/stop, which did). See
 # bn_entry_exit.evaluate_exit / nf_entry_exit.evaluate_exit.
-BN_SCALP_TARGET_RS   = 2.75   # user spec: ₹2.50–3.00 — midpoint
-BN_SCALP_STOP_RS     = 2.00
-NF_SCALP_TARGET_RS   = 2.75
-NF_SCALP_STOP_RS     = 2.00
+# DYNAMIC (2026-09-25, explicit user decision — Settings page target/stop
+# control) — see _DEFAULTS below / app/services/settings.py's "Scalp
+# Timing" group (joins BN_SCALP_TIME_STOP_S/NF_SCALP_TIME_STOP_S there,
+# same risk-parameter family). Frozen onto the trade at entry like every
+# other risk parameter (BNTrade/NFTrade.target_rs/stop_rs), so a live edit
+# never affects an already-open trade. Unlike TIME_STOP_S, these ARE
+# meaningful backtest per-run overrides (bt=True) — app/backtest/engine.py
+# actually simulates a target/stop touch (fills.resolve_premium_touch), so
+# there's no fidelity gap here the way there is for the 12s time-stop.
 
 # Hard time-stop (seconds) — if neither target nor stop is touched first,
 # force a scratch exit the instant this elapses. Checked every tick-loop
@@ -939,18 +951,38 @@ _DEFAULTS: Dict[str, Any] = {
     "BN_ALERT_CONSENSUS_REQUIRED": 4,   # of 6 leaders
     "NF_ALERT_CONSENSUS_REQUIRED": 8,   # of 12 leaders
 
-    # ── Scalp timing (2026-09-23, explicit user decision) — the two trading
-    # windows (shared by BOTH instruments, see bn_entry_exit._in_trading_
-    # window/nf_entry_exit._in_trading_window) and the per-instrument hard
-    # time-stop (seconds) on the 12-second execution lifecycle. Read live —
-    # windows gate new entries only; time-stop is frozen onto the trade at
-    # entry (BNTrade/NFTrade.time_stop_s), same as target_rs/stop_rs.
+    # ── Scalp timing + risk (2026-09-23/25, explicit user decisions) — the
+    # two trading windows (shared by BOTH instruments, see bn_entry_exit.
+    # _in_trading_window/nf_entry_exit._in_trading_window), the per-
+    # instrument hard time-stop (seconds) on the 12-second execution
+    # lifecycle, and (since 2026-09-25) the premium target/stop themselves.
+    # Read live — windows gate new entries only; time-stop/target/stop are
+    # all frozen onto the trade at entry (BNTrade/NFTrade.time_stop_s/
+    # target_rs/stop_rs).
     "SCALP_WINDOW1_START_HOUR": 9,  "SCALP_WINDOW1_START_MIN": 45,
     "SCALP_WINDOW1_END_HOUR":   11, "SCALP_WINDOW1_END_MIN":   15,
     "SCALP_WINDOW2_START_HOUR": 13, "SCALP_WINDOW2_START_MIN": 45,
     "SCALP_WINDOW2_END_HOUR":   14, "SCALP_WINDOW2_END_MIN":   45,
     "BN_SCALP_TIME_STOP_S": 12.0,
     "NF_SCALP_TIME_STOP_S": 12.0,
+    # Target/stop on the OPTION PREMIUM itself (₹), added to this group
+    # 2026-09-25 (explicit user decision — Settings page target/stop
+    # control): frozen onto the trade at entry same as time-stop above, and
+    # (unlike time-stop) a real, meaningful bt=True backtest override —
+    # see config.py's own comment on the now-removed static originals of
+    # these four keys for why.
+    "BN_SCALP_TARGET_RS": 2.75,
+    "BN_SCALP_STOP_RS":   2.00,
+    "NF_SCALP_TARGET_RS": 2.75,
+    "NF_SCALP_STOP_RS":   2.00,
+
+    # ── Paper account (2026-09-25, explicit user decision — Settings page
+    # capital control). Seeds st.funds on a genuinely first-ever startup
+    # (before any `_BN_FUNDS` row exists in app_settings — scheduler.
+    # _load_funds) and is what "Reset Funds" (dashboard.reset_funds)
+    # resets the live balance back to. Does NOT retroactively change an
+    # already-running balance's current value.
+    "BN_STARTING_FUNDS": 100_000.0,
 
     # ── Execution simulation (2026-09-24, explicit user decision) — realistic
     # order-placement lag. An algo-fired entry signal does not fill instantly

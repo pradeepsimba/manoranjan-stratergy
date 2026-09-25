@@ -318,8 +318,9 @@ def _pool_worker_init(bn_index: SymbolSeries, stocks: Dict[str, SymbolSeries],
         # unknown key, but the OLD mechanism this replaced (cfg.
         # thread_overrides, a plain thread-local dict merge with no
         # validation at all) silently ignored one instead, since a STATIC
-        # config key (e.g. BN_SCALP_TARGET_RS) is never even looked up
-        # through __getattr__ in the first place. `overrides` here should
+        # config key (e.g. BN_LOT_SIZE — BN_SCALP_TARGET_RS was this
+        # comment's example until it became dynamic 2026-09-25) is never
+        # even looked up through __getattr__ in the first place. `overrides` here should
         # already only ever contain validated dynamic SPEC keys — the real
         # caller path (dashboard.py's start_backtest) filters through
         # settings.expand_changes(bt_only=True) before this function is

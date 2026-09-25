@@ -138,6 +138,33 @@ SPEC: List[Dict[str, Any]] = [
     _s("NF_SCALP_TIME_STOP_S", "Nifty 50 time-stop (s)", "float", "Scalp Timing",
        min_=1, max_=60, step=0.5, bt=False,
        help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade. Live-only: has no effect on backtest, which always resolves on the next 5m bar regardless of this value (no sub-5-minute historical data exists to simulate the real time-stop)."),
+    # Added to this group 2026-09-25 (explicit user decision — target/stop
+    # control from Settings). bt=True (the default, no override needed) —
+    # unlike time-stop above, app/backtest/engine.py's _try_exit DOES
+    # actually simulate a target/stop touch against these two values
+    # (fills.resolve_premium_touch), so a per-run override here genuinely
+    # changes simulated results, not a silent no-op.
+    _s("BN_SCALP_TARGET_RS", "BankNifty target (₹)", "float", "Scalp Timing",
+       min_=0.25, max_=50, step=0.25,
+       help_="Exit profitably once the option premium rises this many rupees above the entry premium. Frozen at entry — a live edit never affects an already-open trade."),
+    _s("BN_SCALP_STOP_RS", "BankNifty stop-loss (₹)", "float", "Scalp Timing",
+       min_=0.25, max_=50, step=0.25,
+       help_="Exit at a loss once the option premium falls this many rupees below the entry premium. Frozen at entry — a live edit never affects an already-open trade."),
+    _s("NF_SCALP_TARGET_RS", "Nifty 50 target (₹)", "float", "Scalp Timing",
+       min_=0.25, max_=50, step=0.25,
+       help_="Exit profitably once the option premium rises this many rupees above the entry premium. Frozen at entry — a live edit never affects an already-open trade."),
+    _s("NF_SCALP_STOP_RS", "Nifty 50 stop-loss (₹)", "float", "Scalp Timing",
+       min_=0.25, max_=50, step=0.25,
+       help_="Exit at a loss once the option premium falls this many rupees below the entry premium. Frozen at entry — a live edit never affects an already-open trade."),
+
+    # ── Paper account (2026-09-25, explicit user decision — capital control
+    # from Settings). bt=False: backtest has no notion of a running account
+    # balance at all (app/backtest/metrics.py reports pure P&L/R-multiples,
+    # never a starting-capital-relative return), so there's nothing for a
+    # per-run override to actually change.
+    _s("BN_STARTING_FUNDS", "Starting paper capital (₹)", "float", "Paper Account",
+       min_=1000, max_=100_000_000, step=1000, bt=False,
+       help_="Seeds the paper account balance the very first time this app ever runs (before any trade history exists), and what the dashboard's \"Reset Funds\" button resets the live balance back to. Does not change an already-running balance's current value — only future seeds/resets."),
 
     # ── Execution simulation (2026-09-24, explicit user decision) — see
     # config.py's own comment on these same keys in _DEFAULTS. No "BN "/"NF "
@@ -167,7 +194,7 @@ SPEC: List[Dict[str, Any]] = [
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
-GROUP_ORDER = ["Scalp Timing", "Execution Delay", "BN Alerts", "NF Alerts"]
+GROUP_ORDER = ["Scalp Timing", "Paper Account", "Execution Delay", "BN Alerts", "NF Alerts"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.
