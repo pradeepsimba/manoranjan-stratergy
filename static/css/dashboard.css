@@ -1026,31 +1026,43 @@ a:focus-visible, button:focus-visible, input:focus-visible,
     grid-template-columns: minmax(300px, 380px) 1fr;
     align-items: start;
   }
-  /* Active Trade sidebar spans both rows of the right column's stack, and
+  /* Active Trade sidebar spans all 3 rows of the right column's stack, and
      sticks below the app bar while the (usually much taller) trade log /
-     candle tables scroll past it — the positions panel is exactly the kind
-     of content worth keeping in view while scanning the rest of the page. */
+     entry-loop / candle tables scroll past it — the positions panel is
+     exactly the kind of content worth keeping in view while scanning the
+     rest of the page. 4th .col added 2026-09-25 (Entry Loop Monitor
+     restoration, found in review — this was a bare 3-.col layout with no
+     nth-child(4) rule at all, so the new panel's un-styled auto-placement
+     shoved the much wider Stock Candles/Backtest column into this narrow
+     sidebar track instead of the intended 1fr one; span updated from 2 to 3
+     rows to match). */
   .main-grid > .col:nth-child(1) {
-    grid-column: 1; grid-row: 1 / span 2;
+    grid-column: 1; grid-row: 1 / span 3;
     position: sticky; top: 68px;
     max-height: calc(100vh - 80px);
     overflow-y: auto;
   }
   .main-grid > .col:nth-child(2) { grid-column: 2; grid-row: 1; }
   .main-grid > .col:nth-child(3) { grid-column: 2; grid-row: 2; }
+  .main-grid > .col:nth-child(4) { grid-column: 2; grid-row: 3; }
 }
 
 @media (min-width: 1500px) {
-  /* Enough width for all 3 columns side by side — undo the 860px
-     breakpoint's row-spanning/stacking placement back to plain DOM order. */
+  /* Enough width for the sidebar + a medium content column + the wide
+     Stock-Candles/Backtest column side by side. Today's Trades and Entry
+     Loop Monitor (both moderate-width diagnostic/log panels) stack inside
+     the medium column rather than each claiming a full column — updated
+     2026-09-25 alongside the 4th .col above; Stock Candles/Backtest keeps
+     its own dedicated wide column exactly as before. */
   .main-grid {
     grid-template-columns: minmax(300px, 380px) minmax(340px, 480px) 1fr;
     max-width: 2200px;
     margin: 0 auto;
   }
-  .main-grid > .col:nth-child(1) { grid-row: 1; }
+  .main-grid > .col:nth-child(1) { grid-row: 1 / span 2; }
   .main-grid > .col:nth-child(2) { grid-column: 2; grid-row: 1; }
-  .main-grid > .col:nth-child(3) { grid-column: 3; grid-row: 1; }
+  .main-grid > .col:nth-child(3) { grid-column: 2; grid-row: 2; }
+  .main-grid > .col:nth-child(4) { grid-column: 3; grid-row: 1; }
 }
 
 /* ── c.html UI-parity additions ──────────────────────────────────────────────

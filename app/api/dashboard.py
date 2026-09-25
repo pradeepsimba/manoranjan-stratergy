@@ -17,7 +17,7 @@ import app.services.settings as settings
 from app.auth import require_login
 from app.backtest.engine import run_backtest
 from app.backtest.signal_study import run_bn_leader_consensus_study
-from app.models import closed_tail_closes, iv_lookback_closes
+from app.models import PositionStatus, closed_tail_closes, iv_lookback_closes
 from app.services import bn_trade, nf_trade
 from app.services.historical_data import fetch_candles_for_date
 from app.services.settings import BN_FUNDS_KEY
@@ -156,6 +156,31 @@ async def manual_order(req: ManualOrderRequest) -> Dict[str, Any]:
     # running underneath them.
     if not await _sched._persist_new_position(trade, "BANKNIFTY", "BN manual"):
         st = get_state()
+        # trade.status == CLOSED check (found in review, 2026-09-25): the
+        # SAME await-yields-the-event-loop window the `is trade` guard below
+        # already accounts for also lets the concurrent tick loop
+        # (_tick_exits) fully OPEN *and* CLOSE this exact trade — via
+        # bn_trade._settle, which already applied its real P&L to
+        # st.funds/st.daily_pnl — before this retry loop gives up. That
+        # genuinely happened; it isn't "not placed." Treating it like the
+        # ordinary rollback below would decrement bn_trades_today for a
+        # trade that legitimately executed (letting the daily cap be
+        # exceeded) and tell the caller "rolled back" while real money had
+        # already moved. _persist_closed_exit (called from _tick_exits once
+        # it settles) is independently retrying the matching exit-side
+        # write, so surface this distinctly rather than silently falling
+        # through to the entry-rollback branch.
+        if trade.status == PositionStatus.CLOSED:
+            print(f"CRITICAL: BN manual order {trade.order_id} executed to "
+                  f"completion (entry+exit) before its entry could be "
+                  f"persisted — pnl already applied to funds, no positions "
+                  f"row exists for the entry.")
+            raise HTTPException(
+                500,
+                "Order executed and closed before it could be saved to the "
+                "database — funds were updated but no trade record exists. "
+                "Check server logs (CRITICAL) and reconcile manually."
+            )
         # `is trade`, not unconditional (2026-09-24, found in review):
         # _persist_new_position's retry loop awaits for up to ~0.8s (longer
         # if the DB hangs rather than errors quickly), yielding the event
@@ -227,10 +252,22 @@ async def manual_order_nf(req: ManualOrderRequest) -> Dict[str, Any]:
     except ValueError as e:
         raise HTTPException(400, str(e))
     # Retried + rolled-back-on-failure, with the `is trade` identity guard
-    # — see manual_order's identical fix above (2026-09-24, found in review)
-    # for the full rationale.
+    # and the trade.status==CLOSED branch — see manual_order's identical
+    # fix above (2026-09-24/2026-09-25, found in review) for the full
+    # rationale.
     if not await _sched._persist_new_position(trade, "NIFTY50", "NF manual"):
         st = get_state()
+        if trade.status == PositionStatus.CLOSED:
+            print(f"CRITICAL: NF manual order {trade.order_id} executed to "
+                  f"completion (entry+exit) before its entry could be "
+                  f"persisted — pnl already applied to funds, no positions "
+                  f"row exists for the entry.")
+            raise HTTPException(
+                500,
+                "Order executed and closed before it could be saved to the "
+                "database — funds were updated but no trade record exists. "
+                "Check server logs (CRITICAL) and reconcile manually."
+            )
         if st.active_trade_nf is trade:
             st.active_trade_nf = None
         st.nf_trades_today = max(0, st.nf_trades_today - 1)

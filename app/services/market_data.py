@@ -100,11 +100,33 @@ class MarketDataService:
         # it echoes "HDFC Bank" even though we subscribed with "HDFC BANK"),
         # so `ltp` must be keyed off this reverse map, never off the raw
         # echoed `stockname` text directly. Merged across BOTH instruments —
-        # the 6 stocks BN and NF share resolve to the same name either way.
+        # the 11 stocks BN and NF share (corrected from a stale "6", found in
+        # review 2026-09-25 — see CLAUDE.md's own "11 shared with BN") resolve
+        # to the same name either way (guard below).
         self._token_to_name = {
             **{token: name for name, token in cfg.BN_ALL_STOCKS.items()},
             **{token: name for name, token in cfg.NF_ALL_STOCKS.items()},
         }
+        # Guard against future universe drift (found in review, 2026-09-25):
+        # _build_filters below tie-breaks a token shared between
+        # BN_ALL_STOCKS/NF_ALL_STOCKS toward BN's name (the subscription
+        # filter's own stockname), while _token_to_name above tie-breaks
+        # toward NF's name (later dict-unpacking wins). Currently inert —
+        # every shared token's BN/NF display name is identical today — but
+        # if that ever drifts, live ticks for that stock would silently get
+        # keyed under a DIFFERENT name than what was actually subscribed,
+        # misrouting/losing its data with no error anywhere. Fail loudly at
+        # startup instead of letting that happen silently.
+        bn_rev = {token: name for name, token in cfg.BN_ALL_STOCKS.items()}
+        nf_rev = {token: name for name, token in cfg.NF_ALL_STOCKS.items()}
+        for token in set(bn_rev) & set(nf_rev):
+            assert bn_rev[token] == nf_rev[token], (
+                f"BN_ALL_STOCKS/NF_ALL_STOCKS disagree on the display name "
+                f"for shared token {token!r}: BN={bn_rev[token]!r} vs "
+                f"NF={nf_rev[token]!r} — _build_filters and _token_to_name "
+                f"tie-break this in opposite directions, so this WILL "
+                f"misroute live ticks for this stock."
+            )
 
     def start(self) -> None:
         self._running = True

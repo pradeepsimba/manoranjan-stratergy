@@ -41,8 +41,10 @@ _STRIKE_STEP = 50   # Nifty 50's real strike grid — NOT BankNifty's 100-point 
 
 
 def get_atm_strike(spot: float) -> int:
-    """Nearest 50-point Nifty 50 strike (NF's own grid — see module docstring)."""
-    return int(round(spot / _STRIKE_STEP) * _STRIKE_STEP)
+    """Nearest 50-point Nifty 50 strike (NF's own grid — see module docstring).
+    Round-half-up, not Python's banker's-rounding round() — see
+    bn_pricing.get_atm_strike's identical fix (found in review, 2026-09-25)."""
+    return int(math.floor(spot / _STRIKE_STEP + 0.5) * _STRIKE_STEP)
 
 
 def get_itm_strike(spot: float, option_type: str, offset: float) -> int:

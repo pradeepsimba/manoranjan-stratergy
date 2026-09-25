@@ -831,7 +831,7 @@ class SchedulerService:
         def _f(v) -> float:
             return float(v) if v is not None else 0.0
 
-        for r in rows:
+        def _apply_row(r) -> None:
             status = (PositionStatus(r["status"])
                       if r.get("status") in ("OPEN", "CLOSED") else PositionStatus.OPEN)
             is_nf = r.get("instrument") == "NIFTY50"
@@ -899,6 +899,23 @@ class SchedulerService:
                 else:
                     st.active_trade = trade
                     st.bn_trades_today += 1
+
+        # Per-row isolation (found in review, 2026-09-25): a single malformed
+        # row used to raise straight out of this whole method, leaving a
+        # PARTIAL restore (e.g. BN rows already applied, NF rows never
+        # reached) — and because the re-entry guard at both call sites checks
+        # st.closed_trades/st.closed_trades_nf non-empty to decide "already
+        # restored," a partial restore permanently blocks any further
+        # restore attempt for the rest of that session, silently leaving
+        # whichever instrument's rows came later in `rows` unrestored. One
+        # bad row (malformed strike/quantity/exit_price, the only fields not
+        # already defensively coerced above) now only skips ITSELF.
+        for r in rows:
+            try:
+                _apply_row(r)
+            except Exception as e:
+                print(f"Recovery: skipping malformed position row "
+                      f"order_id={r.get('order_id')!r}: {e}")
 
         print(
             f"=== RECOVERY: restored BN {'1 open' if st.active_trade else '0 open'}/"

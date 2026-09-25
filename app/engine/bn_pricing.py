@@ -33,8 +33,11 @@ _TRADING_DAYS_PER_YEAR = 252
 
 
 def get_atm_strike(spot: float) -> int:
-    """Nearest 100-point BankNifty strike."""
-    return int(round(spot / 100.0) * 100)
+    """Nearest 100-point BankNifty strike (round-half-up — NOT Python's
+    round(), which is banker's/round-half-to-even and would silently round
+    an exact x?50.0 spot DOWN to the lower strike half the time, e.g.
+    round(234.5)==234 not 235; found in review, 2026-09-25)."""
+    return int(math.floor(spot / 100.0 + 0.5) * 100)
 
 
 def get_itm_strike(spot: float, option_type: str, offset: float) -> int:

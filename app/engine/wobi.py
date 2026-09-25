@@ -28,11 +28,17 @@ market-microstructure intuition (order flow follows momentum), not a real
 observed order book, and since compute_wobi's pass/fail threshold only
 ever depends on this same magnitude-driven tilt, W-OBI functions as a
 second, independent check on CONVICTION STRENGTH layered on top of the
-basket-score gate, not a directional order-flow filter. A signal that only
-just barely clears BN_SCALP_SCORE_THRESHOLD/NF_SCALP_SCORE_THRESHOLD
-produces a tilt around ~1.5x, which alone does not clear
-BN_WOBI_MIN_RATIO/NF_WOBI_MIN_RATIO (2.5) — not a rubber stamp that always
-passes once the score fires.
+basket-score gate, not a directional order-flow filter. Note the ratio
+compute_wobi actually compares against BN_WOBI_MIN_RATIO/NF_WOBI_MIN_RATIO
+is approximately tilt^2, not tilt itself (found in review, 2026-09-25 — an
+earlier version of this docstring compared the two directly) —
+synthetic_depth sets bid_base = base*tilt and ask_base = base/tilt, so
+bid/ask ~= tilt^2 (jitter and the level-2 weighting don't change this to
+first order). A signal that only just barely clears
+BN_SCALP_SCORE_THRESHOLD/NF_SCALP_SCORE_THRESHOLD (0.08) produces
+tilt ~= 1.48, i.e. a W-OBI ratio ~= 2.19 — still short of
+BN_WOBI_MIN_RATIO/NF_WOBI_MIN_RATIO's default 2.5 — not a rubber stamp that
+always passes once the score fires.
 """
 
 import random
