@@ -906,7 +906,14 @@ NF_SCALP_COOLDOWN_S = 15.0
 # tick via _in_trading_window(now), so an edit takes effect immediately,
 # same as every other dynamic tunable (never frozen onto a trade — the
 # window only gates NEW entries, not an already-open trade's exit).
-SCALP_MAX_TRADES_PER_DAY = 5
+# SCALP_MAX_TRADES_PER_DAY moved into _DEFAULTS below, DYNAMIC as of
+# 2026-09-25 (explicit user decision — hit the "Max 5 trades/day reached"
+# rejection and wanted it Settings-adjustable). Also joins the "Scalp
+# Timing" group, and — like target/stop, unlike time-stop — a genuine
+# `bt: True` backtest override: evaluate_entry (the function backtest's
+# _try_entry calls directly) reads this same cfg value for its own
+# trades_today gate, so a per-run override really does change how many
+# trades a backtest day can take, not a silent no-op.
 
 # ── Dynamic tunables — hard defaults. Only BN/NF Alerts remain here (2026-
 # 09-09, explicit user decision "remove all except threshold") — everything
@@ -975,6 +982,11 @@ _DEFAULTS: Dict[str, Any] = {
     "BN_SCALP_STOP_RS":   2.00,
     "NF_SCALP_TARGET_RS": 2.75,
     "NF_SCALP_STOP_RS":   2.00,
+    # Shared (not per-instrument) daily trade cap, added to this group
+    # 2026-09-25 (explicit user decision). NOT frozen onto a trade — it
+    # gates whether a NEW trade can open, read live every check via
+    # risk_guardrails.max_trades_ok, same as the trading windows above.
+    "SCALP_MAX_TRADES_PER_DAY": 5,
 
     # ── Paper account (2026-09-25, explicit user decision — Settings page
     # capital control). Seeds st.funds on a genuinely first-ever startup

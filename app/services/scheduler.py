@@ -95,11 +95,16 @@ class SchedulerService:
         # settings are dynamic), so premarket/EOD must self-deduplicate by date.
         self._premarket_date: str | None = None
         self._eod_date:       str | None = None
-        # Live ATM CE/PE watchlist (2026-09-18) — last strike the watch was
-        # set to, so _tick_atm_watch only touches the WS subscription when
-        # the strike actually changes, not every tick.
-        self._bn_atm_watch_strike: int | None = None
-        self._nf_atm_watch_strike: int | None = None
+        # Live ATM CE/PE watchlist (2026-09-18) — last (ce, pe) symbol pair
+        # the watch was set to, so _tick_atm_watch only touches the WS
+        # subscription when the built symbols actually change, not every
+        # tick. Keyed on the SYMBOL PAIR, not just the strike (2026-09-25,
+        # found in review — see _tick_atm_watch's docstring): a strike-only
+        # key could miss a format-only change (nf_pricing.
+        # build_weekly_option_symbol's weekly-vs-monthly-style format flips
+        # at the Tuesday-15:30-IST expiry rollover independent of strike).
+        self._bn_atm_watch_symbols: tuple[str, str] | None = None
+        self._nf_atm_watch_symbols: tuple[str, str] | None = None
         # Resubscribe-rate debounce (2026-09-24, found in review) — the
         # engine became tick-DRIVEN that same day (see _run_active_phase),
         # which can call _tick_atm_watch far more often than the old fixed
@@ -744,45 +749,58 @@ class SchedulerService:
         a continuous real-LTP subscription for whatever the CURRENT at-the-
         money strike is, separate from bn_trade.py/nf_trade.py's per-active-
         trade option subscription (that one is FROZEN at entry; this one
-        tracks the live, moving spot). Recomputing the ATM strike itself is
-        cheap (no Black-Scholes — just round(spot/100)*100), so this runs
-        every pass of the tick-driven engine; the WS subscription is only
-        touched when the strike actually changes (comparing against the
-        last-set value), since a reconnect is what changing it costs (see
-        market_data.py's set_bn_atm_watch/set_nf_atm_watch) — AND at most
-        once per _ATM_WATCH_MIN_RESUB_S (2026-09-24, found in review): the
-        engine became tick-driven that same day, so this can now be called
-        far more often than the old fixed-100ms timer ever allowed. Without
-        this floor, spot sitting exactly at a strike boundary during a
-        burst of real ticks could flip strike->strike->strike and
-        reconnect the option WS connection many times a second. A skipped
-        change here is NOT lost — self._bn_atm_watch_strike is only updated
-        once the resubscribe actually happens, so the very next call still
-        sees `strike != self._bn_atm_watch_strike` and retries once the
-        debounce window passes; a real, sustained move still gets picked
-        up promptly, only pure oscillation-driven churn is capped.
+        tracks the live, moving spot). Recomputing the ATM strike + building
+        the option symbols is cheap (no Black-Scholes — just
+        round(spot/100)*100 plus a couple of pure string-format calls), so
+        this runs every pass of the tick-driven engine; the WS subscription
+        is only touched when the built (ce, pe) SYMBOL PAIR actually changes
+        (see market_data.py's set_bn_atm_watch/set_nf_atm_watch), since a
+        reconnect is what changing it costs — AND at most once per
+        TICK_EVAL_INTERVAL_MS (2026-09-24, found in review): the engine
+        became tick-driven that same day, so this can now be called far more
+        often than the old fixed-100ms timer ever allowed. Without this
+        floor, spot sitting exactly at a strike boundary during a burst of
+        real ticks could reconnect the option WS connection many times a
+        second. A skipped change here is NOT lost — self._bn_atm_watch_
+        symbols is only updated once the resubscribe actually happens, so
+        the very next call still sees the mismatch and retries once the
+        debounce window passes; a real, sustained move still gets picked up
+        promptly, only pure oscillation-driven churn is capped.
+
+        Keyed on the SYMBOL PAIR, not the strike alone (2026-09-25, found in
+        review) — nf_pricing.build_weekly_option_symbol's format can change
+        (weekly numeric-date vs. monthly-style, see its own docstring) at
+        the Tuesday-15:30-IST expiry rollover WITHOUT the numeric ATM strike
+        necessarily changing at all. Keying only on strike would then leave
+        a stale, wrong-format symbol subscribed indefinitely with nothing to
+        trigger a resubscribe. This can't currently manifest — _run_eod
+        resets this same tracking to None every day at exactly 15:30 IST,
+        the only moment the format can flip, forcing a fresh recompute on
+        the next trading day's first tick regardless — but relying on that
+        coincidence was fragile against any future change to the EOD-reset
+        timing; comparing the actual symbols is correct on its own terms.
         """
         st = get_state()
         now = _now()
         if st.bn_index_ltp > 0:
             strike = get_atm_strike(st.bn_index_ltp)
-            if strike != self._bn_atm_watch_strike and self._atm_resub_ok(
+            expiry = bn_get_next_expiry(now)
+            ce = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "CE")
+            pe = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "PE")
+            if (ce, pe) != self._bn_atm_watch_symbols and self._atm_resub_ok(
                     now, self._bn_atm_watch_last_resub_at):
-                self._bn_atm_watch_strike = strike
+                self._bn_atm_watch_symbols = (ce, pe)
                 self._bn_atm_watch_last_resub_at = now
-                expiry = bn_get_next_expiry(now)
-                ce = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "CE")
-                pe = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "PE")
                 self._mkt.set_bn_atm_watch(ce, pe, strike=strike)
         if st.nf_index_ltp > 0:
             strike = nf_get_atm_strike(st.nf_index_ltp)
-            if strike != self._nf_atm_watch_strike and self._atm_resub_ok(
+            expiry = nf_get_next_expiry(now)
+            ce = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "CE")
+            pe = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "PE")
+            if (ce, pe) != self._nf_atm_watch_symbols and self._atm_resub_ok(
                     now, self._nf_atm_watch_last_resub_at):
-                self._nf_atm_watch_strike = strike
+                self._nf_atm_watch_symbols = (ce, pe)
                 self._nf_atm_watch_last_resub_at = now
-                expiry = nf_get_next_expiry(now)
-                ce = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "CE")
-                pe = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "PE")
                 self._mkt.set_nf_atm_watch(ce, pe, strike=strike)
 
     async def _restore_from_db(self) -> None:
@@ -921,8 +939,8 @@ class SchedulerService:
         # naturally resume tomorrow on the first live tick that moves it.
         self._mkt.set_bn_atm_watch(None, None)
         self._mkt.set_nf_atm_watch(None, None)
-        self._bn_atm_watch_strike = None
-        self._nf_atm_watch_strike = None
+        self._bn_atm_watch_symbols = None
+        self._nf_atm_watch_symbols = None
         self._bn_atm_watch_last_resub_at = None
         self._nf_atm_watch_last_resub_at = None
 
@@ -1476,7 +1494,10 @@ class SchedulerService:
         # pairing the NEW strike's symbols with the PREVIOUS strike's
         # stale (pre-reset) LTP for one payload push. The strike itself is
         # read from st.bn_atm_watch_strike/nf_atm_watch_strike here — NOT
-        # self._bn_atm_watch_strike/_nf_atm_watch_strike (those are the
+        # self._bn_atm_watch_symbols/_nf_atm_watch_symbols (renamed
+        # 2026-09-25 from _bn_atm_watch_strike/_nf_atm_watch_strike, now
+        # keyed on the built symbol pair instead of the bare strike — see
+        # _tick_atm_watch's docstring; still the
         # SchedulerService-local, unlocked change-detection cache used only
         # by _tick_atm_watch on the event loop) — because that unlocked
         # instance attribute is what let this exact same executor thread

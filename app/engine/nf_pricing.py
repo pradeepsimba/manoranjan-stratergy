@@ -35,6 +35,7 @@ from app.engine.bn_pricing import (  # noqa: F401 — re-exported for nf_entry_e
     normal_cdf,
     time_to_expiry_years,
 )
+from app.engine.bn_pricing import _last_tuesday_of_month  # reused, not re-exported — see build_weekly_option_symbol
 
 _STRIKE_STEP = 50   # Nifty 50's real strike grid — NOT BankNifty's 100-point one (see module docstring)
 
@@ -64,19 +65,48 @@ _WEEKLY_MONTH_CODE = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
                       7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"}
 
 
+def _is_last_tuesday_of_month(expiry: datetime) -> bool:
+    return expiry.date() == _last_tuesday_of_month(expiry.year, expiry.month).date()
+
+
 def build_weekly_option_symbol(underlying: str, expiry: datetime, strike: int, option_type: str) -> str:
     """
-    Real vendor WEEKLY option-instrument symbol, e.g. "NIFTY2692223250PE" —
-    UNDERLYING + 2-digit year + single-char month code (see
-    _WEEKLY_MONTH_CODE) + 2-digit day + strike + CE/PE. Used for Nifty 50,
-    which still has weekly expiry (moved from Thursday to Tuesday — see
-    get_next_expiry below). Confirmed 2026-09-19 against a real user-
-    supplied example symbol — unlike bn_pricing.build_monthly_option_symbol,
-    which remains unconfirmed against the live feed for a current contract.
-    Originally built for the now-removed (2026-09-22) real-option-LTP
-    paper-trading feature; now feeds the live ATM CE/PE watchlist instead
-    (live only, never called from backtest).
+    Real vendor option-instrument symbol for a Nifty 50 expiry. Two
+    different real formats exist depending on whether `expiry` is an
+    ORDINARY weekly Tuesday or the LAST Tuesday of its month:
+
+    - Ordinary week: WEEKLY format, e.g. "NIFTY2692223250PE" — UNDERLYING +
+      2-digit year + single-char month code (see _WEEKLY_MONTH_CODE) +
+      2-digit day + strike + CE/PE. Confirmed 2026-09-19 against a real
+      user-supplied example symbol.
+    - Last Tuesday of the month: MONTHLY-STYLE format, e.g.
+      "NIFTY26SEP23100CE" — UNDERLYING + 2-digit year + 3-letter month +
+      strike + CE/PE (bn_pricing.build_monthly_option_symbol's own format,
+      reused via _last_tuesday_of_month) — even though this IS still a
+      weekly Tuesday expiry under NSE's 2025-09-01 convention (see
+      get_next_expiry below), the vendor evidently labels the contract that
+      also happens to be the month's last expiry using the monthly-style
+      symbol, not the compact weekly numeric-date one.
+
+    **Fixed 2026-09-25, found in review** (a real user-reported "waiting for
+    live tick" dashboard screenshot, confirmed against the live vendor REST
+    endpoint before changing anything): this function used to always build
+    the weekly-numeric-date format unconditionally, which returns ZERO
+    candles for any month-end expiry week — the live ATM CE/PE watchlist's
+    Nifty panel sat on "waiting for live tick" for the ENTIRE final week of
+    every month, not intermittently. This was wrongly diagnosed 2026-09-23
+    as "the vendor hasn't populated this week's series yet" (that gotcha
+    note is now corrected) — the real cause was requesting a symbol that
+    was never going to exist under either format. Confirmed live via direct
+    REST query: "NIFTY26SEP23100CE"/"PE" (the correct format for the
+    2026-09-29 expiry, which IS September's last Tuesday) returned 152 real
+    1m candles; "NIFTY2692923100CE"/"PE" (the old weekly-format symbol for
+    the exact same expiry/strike) returned zero, queried the identical way.
+    Only affects Nifty 50 — BankNifty has no equivalent ambiguity since it
+    only ever has the one (monthly) contract type.
     """
+    if _is_last_tuesday_of_month(expiry):
+        return f"{underlying}{expiry.strftime('%y%b').upper()}{strike}{option_type}"
     month_code = _WEEKLY_MONTH_CODE[expiry.month]
     return f"{underlying}{expiry.strftime('%y')}{month_code}{expiry.strftime('%d')}{strike}{option_type}"
 

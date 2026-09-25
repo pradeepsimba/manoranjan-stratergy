@@ -156,6 +156,15 @@ SPEC: List[Dict[str, Any]] = [
     _s("NF_SCALP_STOP_RS", "Nifty 50 stop-loss (₹)", "float", "Scalp Timing",
        min_=0.25, max_=50, step=0.25,
        help_="Exit at a loss once the option premium falls this many rupees below the entry premium. Frozen at entry — a live edit never affects an already-open trade."),
+    # Added to this group 2026-09-25 (explicit user decision — hit the "Max
+    # 5 trades/day reached" rejection and wanted it Settings-adjustable).
+    # bt=True (default) — evaluate_entry (the function backtest's
+    # _try_entry calls directly) reads this same value for its own
+    # trades_today gate, so a per-run override genuinely changes how many
+    # trades a backtest day can take.
+    _s("SCALP_MAX_TRADES_PER_DAY", "Max trades per day (shared)", "int", "Scalp Timing",
+       min_=1, max_=200,
+       help_="Hard cap on total executed trades per day, shared across BOTH BankNifty and Nifty 50 combined (not a separate limit per instrument). Checked live before every new entry — not frozen onto a trade."),
 
     # ── Paper account (2026-09-25, explicit user decision — capital control
     # from Settings). bt=False: backtest has no notion of a running account
