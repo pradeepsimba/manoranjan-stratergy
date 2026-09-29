@@ -897,6 +897,7 @@ class SchedulerService:
                 wobi_at_entry=_f(r.get("wobi_at_entry")),
                 top2_names_at_entry=_parse_top2_names(r.get("top2_names")),
                 entry_window=str(r.get("entry_window") or ""),
+                day_candle_color_at_entry=str(r.get("day_candle_color") or ""),
             )
             if status == PositionStatus.CLOSED:
                 st.daily_pnl += trade.pnl   # shared account — every closed trade nets into the one daily_pnl

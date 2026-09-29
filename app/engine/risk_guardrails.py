@@ -43,6 +43,36 @@ def max_trades_ok(trades_today: int) -> bool:
     return trades_today < cfg.SCALP_MAX_TRADES_PER_DAY
 
 
+def day_candle_color(candles: list, current_price: float, today: str) -> str:
+    """
+    "GREEN"/"RED"/"FLAT" — today's day candle SO FAR for one instrument:
+    today's first 5m bar's open vs `current_price` (the trade's own entry
+    index price). "" if no bar for `today` exists yet in `candles` (e.g.
+    right at WAIT_ZONE before the first candle has printed).
+
+    Deliberately NOT threaded through evaluate_entry/BNSignal like
+    basket_score/wobi/top2_names — this is a pure diagnostic snapshot that
+    plays no part in the trading decision, so it's computed at the CALLER
+    level (bn_trade.py/nf_trade.py's place_paper_order, which already has
+    direct AppState access to the full multi-day candle buffer) rather than
+    widening evaluate_entry's own signature, matching CLAUDE.md's "do it at
+    the caller level, never by branching inside the shared functions" rule.
+    `candles` is expected to be the FULL buffer (st.bn_index_candles_5m/
+    nf_index_candles_5m, which persists across days), not a recent-tail
+    slice — evaluate_entry's own bn_recent_candles (last 5 bars only) is
+    NOT sufficient once the day is more than 5 bars old.
+    """
+    todays = [c for c in candles if c.start_time[:10] == today]
+    if not todays:
+        return ""
+    day_open = todays[0].open
+    if current_price > day_open:
+        return "GREEN"
+    if current_price < day_open:
+        return "RED"
+    return "FLAT"
+
+
 def which_window(now: datetime) -> str:
     """
     Which of the two configured scalp windows `now` actually falls inside —

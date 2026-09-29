@@ -200,6 +200,11 @@ class BNTrade:
     # happen for a real entry).
     top2_names_at_entry: Tuple[str, str] = ("", "")
     entry_window:        str             = ""
+    # Today's day-candle color at entry (2026-09-29, explicit user
+    # decision) — "GREEN"/"RED"/"FLAT", computed at the caller level (see
+    # risk_guardrails.day_candle_color) from BankNifty's own day-open vs
+    # entry_index_price, not part of the trading decision itself.
+    day_candle_color_at_entry: str = ""
     # cfg.BN_LOT_SIZE, not a hardcoded 30 (2026-09-24, found in review) —
     # was a duplicated magic number; harmless today since open_trade_from_
     # signal is the sole trade-construction path and always passes
@@ -333,6 +338,7 @@ class NFTrade:
     wobi_at_entry:         float = 0.0
     top2_names_at_entry: Tuple[str, str] = ("", "")   # NF mirror of BNTrade's fields above
     entry_window:        str             = ""
+    day_candle_color_at_entry: str = ""   # NF mirror of BNTrade's field above (own Nifty 50 day candle)
     lot_size:     int             = cfg.NF_LOT_SIZE   # see BNTrade's identical comment above
     order_id:     str             = ""
     sl_stage:     str             = "Initial"

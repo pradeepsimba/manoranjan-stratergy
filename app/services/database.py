@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS positions (
     wobi_at_entry         NUMERIC(10,4),
     top2_names            TEXT,          -- "NAME1, NAME2" — see save_position
     entry_window          VARCHAR(10),   -- "WINDOW1" | "WINDOW2"
+    -- "GREEN"/"RED"/"FLAT" — that trade's OWN instrument's day candle so
+    -- far at entry (2026-09-29, explicit user decision). See
+    -- risk_guardrails.day_candle_color.
+    day_candle_color      VARCHAR(10),
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -221,6 +225,7 @@ ALTER TABLE positions ADD COLUMN IF NOT EXISTS basket_score_at_entry NUMERIC(10,
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS wobi_at_entry         NUMERIC(10,4);
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS top2_names            TEXT;
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_window          VARCHAR(10);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS day_candle_color      VARCHAR(10);
 """
 
 
@@ -267,9 +272,10 @@ class DatabaseService:
                      stop_loss, target, sl_offset, target_offset, order_id,
                      status, direction, strike, option_type, expiry,
                      entry_premium, iv_used, instrument,
-                     basket_score_at_entry, wobi_at_entry, top2_names, entry_window)
+                     basket_score_at_entry, wobi_at_entry, top2_names, entry_window,
+                     day_candle_color)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-                        $19,$20,$21,$22)
+                        $19,$20,$21,$22,$23)
                 """,
                 symbol, token,
                 trade.entry_index_price, trade.entry_time, trade.lot_size,
@@ -289,6 +295,7 @@ class DatabaseService:
                 trade.entry_premium, iv_used, instrument,
                 trade.basket_score_at_entry, trade.wobi_at_entry,
                 top2_names_str, trade.entry_window,
+                trade.day_candle_color_at_entry,
             )
 
     async def update_position_exit(self, order_id: str, exit_price: float,

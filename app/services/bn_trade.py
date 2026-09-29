@@ -26,6 +26,7 @@ from app.engine.bn_entry_exit import (
     resolve_delayed_exit_premium,
 )
 from app.engine.bn_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
+from app.engine.risk_guardrails import day_candle_color as _day_candle_color
 from app.engine.risk_guardrails import trading_window_description as _trading_window_description
 from app.models import BNSignal, BNTrade, PendingBNEntry, PositionStatus, TradingPhase, closed_tail_closes, iv_lookback_closes
 from app.state import get_state
@@ -53,6 +54,10 @@ def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
 
     order_id = f"BN-{now.strftime('%H%M%S')}-{next(_order_seq)}"
     trade = open_trade_from_signal(signal, now, order_id)
+    with st._bn_index_lock:
+        bn_candles_for_color = list(st.bn_index_candles_5m)
+    trade.day_candle_color_at_entry = _day_candle_color(
+        bn_candles_for_color, trade.entry_index_price, now.strftime("%Y-%m-%d"))
 
     st.active_trade = trade
     st.bn_trades_today += 1
