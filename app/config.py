@@ -602,13 +602,19 @@ MAX_CONCURRENT_BACKTEST_RUNS = 1
 BACKTEST_WARMUP_DAYS = 7     # days of pre-range history loaded so indicators have converged by from_date
 SLIPPAGE_BPS         = 2.0   # applied to the option premium fill
 
-# ── Static: session timings (IST) — SCAN_START/CUTOFF reproduce c.html's
+# ── Static: session timings (IST) — CUTOFF/SESSION_END reproduce c.html's
 # real 09:30-15:00 trading window using the existing phase-driver machinery.
 # Moved out of the dynamic Settings-page tunables 2026-09-09 (explicit user
 # decision, "remove all except threshold") — restart-only to change now.
+# SCAN_START_HOUR/MIN is the one exception — moved BACK OUT of this static
+# block into _DEFAULTS/dynamic (2026-09-29, explicit user decision —
+# real-world confusion: a "Trading window 1 start" set earlier than this
+# value silently had no effect until this one caught up, since WAIT_ZONE
+# can't become ACTIVE before it, and this was the one session-timing value
+# with no Settings-page control at all). See _DEFAULTS's "Scalp Timing"
+# block below for its current default/SPEC entry — it no longer lives here.
 PREMARKET_HOUR,   PREMARKET_MIN   = 9,  0
 MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 9,  15   # historical load + WS subscribe
-SCAN_START_HOUR,  SCAN_START_MIN  = 9,  30   # entries allowed from here
 CUTOFF_HOUR,      CUTOFF_MIN      = 15, 0    # no new entries after this
 SESSION_END_HOUR, SESSION_END_MIN = 15, 30   # terminate session
 
@@ -966,6 +972,15 @@ _DEFAULTS: Dict[str, Any] = {
     # Read live — windows gate new entries only; time-stop/target/stop are
     # all frozen onto the trade at entry (BNTrade/NFTrade.time_stop_s/
     # target_rs/stop_rs).
+    # SCAN_START (2026-09-29, explicit user decision) — the WAIT_ZONE->ACTIVE
+    # phase-driver transition itself, previously static/restart-only (see
+    # its own comment near the now-removed static declaration above). Not a
+    # trading window like SCALP_WINDOW1/2 below — this gates the WHOLE
+    # session going active at all, so a value at or past CUTOFF_HOUR/MIN
+    # (still static) would mean the session never leaves WAIT_ZONE before
+    # jumping straight to CUTOFF — validated against that in settings.py's
+    # validate_scalp_windows.
+    "SCAN_START_HOUR": 9, "SCAN_START_MIN": 30,
     "SCALP_WINDOW1_START_HOUR": 9,  "SCALP_WINDOW1_START_MIN": 45,
     "SCALP_WINDOW1_END_HOUR":   11, "SCALP_WINDOW1_END_MIN":   15,
     "SCALP_WINDOW2_START_HOUR": 13, "SCALP_WINDOW2_START_MIN": 45,

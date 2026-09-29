@@ -113,6 +113,18 @@ SPEC: List[Dict[str, Any]] = [
     # genuinely shared by both instruments; the two time-stop entries below
     # are per-instrument but small enough to keep in the same group rather
     # than splitting it in two for just one setting each.
+    # Added 2026-09-29 (explicit user decision — real confusion: setting
+    # "Trading window 1 start" earlier than this had no effect, since the
+    # session couldn't go ACTIVE that early anyway, and this value had NO
+    # Settings-page control at all before now). Distinct from the two
+    # trading windows below — this is the WHOLE-SESSION WAIT_ZONE->ACTIVE
+    # transition, not a sub-window within an already-active session. bt=True:
+    # app/backtest/engine.py's _simulate_day_impl reads this same value for
+    # its own scan_start, so a per-run override genuinely changes which bars
+    # a backtest day considers eligible for entry.
+    _s("SCAN_START", "Session goes ACTIVE from", "time", "Scalp Timing",
+       parts=("SCAN_START_HOUR", "SCAN_START_MIN"),
+       help_="The session (both instruments) can't take its first entry before this time — WAIT_ZONE holds until then. Must be earlier than the (static) 15:00 cutoff, or the session would never go active at all."),
     _s("SCALP_WINDOW1_START", "Trading window 1 — start", "time", "Scalp Timing",
        parts=("SCALP_WINDOW1_START_HOUR", "SCALP_WINDOW1_START_MIN"),
        help_="No new entries (either instrument) before this time. Checked live every tick."),
@@ -338,7 +350,29 @@ _SCALP_TIMING_ATTRS = [k for s in SPEC if s["group"] == "Scalp Timing" for k in 
 
 
 def validate_scalp_windows(effective: Dict[str, Any]) -> None:
-    """`effective` must have all 8 SCALP_WINDOW*_HOUR/MIN attrs (already-coerced ints)."""
+    """
+    `effective` must have all 8 SCALP_WINDOW*_HOUR/MIN attrs (already-coerced
+    ints), plus (since 2026-09-29) SCAN_START_HOUR/MIN.
+
+    Despite the name, this also guards SCAN_START against the STATIC
+    CUTOFF_HOUR/MIN (not itself a dynamic key, so read directly off cfg
+    rather than from `effective`) — a SCAN_START at or past cutoff would
+    mean the session jumps straight from WAIT_ZONE to CUTOFF and never goes
+    ACTIVE at all, the same class of "passes per-key validation but
+    silently breaks the whole day" bug the window-ordering check below
+    exists for. Kept in this one function (not split out) so every one of
+    its 4 call sites (load_and_apply, apply_and_persist, reset, the
+    backtest-overrides endpoint in dashboard.py) gets the new check for
+    free, with no call site needing to know it now also covers SCAN_START.
+    """
+    scan_start_m = effective["SCAN_START_HOUR"] * 60 + effective["SCAN_START_MIN"]
+    cutoff_m = cfg.CUTOFF_HOUR * 60 + cfg.CUTOFF_MIN
+    if scan_start_m >= cutoff_m:
+        raise ValueError(
+            f"Session goes ACTIVE from: must be earlier than the "
+            f"{cfg.CUTOFF_HOUR:02d}:{cfg.CUTOFF_MIN:02d} cutoff, or the "
+            f"session would never go active"
+        )
     for sh, sm, eh, em, label in _WINDOWS:
         if effective[sh] * 60 + effective[sm] >= effective[eh] * 60 + effective[em]:
             raise ValueError(f"{label}: start time must be before end time")
