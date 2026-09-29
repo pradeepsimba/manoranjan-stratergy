@@ -37,22 +37,26 @@ CREATE TABLE IF NOT EXISTS positions (
     pnl             NUMERIC(10,2)  DEFAULT 0,
     -- rsi/macd_line/adx/plus_di/minus_di/vwap/candle_pattern/daily_green/
     -- hourly_green: leftover equity-indicator columns from before this app
-    -- became the options strategy — save_position() below never writes any
-    -- of them (confirmed 2026-09-22: grepping every INSERT/UPDATE against
-    -- this table shows none of these 9 names). NOT dropped here — an actual
-    -- DROP COLUMN is a real, hard-to-reverse schema change against a live
-    -- database this app doesn't control the only copy of; flagging instead
-    -- of doing it unprompted. Safe to drop in a real migration once you've
-    -- confirmed nothing else reads them.
-    rsi             NUMERIC(6,2),
-    macd_line       NUMERIC(10,4),
-    adx             NUMERIC(6,2),
-    plus_di         NUMERIC(6,2),
-    minus_di        NUMERIC(6,2),
-    vwap            NUMERIC(10,2),
-    candle_pattern  VARCHAR(50),
-    daily_green     BOOLEAN,
-    hourly_green    BOOLEAN,
+    -- became the options strategy, confirmed NEVER written by any INSERT/
+    -- UPDATE against this table — DROPPED 2026-09-29 (explicit user
+    -- request), not just left flagged this time: independently re-verified
+    -- against the live database before dropping (all 9 columns had
+    -- count()=0 — genuinely NULL in every one of 200 existing rows, zero
+    -- real data to lose). See the ALTER TABLE ... DROP COLUMN statements
+    -- near the end of this schema for the live-table migration; this
+    -- CREATE TABLE definition simply no longer declares them for a fresh
+    -- database.
+    -- Entry-decision snapshot (2026-09-29, explicit user request) —
+    -- basket_score_at_entry/wobi_at_entry already existed in memory on
+    -- BNTrade/NFTrade but were never actually saved anywhere before this;
+    -- top2_names/entry_window are new fields added specifically to be
+    -- recorded here. None of these feed back into any trading decision —
+    -- purely a permanent record of what fired the trade, for the dashboard/
+    -- trade log/later analysis.
+    basket_score_at_entry NUMERIC(10,4),
+    wobi_at_entry         NUMERIC(10,4),
+    top2_names            TEXT,          -- "NAME1, NAME2" — see save_position
+    entry_window          VARCHAR(10),   -- "WINDOW1" | "WINDOW2"
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -195,6 +199,28 @@ CREATE TABLE IF NOT EXISTS nf_index_bars (
 ALTER TABLE daily_stats ADD COLUMN IF NOT EXISTS instrument VARCHAR(20) NOT NULL DEFAULT 'BANKNIFTY';
 ALTER TABLE daily_stats DROP CONSTRAINT IF EXISTS daily_stats_stat_date_key;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_daily_stats_date_instrument ON daily_stats(stat_date, instrument);
+
+-- Drop the 9 dead equity-indicator columns from positions (2026-09-29,
+-- explicit user request — see the removed CREATE TABLE columns' own
+-- comment above for the full history/verification). IF EXISTS makes this
+-- idempotent across repeated startups and safe against a fresh DB that
+-- never had them in the first place (this ALTER simply no-ops there).
+ALTER TABLE positions DROP COLUMN IF EXISTS rsi;
+ALTER TABLE positions DROP COLUMN IF EXISTS macd_line;
+ALTER TABLE positions DROP COLUMN IF EXISTS adx;
+ALTER TABLE positions DROP COLUMN IF EXISTS plus_di;
+ALTER TABLE positions DROP COLUMN IF EXISTS minus_di;
+ALTER TABLE positions DROP COLUMN IF EXISTS vwap;
+ALTER TABLE positions DROP COLUMN IF EXISTS candle_pattern;
+ALTER TABLE positions DROP COLUMN IF EXISTS daily_green;
+ALTER TABLE positions DROP COLUMN IF EXISTS hourly_green;
+
+-- Entry-decision snapshot (2026-09-29, explicit user request) — see the
+-- CREATE TABLE columns' own comment above for the full rationale.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS basket_score_at_entry NUMERIC(10,4);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS wobi_at_entry         NUMERIC(10,4);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS top2_names            TEXT;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_window          VARCHAR(10);
 """
 
 
@@ -227,6 +253,12 @@ class DatabaseService:
         # evaluate_exit or live P&L.
         target_offset = abs(trade.target - trade.entry_premium)
         iv_used = trade.entry_signal.iv_used if trade.entry_signal else None
+        # "NAME1, NAME2" — joined here at the persistence boundary; the
+        # dataclass field itself stays a real Tuple[str, str] everywhere
+        # else (see BNSignal.top2_names's comment). Empty names (a manual
+        # order's signal never sets this — see open_trade_from_signal's own
+        # comment) join down to an empty string, not "", "".
+        top2_names_str = ", ".join(n for n in trade.top2_names_at_entry if n)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
@@ -234,8 +266,10 @@ class DatabaseService:
                     (symbol, token, entry_price, entry_time, quantity,
                      stop_loss, target, sl_offset, target_offset, order_id,
                      status, direction, strike, option_type, expiry,
-                     entry_premium, iv_used, instrument)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                     entry_premium, iv_used, instrument,
+                     basket_score_at_entry, wobi_at_entry, top2_names, entry_window)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                        $19,$20,$21,$22)
                 """,
                 symbol, token,
                 trade.entry_index_price, trade.entry_time, trade.lot_size,
@@ -253,6 +287,8 @@ class DatabaseService:
                 trade.order_id, trade.status.value, trade.direction,
                 trade.strike, trade.option_type, trade.expiry,
                 trade.entry_premium, iv_used, instrument,
+                trade.basket_score_at_entry, trade.wobi_at_entry,
+                top2_names_str, trade.entry_window,
             )
 
     async def update_position_exit(self, order_id: str, exit_price: float,

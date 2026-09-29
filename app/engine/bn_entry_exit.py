@@ -46,6 +46,7 @@ from app.engine.bn_pricing import (
 from app.engine.risk_guardrails import in_trading_window as _in_trading_window
 from app.engine.risk_guardrails import max_trades_ok as _max_trades_ok
 from app.engine.risk_guardrails import trading_window_description as _trading_window_description
+from app.engine.risk_guardrails import which_window as _which_window
 from app.engine.scalp_signals import compute_basket_reading
 from app.engine.wobi import compute_wobi, synthetic_depth
 from app.models import BNDiagnostic, BNSignal, BNTrade, Candle, PositionStatus
@@ -239,6 +240,7 @@ def evaluate_entry(
                 iv_used=itm_iv,
                 basket_score=reading.score,
                 wobi=wobi_value,
+                top2_names=reading.top2_names,
             )
         else:
             no_trade_reason = f"W-OBI {wobi_value:.2f} ≤ {cfg.BN_WOBI_MIN_RATIO} (path not clear)"
@@ -410,6 +412,8 @@ def open_trade_from_signal(signal: BNSignal, now: datetime, order_id: str = "") 
         scratch_slippage_rs=scratch_slippage_rs,
         basket_score_at_entry=signal.basket_score,
         wobi_at_entry=signal.wobi,
+        top2_names_at_entry=signal.top2_names,
+        entry_window=_which_window(now),
         lot_size=cfg.BN_LOT_SIZE,
         order_id=order_id,
         confidence=signal.confidence,

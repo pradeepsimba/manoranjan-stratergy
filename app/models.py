@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -133,6 +133,13 @@ class BNSignal:
     iv_used:           float          # realized-vol estimate used for the premium
     basket_score:      float = 0.0    # Top-8 weighted-basket composite score that fired this signal
     wobi:              float = 0.0    # W-OBI value that cleared the execution filter
+    # The 2 heaviest-weighted basket legs that confirmed the signal's
+    # direction (top2_direction_ok) — added 2026-09-29, explicit user
+    # decision, so a trade can record WHICH stocks confirmed it, not just
+    # that some pair did. Carries over unchanged through fill_delayed_entry's
+    # replace() (same as direction/strike/expiry — it was part of the
+    # DECISION, not the later fill repricing).
+    top2_names:        Tuple[str, str] = ("", "")
 
 
 @dataclass(slots=True)   # the single active trade — at most one at a time
@@ -181,9 +188,18 @@ class BNTrade:
     # exact class of bug the freeze convention exists to prevent.
     scratch_slippage_rs: float = 0.0
     # Diagnostic snapshot of what fired this trade — never used for
-    # settlement, purely for the dashboard/trade log.
+    # settlement, purely for the dashboard/trade log. Persisted to the DB
+    # since 2026-09-29 (explicit user decision) — these two already existed
+    # in memory but were never actually saved anywhere before that.
     basket_score_at_entry: float = 0.0
     wobi_at_entry:         float = 0.0
+    # Added 2026-09-29 alongside the above, same request — see BNSignal's
+    # top2_names comment for why these carry over unchanged from signal
+    # time, and risk_guardrails.which_window for how entry_window is
+    # computed (WINDOW1/WINDOW2, or "" if somehow neither — shouldn't
+    # happen for a real entry).
+    top2_names_at_entry: Tuple[str, str] = ("", "")
+    entry_window:        str             = ""
     # cfg.BN_LOT_SIZE, not a hardcoded 30 (2026-09-24, found in review) —
     # was a duplicated magic number; harmless today since open_trade_from_
     # signal is the sole trade-construction path and always passes
@@ -291,6 +307,7 @@ class NFSignal:
     iv_used:           float
     basket_score:      float = 0.0
     wobi:              float = 0.0
+    top2_names:        Tuple[str, str] = ("", "")   # NF mirror of BNSignal's field above
 
 
 @dataclass(slots=True)   # the single active Nifty 50 trade — at most one at a time
@@ -314,6 +331,8 @@ class NFTrade:
     scratch_slippage_rs:   float = 0.0   # frozen at entry — see BNTrade's comment above
     basket_score_at_entry: float = 0.0
     wobi_at_entry:         float = 0.0
+    top2_names_at_entry: Tuple[str, str] = ("", "")   # NF mirror of BNTrade's fields above
+    entry_window:        str             = ""
     lot_size:     int             = cfg.NF_LOT_SIZE   # see BNTrade's identical comment above
     order_id:     str             = ""
     sl_stage:     str             = "Initial"

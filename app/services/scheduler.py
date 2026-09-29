@@ -831,6 +831,15 @@ class SchedulerService:
         def _f(v) -> float:
             return float(v) if v is not None else 0.0
 
+        def _parse_top2_names(v) -> tuple:
+            # Inverse of save_position's ", ".join(...) — "NAME1, NAME2" ->
+            # ("NAME1", "NAME2"); a missing/empty value (a manual order's
+            # trade never had this set) correctly restores to ("", "").
+            if not v:
+                return ("", "")
+            parts = [p.strip() for p in str(v).split(",")]
+            return (parts[0] if len(parts) > 0 else "", parts[1] if len(parts) > 1 else "")
+
         def _apply_row(r) -> None:
             status = (PositionStatus(r["status"])
                       if r.get("status") in ("OPEN", "CLOSED") else PositionStatus.OPEN)
@@ -879,6 +888,15 @@ class SchedulerService:
                 # other field above, or "Today's Trades" would show a blank
                 # outcome for anything closed before the last restart.
                 exit_reason=r.get("outcome"),
+                # Entry-decision snapshot (2026-09-29) — unlike target_rs/
+                # stop_rs/time_stop_s above, these ARE actually persisted
+                # (see database.py's save_position), so a restart correctly
+                # restores the real recorded values rather than backfilling
+                # from live cfg.
+                basket_score_at_entry=_f(r.get("basket_score_at_entry")),
+                wobi_at_entry=_f(r.get("wobi_at_entry")),
+                top2_names_at_entry=_parse_top2_names(r.get("top2_names")),
+                entry_window=str(r.get("entry_window") or ""),
             )
             if status == PositionStatus.CLOSED:
                 st.daily_pnl += trade.pnl   # shared account — every closed trade nets into the one daily_pnl

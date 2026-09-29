@@ -43,6 +43,26 @@ def max_trades_ok(trades_today: int) -> bool:
     return trades_today < cfg.SCALP_MAX_TRADES_PER_DAY
 
 
+def which_window(now: datetime) -> str:
+    """
+    Which of the two configured scalp windows `now` actually falls inside —
+    "WINDOW1"/"WINDOW2", or "" if neither (shouldn't happen for a real
+    entry, since open_trade_from_signal only ever runs after
+    in_trading_window has already gated it true, but returns a safe empty
+    string rather than raising if ever called outside that guarantee).
+    Added 2026-09-29 (explicit user decision) so a trade can record WHICH
+    window it fired in, not just that it was inside "a" window.
+    """
+    t = now.time()
+    if (time(cfg.SCALP_WINDOW1_START_HOUR, cfg.SCALP_WINDOW1_START_MIN)
+            <= t <= time(cfg.SCALP_WINDOW1_END_HOUR, cfg.SCALP_WINDOW1_END_MIN)):
+        return "WINDOW1"
+    if (time(cfg.SCALP_WINDOW2_START_HOUR, cfg.SCALP_WINDOW2_START_MIN)
+            <= t <= time(cfg.SCALP_WINDOW2_END_HOUR, cfg.SCALP_WINDOW2_END_MIN)):
+        return "WINDOW2"
+    return ""
+
+
 def trading_window_description() -> str:
     """
     Human-readable rendering of the CURRENT live window config, e.g.
