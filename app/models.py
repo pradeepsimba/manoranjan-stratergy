@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -140,6 +140,16 @@ class BNSignal:
     # replace() (same as direction/strike/expiry — it was part of the
     # DECISION, not the later fill repricing).
     top2_names:        Tuple[str, str] = ("", "")
+    # Every basket leg's {name, vwap, ltp, deviation_pct, weight} at the
+    # moment this signal fired — added 2026-09-30, explicit user decision
+    # ("I want vwap"), after the OLD, unrelated single-value `vwap` DB
+    # column (a dead leftover from before this app's options strategy) was
+    # dropped. This is the REAL, currently-used VWAP data — 8 basket legs
+    # each have their OWN VWAP, not one instrument-wide value — so it's a
+    # list of dicts, not a single number. Carries over unchanged through
+    # fill_delayed_entry's replace() (same as top2_names above — it was
+    # part of the DECISION, not the later fill repricing).
+    basket_legs:       List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)   # the single active trade — at most one at a time
@@ -205,6 +215,10 @@ class BNTrade:
     # risk_guardrails.day_candle_color) from BankNifty's own day-open vs
     # entry_index_price, not part of the trading decision itself.
     day_candle_color_at_entry: str = ""
+    # Every basket leg's VWAP/LTP/deviation at entry (2026-09-30, explicit
+    # user decision — see BNSignal.basket_legs's own comment for the full
+    # rationale). Persisted as JSONB (database.py), not a single number.
+    basket_legs_at_entry: List[Dict[str, Any]] = field(default_factory=list)
     # cfg.BN_LOT_SIZE, not a hardcoded 30 (2026-09-24, found in review) —
     # was a duplicated magic number; harmless today since open_trade_from_
     # signal is the sole trade-construction path and always passes
@@ -313,6 +327,7 @@ class NFSignal:
     basket_score:      float = 0.0
     wobi:              float = 0.0
     top2_names:        Tuple[str, str] = ("", "")   # NF mirror of BNSignal's field above
+    basket_legs:       List[Dict[str, Any]] = field(default_factory=list)   # NF mirror of BNSignal's field above
 
 
 @dataclass(slots=True)   # the single active Nifty 50 trade — at most one at a time
@@ -339,6 +354,7 @@ class NFTrade:
     top2_names_at_entry: Tuple[str, str] = ("", "")   # NF mirror of BNTrade's fields above
     entry_window:        str             = ""
     day_candle_color_at_entry: str = ""   # NF mirror of BNTrade's field above (own Nifty 50 day candle)
+    basket_legs_at_entry: List[Dict[str, Any]] = field(default_factory=list)   # NF mirror of BNTrade's field above
     lot_size:     int             = cfg.NF_LOT_SIZE   # see BNTrade's identical comment above
     order_id:     str             = ""
     sl_stage:     str             = "Initial"

@@ -241,6 +241,11 @@ def evaluate_entry(
                 basket_score=reading.score,
                 wobi=wobi_value,
                 top2_names=reading.top2_names,
+                basket_legs=[
+                    {"name": leg.name, "vwap": leg.vwap, "ltp": leg.ltp,
+                     "deviation_pct": leg.deviation_pct, "weight": leg.weight}
+                    for leg in reading.legs
+                ],
             )
         else:
             no_trade_reason = f"W-OBI {wobi_value:.2f} ≤ {cfg.BN_WOBI_MIN_RATIO} (path not clear)"
@@ -414,6 +419,7 @@ def open_trade_from_signal(signal: BNSignal, now: datetime, order_id: str = "") 
         wobi_at_entry=signal.wobi,
         top2_names_at_entry=signal.top2_names,
         entry_window=_which_window(now),
+        basket_legs_at_entry=signal.basket_legs,
         lot_size=cfg.BN_LOT_SIZE,
         order_id=order_id,
         confidence=signal.confidence,

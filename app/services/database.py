@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS positions (
     -- far at entry (2026-09-29, explicit user decision). See
     -- risk_guardrails.day_candle_color.
     day_candle_color      VARCHAR(10),
+    -- Every basket leg's {name, vwap, ltp, deviation_pct, weight} at entry
+    -- (2026-09-30, explicit user decision — "I want vwap", after the OLD,
+    -- unrelated single-value `vwap` column above was dropped as dead
+    -- leftover). JSONB, not a single number — see models.py's
+    -- BNSignal.basket_legs comment for why: 8 stocks, each their own VWAP.
+    basket_legs_at_entry  JSONB,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -226,6 +232,7 @@ ALTER TABLE positions ADD COLUMN IF NOT EXISTS wobi_at_entry         NUMERIC(10,
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS top2_names            TEXT;
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_window          VARCHAR(10);
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS day_candle_color      VARCHAR(10);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS basket_legs_at_entry  JSONB;
 """
 
 
@@ -264,6 +271,12 @@ class DatabaseService:
         # order's signal never sets this — see open_trade_from_signal's own
         # comment) join down to an empty string, not "", "".
         top2_names_str = ", ".join(n for n in trade.top2_names_at_entry if n)
+        # json.dumps, same convention as every other JSONB write in this
+        # file (gemini_shortlist/backtest_runs.params/app_settings above) —
+        # asyncpg has no automatic Python-object-to-JSONB codec configured
+        # on this pool, so a bare list/dict would be sent as its str() repr
+        # instead of valid JSON.
+        basket_legs_json = json.dumps(trade.basket_legs_at_entry)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
@@ -273,9 +286,9 @@ class DatabaseService:
                      status, direction, strike, option_type, expiry,
                      entry_premium, iv_used, instrument,
                      basket_score_at_entry, wobi_at_entry, top2_names, entry_window,
-                     day_candle_color)
+                     day_candle_color, basket_legs_at_entry)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-                        $19,$20,$21,$22,$23)
+                        $19,$20,$21,$22,$23,$24)
                 """,
                 symbol, token,
                 trade.entry_index_price, trade.entry_time, trade.lot_size,
@@ -295,7 +308,7 @@ class DatabaseService:
                 trade.entry_premium, iv_used, instrument,
                 trade.basket_score_at_entry, trade.wobi_at_entry,
                 top2_names_str, trade.entry_window,
-                trade.day_candle_color_at_entry,
+                trade.day_candle_color_at_entry, basket_legs_json,
             )
 
     async def update_position_exit(self, order_id: str, exit_price: float,

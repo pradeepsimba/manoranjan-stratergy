@@ -898,6 +898,14 @@ class SchedulerService:
                 top2_names_at_entry=_parse_top2_names(r.get("top2_names")),
                 entry_window=str(r.get("entry_window") or ""),
                 day_candle_color_at_entry=str(r.get("day_candle_color") or ""),
+                # asyncpg returns jsonb as a raw string (see CLAUDE.md's
+                # "JSONB reads" gotcha) — decode it, defaulting to [] for a
+                # row saved before this column existed (NULL) same as every
+                # other backfilled-from-scratch field above.
+                basket_legs_at_entry=(
+                    json.loads(r["basket_legs_at_entry"])
+                    if r.get("basket_legs_at_entry") else []
+                ),
             )
             if status == PositionStatus.CLOSED:
                 st.daily_pnl += trade.pnl   # shared account — every closed trade nets into the one daily_pnl
