@@ -79,11 +79,13 @@ def evaluate_entry(
     no_trade_reason: Optional[str] = None
 
     cooldown_ok = True
+    cooldown_remaining_s = 0.0
     if last_exit_time is not None:
         elapsed = (now - last_exit_time).total_seconds()
         if elapsed < cfg.NF_SCALP_COOLDOWN_S:
             cooldown_ok = False
-            no_trade_reason = f"Cooldown {cfg.NF_SCALP_COOLDOWN_S - elapsed:.0f}s remaining"
+            cooldown_remaining_s = cfg.NF_SCALP_COOLDOWN_S - elapsed
+            no_trade_reason = f"Cooldown {cooldown_remaining_s:.0f}s remaining"
 
     window_ok = _in_trading_window(now)
     if no_trade_reason is None and not window_ok:
@@ -108,6 +110,12 @@ def evaluate_entry(
     gates_clear = cooldown_ok and window_ok and max_trades_ok
     buy_ready = gates_clear and score_buy_ok and reading.top2_direction_ok
     sell_ready = gates_clear and score_sell_ok and reading.top2_direction_ok
+
+    # Cooldown skip log — see bn_entry_exit.py's identical block for the
+    # full rationale (logged only for a real blocked signal candidate, not
+    # every idle tick cooldown happens to be active for).
+    if not cooldown_ok and (score_buy_ok or score_sell_ok) and reading.top2_direction_ok:
+        print(f"[cooldown] Signal skipped — {cooldown_remaining_s:.1f}s remaining")
 
     itm_iv: Optional[float] = None
     itm_ce_strike = itm_pe_strike = None

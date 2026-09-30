@@ -149,11 +149,13 @@ def evaluate_entry(
     no_trade_reason: Optional[str] = None
 
     cooldown_ok = True
+    cooldown_remaining_s = 0.0
     if last_exit_time is not None:
         elapsed = (now - last_exit_time).total_seconds()
         if elapsed < cfg.BN_SCALP_COOLDOWN_S:
             cooldown_ok = False
-            no_trade_reason = f"Cooldown {cfg.BN_SCALP_COOLDOWN_S - elapsed:.0f}s remaining"
+            cooldown_remaining_s = cfg.BN_SCALP_COOLDOWN_S - elapsed
+            no_trade_reason = f"Cooldown {cooldown_remaining_s:.0f}s remaining"
 
     window_ok = _in_trading_window(now)
     if no_trade_reason is None and not window_ok:
@@ -178,6 +180,18 @@ def evaluate_entry(
     gates_clear = cooldown_ok and window_ok and max_trades_ok
     buy_ready = gates_clear and score_buy_ok and reading.top2_direction_ok
     sell_ready = gates_clear and score_sell_ok and reading.top2_direction_ok
+
+    # Cooldown skip log (2026-09-30, explicit user decision) — logged only
+    # when a real signal candidate (score past threshold AND top2 confirming)
+    # was specifically blocked by cooldown, NOT on every idle tick cooldown
+    # happens to be active for. evaluate_entry runs every tick (see
+    # CLAUDE.md's "Entry is evaluated every tick" gotcha) and cooldown can
+    # now last up to 60s+ (Settings-adjustable) — logging unconditionally
+    # here would print hundreds of near-identical lines per cooldown window
+    # for ticks that were never going to fire anyway. This still logs every
+    # genuinely-blocked signal, just not every no-op tick alongside it.
+    if not cooldown_ok and (score_buy_ok or score_sell_ok) and reading.top2_direction_ok:
+        print(f"[cooldown] Signal skipped — {cooldown_remaining_s:.1f}s remaining")
 
     # Deep-ITM CE/PE strike/premium — computed unconditionally (both sides)
     # for the live dashboard's "what would this cost right now" display,
