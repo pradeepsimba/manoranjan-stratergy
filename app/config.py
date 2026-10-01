@@ -895,11 +895,14 @@ NF_WOBI_MIN_RATIO = 2.5
 BN_SCALP_SCRATCH_SLIPPAGE_RS = 0.10
 NF_SCALP_SCRATCH_SLIPPAGE_RS = 0.10
 
-# Cooldown between scalp trades — much shorter than the old (now-removed)
-# 60s BN_ENTRY_COOLDOWN_S/NF_ENTRY_COOLDOWN_S, since a trade now resolves
-# in ~12s, not minutes.
-BN_SCALP_COOLDOWN_S = 15.0
-NF_SCALP_COOLDOWN_S = 15.0
+# Cooldown between scalp trades — default much shorter than the old
+# (now-removed) 60s BN_ENTRY_COOLDOWN_S/NF_ENTRY_COOLDOWN_S, since a trade
+# now resolves in ~12s, not minutes. Moved into _DEFAULTS/dynamic below
+# (2026-10-01, found in review — this had been described as "dynamic since
+# 2026-09-23" throughout this doc's own history, but was actually still a
+# plain static attribute with no SPEC entry at all; the Settings page
+# genuinely never had a cooldown control until now, which is exactly what a
+# user noticed: "cooldown time set option not showing in settings page").
 
 # ── Risk guardrails (shared by BOTH instruments — one set of limits, not a
 # separate pair per instrument): trading windows + a hard cap on executed
@@ -988,6 +991,14 @@ _DEFAULTS: Dict[str, Any] = {
     "SCALP_WINDOW2_END_HOUR":   14, "SCALP_WINDOW2_END_MIN":   45,
     "BN_SCALP_TIME_STOP_S": 12.0,
     "NF_SCALP_TIME_STOP_S": 12.0,
+    # Cooldown between scalp trades (2026-10-01, found in review — see the
+    # now-removed static declaration's own comment above). bt=True: this
+    # same cooldown gate (evaluate_entry's last_exit_time check) is what
+    # backtest's _try_entry relies on too (BTPosition.last_exit_time), so a
+    # per-run override genuinely changes simulated trade spacing — same
+    # reasoning as SCALP_MAX_TRADES_PER_DAY below.
+    "BN_SCALP_COOLDOWN_S": 15.0,
+    "NF_SCALP_COOLDOWN_S": 15.0,
     # Target/stop on the OPTION PREMIUM itself (₹), added to this group
     # 2026-09-25 (explicit user decision — Settings page target/stop
     # control): frozen onto the trade at entry same as time-stop above, and

@@ -159,6 +159,20 @@ SPEC: List[Dict[str, Any]] = [
     _s("NF_SCALP_TIME_STOP_S", "Nifty 50 time-stop (s)", "float", "Scalp Timing",
        min_=1, max_=60, step=0.5, bt=False,
        help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade. Live-only: has no effect on backtest, which always resolves on the next 5m bar regardless of this value (no sub-5-minute historical data exists to simulate the real time-stop)."),
+    # Added 2026-10-01 (found in review — this had been claimed "dynamic
+    # since 2026-09-23" throughout this doc's own history, but was actually
+    # still a plain static config.py attribute with no SPEC entry at all; a
+    # user looking for it on the Settings page correctly found nothing
+    # there). bt=True: the same cooldown gate (evaluate_entry's
+    # last_exit_time check) is what backtest's _try_entry relies on too
+    # (BTPosition.last_exit_time), so a per-run override genuinely changes
+    # simulated trade spacing — unlike time-stop above, not a silent no-op.
+    _s("BN_SCALP_COOLDOWN_S", "BankNifty cooldown (s)", "float", "Scalp Timing",
+       min_=1, max_=300, step=1,
+       help_="Block new entries for this many seconds after a trade closes (win, loss, or time-scratch) — prevents immediately re-firing off the same still-settling move."),
+    _s("NF_SCALP_COOLDOWN_S", "Nifty 50 cooldown (s)", "float", "Scalp Timing",
+       min_=1, max_=300, step=1,
+       help_="Block new entries for this many seconds after a trade closes (win, loss, or time-scratch) — prevents immediately re-firing off the same still-settling move."),
     # Added to this group 2026-09-25 (explicit user decision — target/stop
     # control from Settings). bt=True (the default, no override needed) —
     # unlike time-stop above, app/backtest/engine.py's _try_exit DOES
