@@ -823,6 +823,20 @@ NF_SCALP_BASKET: Dict[str, float] = _top_n_basket(
 BN_SCALP_SCORE_THRESHOLD = 0.08
 NF_SCALP_SCORE_THRESHOLD = 0.08
 
+# 60% Cumulative Weight Rule (2026-10-01, explicit user decision — REPLACES
+# the old "top 2 heaviest-weighted legs must individually agree with the
+# score's sign" direction-confirmation gate entirely). Once the composite
+# score crosses the threshold above, this requires a genuine MAJORITY of
+# the basket's total weight (not just its 2 heaviest names) to actually be
+# on the signal's side of its own VWAP — closes a real gap the old rule
+# had: 2 extreme-moving heavyweights could drag the score past threshold
+# and both happen to agree with it, while the other 6 (54%+ of the
+# basket's weight) sat on the opposite side the whole time. Static, same
+# as BN_SCALP_SCORE_THRESHOLD/NF_SCALP_SCORE_THRESHOLD above (not a
+# Settings-page value — not requested as one).
+BN_SCALP_AGREEING_WEIGHT_MIN = 0.60
+NF_SCALP_AGREEING_WEIGHT_MIN = 0.60
+
 # Deep-ITM offset (points) from spot — CE: spot - offset, PE: spot + offset
 # (app/engine/bn_pricing.get_itm_strike / nf_pricing.get_itm_strike). NF's
 # 150 is the user-specified value (~3 strikes ITM at Nifty 50's real

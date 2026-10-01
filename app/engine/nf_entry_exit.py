@@ -102,19 +102,42 @@ def evaluate_entry(
 
     score_buy_ok = reading.score >= threshold
     score_sell_ok = reading.score <= -threshold
+
+    # 60% Cumulative Weight Rule — see bn_entry_exit.py's identical block
+    # for the full rationale (REPLACES the old top-2-individually-agree
+    # gate; reading.top2_direction_ok/top2_names are still computed and
+    # still recorded on the trade, just no longer used AS A GATE here).
+    agreeing_weight_min = cfg.NF_SCALP_AGREEING_WEIGHT_MIN
+    agreeing_weight = 0.0
+    if score_buy_ok:
+        agreeing_weight = sum(leg.weight for leg in reading.legs
+                              if leg.deviation_pct is not None and leg.deviation_pct > 0)
+    elif score_sell_ok:
+        agreeing_weight = sum(leg.weight for leg in reading.legs
+                              if leg.deviation_pct is not None and leg.deviation_pct < 0)
+    weight_filter_ok = agreeing_weight >= agreeing_weight_min
+
     if no_trade_reason is None and not (score_buy_ok or score_sell_ok):
         no_trade_reason = f"Basket score {reading.score:+.3f} within ±{threshold}"
-    elif no_trade_reason is None and not reading.top2_direction_ok:
-        no_trade_reason = f"Top-2 ({', '.join(n for n in reading.top2_names if n)}) not confirming direction"
+    elif no_trade_reason is None and not weight_filter_ok:
+        no_trade_reason = (f"Agreeing weight {agreeing_weight * 100:.1f}% below "
+                           f"{agreeing_weight_min * 100:.0f}% minimum")
 
     gates_clear = cooldown_ok and window_ok and max_trades_ok
-    buy_ready = gates_clear and score_buy_ok and reading.top2_direction_ok
-    sell_ready = gates_clear and score_sell_ok and reading.top2_direction_ok
+    buy_ready = gates_clear and score_buy_ok and weight_filter_ok
+    sell_ready = gates_clear and score_sell_ok and weight_filter_ok
+
+    # Weight-filter drop log — see bn_entry_exit.py's identical block for
+    # the full rationale.
+    if (score_buy_ok or score_sell_ok) and not weight_filter_ok:
+        direction_label = "BUY" if score_buy_ok else "SELL"
+        print(f"[filter] {direction_label} dropped — agreeing weight only "
+              f"{agreeing_weight * 100:.1f}% (needed {agreeing_weight_min * 100:.0f}%)")
 
     # Cooldown skip log — see bn_entry_exit.py's identical block for the
-    # full rationale (logged only for a real blocked signal candidate, not
-    # every idle tick cooldown happens to be active for).
-    if not cooldown_ok and (score_buy_ok or score_sell_ok) and reading.top2_direction_ok:
+    # full rationale (updated 2026-10-01 to use weight_filter_ok, not the
+    # now-removed top2_direction_ok gate).
+    if not cooldown_ok and (score_buy_ok or score_sell_ok) and weight_filter_ok:
         print(f"[cooldown] Signal skipped — {cooldown_remaining_s:.1f}s remaining")
 
     itm_iv: Optional[float] = None
