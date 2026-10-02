@@ -379,8 +379,9 @@ def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
     strategy is always LONG one option leg (CE or PE), so "premium up
     target_rs = win, premium down stop_rs = loss" applies identically
     either way. If neither is touched before trade.time_stop_s elapses
-    since entry, force a TIME_SCRATCH exit at a marketable (spread-crossing)
-    price — see BN_SCALP_SCRATCH_SLIPPAGE_RS in config.py.
+    since entry, force a TIME_SCRATCH exit (the actual spread-crossing
+    settlement price is applied by the caller at fill time — see
+    trade.spread_penalty / BN_SPREAD_PENALTY_RS in config.py).
 
     Always uses its own freshly-computed Black-Scholes mark — this used to
     accept a `live_premium_override` so the caller could substitute a real
@@ -393,6 +394,17 @@ def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
     at a huge, inconsistent loss with the index barely moving). Settlement
     is now consistently synthetic for a trade's entire life; see
     bn_trade.check_tick_exit's docstring for the full incident writeup.
+
+    This is a pure DECISION function (touch check + live dashboard mark) —
+    current_premium is always the raw Black-Scholes mark, never slippage-
+    adjusted (2026-10-02, explicit user decision — "Dynamic Spread Penalty
+    replaces scratch_slippage_rs entirely"). Real settlement slippage
+    (trade.spread_penalty, added/subtracted) is applied exactly once, at
+    the actual FILL call sites — resolve_delayed_exit_premium (the
+    algo-fired delayed-exit path) and bn_trade.force_close (EOD/manual
+    exit, which settles directly off this function's own current_premium)
+    — never here, or a should_exit=True call through both paths would
+    double-apply it.
     """
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
@@ -413,18 +425,16 @@ def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
 
     should_exit = False
     exit_reason: Optional[str] = None
-    settle_premium = premium
     if premium >= trade.target:
         should_exit, exit_reason = True, "TARGET"
     elif premium <= trade.current_sl:
         should_exit, exit_reason = True, "STOP"
     elif elapsed_s >= trade.time_stop_s:
         should_exit, exit_reason = True, "TIME_SCRATCH"
-        settle_premium = max(0.0, premium - trade.scratch_slippage_rs)
 
     return ExitEvaluation(
         new_sl=trade.current_sl, sl_stage=trade.sl_stage,
-        current_premium=settle_premium if should_exit else premium,
+        current_premium=premium,
         current_iv=iv, current_delta=bs["delta"], current_theta=bs["theta"],
         should_exit=should_exit, exit_reason=exit_reason,
     )
@@ -442,6 +452,7 @@ def open_trade_from_signal(signal: BNSignal, now: datetime, order_id: str = "") 
     stop_rs = cfg.BN_SCALP_STOP_RS
     time_stop_s = cfg.BN_SCALP_TIME_STOP_S
     scratch_slippage_rs = cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS
+    spread_penalty = cfg.BN_SPREAD_PENALTY_RS
 
     option_type = "CE" if signal.direction == "BUY" else "PE"
     option_symbol = build_monthly_option_symbol(
@@ -461,6 +472,7 @@ def open_trade_from_signal(signal: BNSignal, now: datetime, order_id: str = "") 
         stop_rs=stop_rs,
         time_stop_s=time_stop_s,
         scratch_slippage_rs=scratch_slippage_rs,
+        spread_penalty=spread_penalty,
         basket_score_at_entry=signal.basket_score,
         wobi_at_entry=signal.wobi,
         top2_names_at_entry=signal.top2_names,
@@ -486,14 +498,19 @@ def fill_delayed_entry(signal: BNSignal, now: datetime, current_index_price: flo
     BN_ENTRY_FILL_DELAY_MS has elapsed — see bn_trade.try_fill_pending_entry)
     and NEVER reused from signal time — that discontinuity IS the simulated
     slippage this feature models.
+
+    entry_premium additionally adds cfg.BN_SPREAD_PENALTY_RS to the raw
+    Black-Scholes mark (2026-10-02, explicit user decision — "Dynamic
+    Spread Penalty": simulates crossing the Ask on a real entry order).
     """
     option_type = "CE" if signal.direction == "BUY" else "PE"
     expiry = datetime.fromisoformat(signal.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(bn_closes_lookback)
     bs = black_scholes(current_index_price, signal.strike, T, cfg.BN_RISK_FREE_RATE, iv, option_type)
+    entry_premium = bs["price"] + cfg.BN_SPREAD_PENALTY_RS
     return replace(signal, entry_index_price=current_index_price,
-                   entry_premium=bs["price"], iv_used=iv)
+                   entry_premium=entry_premium, iv_used=iv)
 
 
 def resolve_delayed_exit_premium(trade: BNTrade, now: datetime, current_index_price: float,
@@ -503,20 +520,19 @@ def resolve_delayed_exit_premium(trade: BNTrade, now: datetime, current_index_pr
     explicit user decision: "200ms Exit Delay", filled symmetrically to
     fill_delayed_entry above at whatever the next genuinely-new live tick
     shows after BN_EXIT_FILL_DELAY_MS — not the premium at the instant
-    target/stop/time-scratch first triggered). trade.pending_exit_reason
-    (frozen when the exit was first armed — see bn_trade.check_tick_exit)
-    decides whether TIME_SCRATCH's scratch_slippage_rs still applies to this
-    fresh mark, same as it did in evaluate_exit's own settle_premium branch.
+    target/stop/time-scratch first triggered). Subtracts trade.spread_penalty
+    from the fresh mark UNCONDITIONALLY (2026-10-02, explicit user decision
+    — "Dynamic Spread Penalty replaces scratch_slippage_rs entirely"):
+    every exit reason (TARGET/STOP/TIME_SCRATCH alike) crosses the spread on
+    a real exit order, not just a forced time-scratch — simulates crossing
+    the Bid.
     """
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(bn_closes_lookback)
     safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
     bs = black_scholes(safe_price, trade.strike, T, cfg.BN_RISK_FREE_RATE, iv, trade.option_type)
-    premium = bs["price"]
-    if trade.pending_exit_reason == "TIME_SCRATCH":
-        premium = max(0.0, premium - trade.scratch_slippage_rs)
-    return premium
+    return max(0.0, bs["price"] - trade.spread_penalty)
 
 
 def finalize_exit(trade: BNTrade, now: datetime, exit_index_price: float,

@@ -200,12 +200,16 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(lookback)
     bs = black_scholes(spot, strike, T, cfg.BN_RISK_FREE_RATE, iv, option_type)
+    # Spread-crossing slippage on the Ask (2026-10-02, explicit user decision
+    # — "Dynamic Spread Penalty"), same treatment a delayed algo fill gets
+    # via fill_delayed_entry — a manual order is a real order too.
+    entry_premium = bs["price"] + cfg.BN_SPREAD_PENALTY_RS
 
     signal = BNSignal(
         direction=direction, entry_index_price=spot, bar_time=now.isoformat(),
         confidence=0.0, green=0, red=0, strong_qty=0, leader_signal="MANUAL",
         bn_bull=0.0, bn_bear=0.0, strike=strike, expiry=expiry.isoformat(),
-        entry_premium=bs["price"], iv_used=iv,
+        entry_premium=entry_premium, iv_used=iv,
     )
     return place_paper_order(signal, now)
 
@@ -316,10 +320,18 @@ def force_close(now: datetime, current_index_price: float,
     """Square off the active trade unconditionally (used for the 15:30 EOD
     flat, and — with label="MANUAL EXIT" — the dashboard's manual Exit
     button; same target/stop-agnostic close either way, only the log label differs).
-    See check_tick_exit's docstring — always synthetic, no real-LTP override."""
+    See check_tick_exit's docstring — always synthetic, no real-LTP override.
+
+    Settles at evaluate_exit's raw mark minus trade.spread_penalty
+    (2026-10-02, explicit user decision — every real exit fill crosses the
+    spread, not just an algo-automatic one; evaluate_exit itself never
+    applies this — see its own docstring — so it's applied here exactly
+    once, the same way resolve_delayed_exit_premium applies it for the
+    delayed-fill algo exit path)."""
     st = get_state()
     trade = st.active_trade
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
     ev = evaluate_exit(trade, now, current_index_price, bn_closes_lookback)
-    return _settle(trade, now, current_index_price, ev.current_premium, label)
+    exit_premium = max(0.0, ev.current_premium - trade.spread_penalty)
+    return _settle(trade, now, current_index_price, exit_premium, label)

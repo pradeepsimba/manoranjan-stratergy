@@ -48,10 +48,25 @@ def get_atm_strike(spot: float) -> int:
 
 
 def get_itm_strike(spot: float, option_type: str, offset: float) -> int:
-    """NF mirror of bn_pricing.get_itm_strike, rounded via THIS module's
-    get_atm_strike (50-point grid), not bn_pricing's (100-point) one."""
+    """NF mirror of bn_pricing.get_itm_strike (see there for the full
+    wrong-side-of-spot writeup, 2026-10-02 fix, found in review) — falls
+    back to floor (CE) / ceil (PE) on THIS module's 50-point grid
+    (_STRIKE_STEP), not bn_pricing's 100-point one, ONLY when nearest-
+    rounding would land on the wrong side of spot (the danger zone is
+    0 < offset < 25 here, half of NF's 50-point grid). offset<=0 is the
+    literal exact-ATM case via ordinary nearest-rounding. For every offset
+    this repo currently actually uses (150, far outside the danger zone),
+    nearest already lands correctly, so this guard never changes the
+    selected strike from before this fix."""
+    if offset <= 0:
+        return get_atm_strike(spot)
     raw = (spot - offset) if option_type == "CE" else (spot + offset)
-    return get_atm_strike(raw)
+    nearest = get_atm_strike(raw)
+    if option_type == "CE" and nearest >= spot:
+        return int(math.floor(raw / _STRIKE_STEP) * _STRIKE_STEP)
+    if option_type == "PE" and nearest <= spot:
+        return int(math.ceil(raw / _STRIKE_STEP) * _STRIKE_STEP)
+    return nearest
 
 IST = ZoneInfo("Asia/Kolkata")
 

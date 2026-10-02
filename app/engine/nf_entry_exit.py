@@ -265,7 +265,10 @@ class ExitEvaluation:
 def evaluate_exit(trade: NFTrade, now: datetime, current_index_price: float,
                   nf_closes_lookback: np.ndarray) -> ExitEvaluation:
     """NF mirror of bn_entry_exit.evaluate_exit — see there for the full lifecycle
-    walkthrough, including why the live_premium_override this used to accept was removed."""
+    walkthrough, including why the live_premium_override this used to accept was removed.
+    Pure DECISION function (2026-10-02) — current_premium is always the raw
+    Black-Scholes mark; trade.spread_penalty is applied exactly once, at the
+    actual FILL call sites (resolve_delayed_exit_premium / nf_trade.force_close)."""
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(nf_closes_lookback)
@@ -279,18 +282,16 @@ def evaluate_exit(trade: NFTrade, now: datetime, current_index_price: float,
 
     should_exit = False
     exit_reason: Optional[str] = None
-    settle_premium = premium
     if premium >= trade.target:
         should_exit, exit_reason = True, "TARGET"
     elif premium <= trade.current_sl:
         should_exit, exit_reason = True, "STOP"
     elif elapsed_s >= trade.time_stop_s:
         should_exit, exit_reason = True, "TIME_SCRATCH"
-        settle_premium = max(0.0, premium - trade.scratch_slippage_rs)
 
     return ExitEvaluation(
         new_sl=trade.current_sl, sl_stage=trade.sl_stage,
-        current_premium=settle_premium if should_exit else premium,
+        current_premium=premium,
         current_iv=iv, current_delta=bs["delta"], current_theta=bs["theta"],
         should_exit=should_exit, exit_reason=exit_reason,
     )
@@ -302,6 +303,7 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
     stop_rs = cfg.NF_SCALP_STOP_RS
     time_stop_s = cfg.NF_SCALP_TIME_STOP_S
     scratch_slippage_rs = cfg.NF_SCALP_SCRATCH_SLIPPAGE_RS
+    spread_penalty = cfg.NF_SPREAD_PENALTY_RS
 
     option_type = "CE" if signal.direction == "BUY" else "PE"
     option_symbol = build_weekly_option_symbol(
@@ -321,6 +323,7 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
         stop_rs=stop_rs,
         time_stop_s=time_stop_s,
         scratch_slippage_rs=scratch_slippage_rs,
+        spread_penalty=spread_penalty,
         basket_score_at_entry=signal.basket_score,
         wobi_at_entry=signal.wobi,
         top2_names_at_entry=signal.top2_names,
@@ -336,28 +339,30 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
 
 def fill_delayed_entry(signal: NFSignal, now: datetime, current_index_price: float,
                        nf_closes_lookback: np.ndarray) -> NFSignal:
-    """NF mirror of bn_entry_exit.fill_delayed_entry — see there."""
+    """NF mirror of bn_entry_exit.fill_delayed_entry — see there. entry_premium
+    adds cfg.NF_SPREAD_PENALTY_RS to the raw mark (2026-10-02, explicit user
+    decision — simulates crossing the Ask)."""
     option_type = "CE" if signal.direction == "BUY" else "PE"
     expiry = datetime.fromisoformat(signal.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(nf_closes_lookback)
     bs = black_scholes(current_index_price, signal.strike, T, cfg.NF_RISK_FREE_RATE, iv, option_type)
+    entry_premium = bs["price"] + cfg.NF_SPREAD_PENALTY_RS
     return replace(signal, entry_index_price=current_index_price,
-                   entry_premium=bs["price"], iv_used=iv)
+                   entry_premium=entry_premium, iv_used=iv)
 
 
 def resolve_delayed_exit_premium(trade: NFTrade, now: datetime, current_index_price: float,
                                  nf_closes_lookback: np.ndarray) -> float:
-    """NF mirror of bn_entry_exit.resolve_delayed_exit_premium — see there."""
+    """NF mirror of bn_entry_exit.resolve_delayed_exit_premium — see there.
+    Subtracts trade.spread_penalty UNCONDITIONALLY (2026-10-02, explicit user
+    decision — every exit reason crosses the spread, not just TIME_SCRATCH)."""
     expiry = datetime.fromisoformat(trade.expiry)
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(nf_closes_lookback)
     safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
     bs = black_scholes(safe_price, trade.strike, T, cfg.NF_RISK_FREE_RATE, iv, trade.option_type)
-    premium = bs["price"]
-    if trade.pending_exit_reason == "TIME_SCRATCH":
-        premium = max(0.0, premium - trade.scratch_slippage_rs)
-    return premium
+    return max(0.0, bs["price"] - trade.spread_penalty)
 
 
 def finalize_exit(trade: NFTrade, now: datetime, exit_index_price: float,

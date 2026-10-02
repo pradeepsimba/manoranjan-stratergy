@@ -864,6 +864,18 @@ class SchedulerService:
             # instead of a frozen one) for any restart-recovered OPEN trade.
             scratch_slippage_rs = (cfg.NF_SCALP_SCRATCH_SLIPPAGE_RS if is_nf
                                    else cfg.BN_SCALP_SCRATCH_SLIPPAGE_RS)
+            # spread_penalty (2026-10-02, found in review while rechecking the
+            # Dynamic Spread Penalty feature) — belongs in this exact same
+            # backfill for the exact same reason as scratch_slippage_rs above,
+            # except this one is NOT vestigial: resolve_delayed_exit_premium/
+            # force_close now use trade.spread_penalty to determine REAL exit
+            # settlement for every reason (not just TIME_SCRATCH). Left at the
+            # dataclass 0.0 default, a restart-recovered OPEN trade would
+            # settle with zero spread slippage while every other trade gets
+            # cfg.BN_SPREAD_PENALTY_RS/NF_SPREAD_PENALTY_RS — a real, silent
+            # economic inconsistency, not just a cosmetic one.
+            spread_penalty = (cfg.NF_SPREAD_PENALTY_RS if is_nf
+                              else cfg.BN_SPREAD_PENALTY_RS)
             trade = cls(
                 direction=str(r.get("direction") or "BUY"),
                 entry_index_price=_f(r.get("entry_price")),
@@ -876,6 +888,7 @@ class SchedulerService:
                 entry_premium=_f(r.get("entry_premium")),
                 target_rs=target_rs, stop_rs=stop_rs, time_stop_s=time_stop_s,
                 scratch_slippage_rs=scratch_slippage_rs,
+                spread_penalty=spread_penalty,
                 lot_size=int(r.get("quantity") or (cfg.NF_LOT_SIZE if is_nf else cfg.BN_LOT_SIZE)),
                 order_id=str(r.get("order_id") or ""),
                 status=status,

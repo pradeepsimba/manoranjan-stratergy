@@ -197,6 +197,13 @@ class BNTrade:
     # retroactively alter an already-open trade's TIME_SCRATCH payout — the
     # exact class of bug the freeze convention exists to prevent.
     scratch_slippage_rs: float = 0.0
+    # Spread-crossing slippage (₹), frozen from cfg.BN_SPREAD_PENALTY_RS at
+    # entry (2026-10-02, explicit user decision — "Dynamic Spread Penalty",
+    # REPLACES scratch_slippage_rs above entirely in real settlement math).
+    # Added to the Black-Scholes mark on this trade's entry fill, subtracted
+    # on its exit fill — any exit reason, not just TIME_SCRATCH. Same freeze
+    # rule as target_rs/stop_rs/scratch_slippage_rs above.
+    spread_penalty:      float = 0.0
     # Diagnostic snapshot of what fired this trade — never used for
     # settlement, purely for the dashboard/trade log. Persisted to the DB
     # since 2026-09-29 (explicit user decision) — these two already existed
@@ -349,6 +356,7 @@ class NFTrade:
     stop_rs:               float = 0.0
     time_stop_s:           float = 0.0
     scratch_slippage_rs:   float = 0.0   # frozen at entry — see BNTrade's comment above
+    spread_penalty:        float = 0.0   # frozen at entry — see BNTrade's comment above
     basket_score_at_entry: float = 0.0
     wobi_at_entry:         float = 0.0
     top2_names_at_entry: Tuple[str, str] = ("", "")   # NF mirror of BNTrade's fields above

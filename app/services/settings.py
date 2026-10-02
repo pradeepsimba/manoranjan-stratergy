@@ -235,10 +235,38 @@ SPEC: List[Dict[str, Any]] = [
     _s("NF_FILL_MAX_WAIT_MS", "Nifty 50 fill max wait (ms)", "float", "Execution Delay",
        min_=0, max_=20000, step=100, bt=False,
        help_="If no genuinely new live tick arrives this long after a delayed entry/exit's fill time elapses, fill at whatever price is current instead of waiting indefinitely (feed momentarily idle)."),
+
+    # ── Strike & execution pricing (2026-10-02, explicit user decision) —
+    # no "BN "/"NF " prefix on the group name (mixed per-instrument
+    # settings, same convention as "Scalp Timing"/"Execution Delay" above).
+    # ITM_OFFSET_POINTS is bt=True: app/engine/bn_entry_exit.py/
+    # nf_entry_exit.py's evaluate_entry (the shared live+backtest ENTRY
+    # decision core) reads cfg.BN_ITM_OFFSET_POINTS/NF_ITM_OFFSET_POINTS
+    # directly via get_itm_strike, so a per-run override genuinely changes
+    # which strike a backtest day trades. SPREAD_PENALTY_RS is bt=False:
+    # backtest's exit side is a documented fork (app/backtest/engine.py's
+    # _try_exit does NOT call evaluate_exit/resolve_delayed_exit_premium —
+    # see CLAUDE.md's backtest-fidelity-limitation note) with its own
+    # independent SLIPPAGE_BPS-based slip_buy_premium/slip_sell_premium
+    # model; nothing in backtest reads this cfg key, so offering it as a
+    # per-run override would silently do nothing — same reasoning as
+    # BN_SCALP_TIME_STOP_S's bt=False above.
+    _s("BN_ITM_OFFSET_POINTS", "BankNifty ITM offset (pts)", "float", "Strike & Execution Pricing",
+       min_=0, max_=2000, step=50,
+       help_="Deep-ITM strike offset from spot (CE: spot-offset, PE: spot+offset), snapped to the nearest 100-pt strike. 0 = trade the exact ATM strike instead."),
+    _s("NF_ITM_OFFSET_POINTS", "Nifty 50 ITM offset (pts)", "float", "Strike & Execution Pricing",
+       min_=0, max_=1000, step=25,
+       help_="Deep-ITM strike offset from spot (CE: spot-offset, PE: spot+offset), snapped to the nearest 50-pt strike. 0 = trade the exact ATM strike instead."),
+    _s("BN_SPREAD_PENALTY_RS", "BankNifty spread penalty (₹)", "float", "Strike & Execution Pricing",
+       min_=0, max_=20, step=0.25, bt=False,
+       help_="Flat ₹ simulating crossing the bid/ask spread: added to the Black-Scholes mark on every entry fill, subtracted on every exit fill (any reason). Frozen at entry — a live edit never affects an already-open trade. Live-only: backtest's exit side uses its own separate SLIPPAGE_BPS model instead."),
+    _s("NF_SPREAD_PENALTY_RS", "Nifty 50 spread penalty (₹)", "float", "Strike & Execution Pricing",
+       min_=0, max_=20, step=0.25, bt=False,
+       help_="Flat ₹ simulating crossing the bid/ask spread: added to the Black-Scholes mark on every entry fill, subtracted on every exit fill (any reason). Frozen at entry — a live edit never affects an already-open trade. Live-only: backtest's exit side uses its own separate SLIPPAGE_BPS model instead."),
 ]
 
 _BY_KEY: Dict[str, Dict[str, Any]] = {s["key"]: s for s in SPEC}
-GROUP_ORDER = ["Scalp Timing", "Paper Account", "Execution Delay", "BN Alerts", "NF Alerts"]
+GROUP_ORDER = ["Scalp Timing", "Paper Account", "Execution Delay", "Strike & Execution Pricing", "BN Alerts", "NF Alerts"]
 
 # cfg-attr key → (spec, role) where role is "value" | "hour" | "min" — lets the
 # loader validate raw stored attrs (incl. expanded time parts) one by one.

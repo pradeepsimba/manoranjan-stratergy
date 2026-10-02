@@ -388,12 +388,19 @@ class DatabaseService:
                 "WHERE (created_at AT TIME ZONE 'Asia/Kolkata')::date = $1 ORDER BY id",
                 today,
             )
-        return [dict(r) for r in rows]
+        # basket_legs_at_entry is jsonb — decode it the same way every other
+        # jsonb read path in this file does (found in review, 2026-10-02):
+        # this was the one positions-table reader still returning it as a raw
+        # JSON-text string instead of a real array, double-encoding it in any
+        # JSON response built from this. _restore_from_db doesn't use this
+        # method (it has its own ad hoc json.loads), so that path was never
+        # affected — only /api/positions-style HTTP reads were.
+        return [self._decode_jsonb(dict(r), "basket_legs_at_entry") for r in rows]
 
     async def get_all_positions(self) -> List[Dict[str, Any]]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM positions ORDER BY id DESC LIMIT 500")
-        return [dict(r) for r in rows]
+        return [self._decode_jsonb(dict(r), "basket_legs_at_entry") for r in rows]
 
     # ── Self-recorded BankNifty index history ──────────────────────────────────
 

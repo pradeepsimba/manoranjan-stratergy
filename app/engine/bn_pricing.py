@@ -46,12 +46,35 @@ def get_itm_strike(spot: float, option_type: str, offset: float) -> int:
     the contract in-the-money — CE: spot - offset (a strike below spot is
     ITM for a call); PE: spot + offset (a strike above spot is ITM for a
     put) — then rounded to the nearest real 100-point strike via
-    get_atm_strike. `offset` (cfg.BN_ITM_OFFSET_POINTS, default 300 — ~3
-    strikes) is large relative to the 100-point step, so round-to-nearest
-    never flips which side of spot the result lands on.
+    get_atm_strike. offset<=0 is the literal exact-ATM case (no ITM claim
+    either way).
+
+    Nearest-rounding is safe (matches this function's original design) for
+    any offset that's "large relative to the 100-point step" — true for
+    every value this repo has ever actually used (BN_ITM_OFFSET_POINTS
+    default 300). But offset became a Settings-page/backtest-override
+    dynamic value 2026-10-02, and nearest-rounding is NOT safe for every
+    value a user could now dial in: an offset strictly between 0 and half
+    the strike step (0 < offset < 50) can round back past spot, e.g.
+    spot=56460, offset=5 -> raw=56455 -> nearest-rounds to 56500, which is
+    ABOVE spot — an OTM strike despite asking for "ITM, offset 5," silently
+    defeating the deep-ITM premise the W-OBI filter and premium/target/stop
+    sizing all assume (found in review). Guarded below: fall back to
+    floor (CE) / ceil (PE) — guaranteed correct side regardless of offset
+    size — ONLY when nearest-rounding would land on the wrong side of spot.
+    For every offset this repo currently actually uses (300/150, both far
+    outside the danger zone), nearest always already lands correctly, so
+    this guard never changes the selected strike from before this fix.
     """
+    if offset <= 0:
+        return get_atm_strike(spot)
     raw = (spot - offset) if option_type == "CE" else (spot + offset)
-    return get_atm_strike(raw)
+    nearest = get_atm_strike(raw)
+    if option_type == "CE" and nearest >= spot:
+        return int(math.floor(raw / 100.0) * 100)
+    if option_type == "PE" and nearest <= spot:
+        return int(math.ceil(raw / 100.0) * 100)
+    return nearest
 
 
 def build_monthly_option_symbol(underlying: str, expiry: datetime, strike: int, option_type: str) -> str:

@@ -995,15 +995,26 @@ function deleteRun(runId) {
     .catch(e => console.error('Delete failed:', e));
 }
 
-// The Backtest panel's HTML was removed from index.html (dashboard
-// simplification), so the page-load "resume a running backtest / load the
-// last result" fetch that used to live here was deleted too — it called
-// renderBtHistory/setBtStatus/etc., which unconditionally touch bt-history/
-// bt-status/bt-trades and would throw a TypeError on every page load now
-// that those elements don't exist. The /api/backtest* endpoints and
-// runBacktest()/pollBacktest()/loadRun() etc. below are all still there and
-// still work if ever called directly — there's just no button left to call
-// them from.
+// Backtest panel history-on-load (2026-10-02, found in review) — the
+// comment that used to sit here claimed the Backtest panel's HTML was
+// removed from index.html and there was "no button left to call [the
+// backtest functions] from," but that was stale even when first written:
+// the panel's markup was restored verbatim on 2026-09-24 (see CLAUDE.md's
+// "Backtest panel's HTML was missing" note) and has a real Run button
+// wired to runBacktest() ever since. The stale comment masked a real gap
+// it never actually covered: nothing populated bt-history on a fresh page
+// load/reload — renderBtHistory only ever ran after a run just finished
+// (pollBacktest) or was deleted (deleteRun), so reopening the dashboard
+// showed an empty history strip even with completed runs already on
+// record, until the user started or deleted a run in THAT session.
+fetch('/api/backtests').then(r => r.json()).then(runs => {
+  renderBtHistory(runs);
+  // Resume polling a run that was still in progress when the page loaded
+  // (e.g. a backtest kicked off from another tab, or this tab refreshed
+  // mid-run) — same completion handling pollBacktest already does.
+  const running = Array.isArray(runs) ? runs.find(r => r.status === 'running') : null;
+  if (running) { setBtStatus('running…', 'yellow'); setRunBtn(true); startPolling(running.run_id); }
+}).catch(() => {});
 
 initTradesDB();
 connect();

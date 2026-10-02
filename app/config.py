@@ -856,8 +856,14 @@ NF_SCALP_AGREEING_WEIGHT_MIN = 0.60
 # force delta > 0.75 across the full cycle would need a MUCH deeper
 # offset (roughly BN~1200+, NF~500+ per that same test), which was
 # considered too far from real strike liquidity to be worth it.
-BN_ITM_OFFSET_POINTS = 300.0
-NF_ITM_OFFSET_POINTS = 150.0
+#
+# DYNAMIC (2026-10-02, explicit user decision — "Dynamic Strike Selection")
+# — moved into _DEFAULTS below / app/services/settings.py's "Strike &
+# Execution Pricing" group, DEFAULTS UNCHANGED (300.0/150.0 — explicit user
+# decision to keep current behavior rather than reset to 0). get_itm_strike
+# already mathematically reduces to the exact ATM strike when offset==0
+# (raw = spot, unchanged math) — no call-site logic needed changing, only
+# making the value Settings-adjustable.
 
 # W-OBI execution filter minimum ratio — see app/engine/wobi.py. Same
 # formula and threshold for BOTH CE and PE entries: W-OBI is computed on
@@ -906,6 +912,17 @@ NF_WOBI_MIN_RATIO = 2.5
 # last-marked premium. Same idea as the existing (index-side) SLIPPAGE_BPS
 # backtest convention, just premium-denominated here since that's what this
 # strategy's exit is denominated in.
+#
+# VESTIGIAL as of 2026-10-02 (explicit user decision — "Dynamic Spread
+# Penalty... spread_penalty replaces it entirely") — BN_SPREAD_PENALTY_RS/
+# NF_SPREAD_PENALTY_RS below now models spread-crossing slippage on EVERY
+# entry/exit fill (not just TIME_SCRATCH), so these two values are no
+# longer read by any real settlement math (bn_entry_exit.py/nf_entry_exit.py
+# evaluate_exit/resolve_delayed_exit_premium, bn_trade.py/nf_trade.py
+# force_close). Kept only because BNTrade/NFTrade.scratch_slippage_rs stays
+# a real dataclass field (duck-type compatibility with any code still
+# constructing a trade the old way) — same "kept, not deleted" treatment
+# this file already gives breakeven_trigger/trail_trigger/trail_distance.
 BN_SCALP_SCRATCH_SLIPPAGE_RS = 0.10
 NF_SCALP_SCRATCH_SLIPPAGE_RS = 0.10
 
@@ -1058,6 +1075,34 @@ _DEFAULTS: Dict[str, Any] = {
     "NF_EXIT_FILL_DELAY_MS":  200.0,
     "BN_FILL_MAX_WAIT_MS":    1500.0,
     "NF_FILL_MAX_WAIT_MS":    1500.0,
+
+    # ── Strike & execution pricing (2026-10-02, explicit user decision —
+    # "Dynamic Strike Selection" + "Dynamic Spread Penalty"). ITM_OFFSET is
+    # bt=True (backtest's shared evaluate_entry calls get_itm_strike with
+    # this same value); SPREAD_PENALTY_RS is bt=False (backtest's exit side
+    # is a documented fork with its own independent SLIPPAGE_BPS model —
+    # see settings.py's SPEC comment on these two keys for the full
+    # reasoning).
+    #
+    # ITM_OFFSET_POINTS: see the now-removed static declaration's own
+    # comment above for the offset-vs-delta analysis. Defaults UNCHANGED
+    # (300.0/150.0) — an explicit user decision to preserve current live
+    # behavior; set to 0 from the Settings page to trade the exact ATM
+    # strike instead of a deep-ITM one.
+    "BN_ITM_OFFSET_POINTS": 300.0,
+    "NF_ITM_OFFSET_POINTS": 150.0,
+    # SPREAD_PENALTY_RS: flat ₹ amount simulating crossing the bid/ask
+    # spread on every real fill — ADDED to the Black-Scholes mark on every
+    # entry fill (fill_delayed_entry, place_manual_order), SUBTRACTED on
+    # every exit fill (resolve_delayed_exit_premium, force_close), for
+    # EVERY exit reason (TARGET/STOP/TIME_SCRATCH/EOD/MANUAL EXIT alike) —
+    # replaces BN_SCALP_SCRATCH_SLIPPAGE_RS/NF_SCALP_SCRATCH_SLIPPAGE_RS
+    # above entirely (that only ever applied to TIME_SCRATCH). Frozen onto
+    # the trade at entry (BNTrade/NFTrade.spread_penalty), same as every
+    # other risk parameter, so a live Settings edit never affects an
+    # already-open trade's own economics.
+    "BN_SPREAD_PENALTY_RS": 1.00,
+    "NF_SPREAD_PENALTY_RS": 1.00,
 }
 
 _runtime_overrides: Dict[str, Any] = {}

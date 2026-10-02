@@ -147,12 +147,15 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(lookback)
     bs = black_scholes(spot, strike, T, cfg.NF_RISK_FREE_RATE, iv, option_type)
+    # Spread-crossing slippage on the Ask (2026-10-02, explicit user decision
+    # — see bn_trade.place_manual_order's identical comment).
+    entry_premium = bs["price"] + cfg.NF_SPREAD_PENALTY_RS
 
     signal = NFSignal(
         direction=direction, entry_index_price=spot, bar_time=now.isoformat(),
         confidence=0.0, green=0, red=0, strong_qty=0, leader_signal="MANUAL",
         bn_bull=0.0, bn_bear=0.0, strike=strike, expiry=expiry.isoformat(),
-        entry_premium=bs["price"], iv_used=iv,
+        entry_premium=entry_premium, iv_used=iv,
     )
     return place_paper_order(signal, now)
 
@@ -234,10 +237,13 @@ def _try_fill_pending_exit(trade: NFTrade, now: datetime, current_index_price: f
 def force_close(now: datetime, current_index_price: float,
                 nf_closes_lookback: np.ndarray, label: str = "EOD SQUARE-OFF") -> Optional[NFTrade]:
     """NF mirror of bn_trade.force_close (used for the 15:30 EOD flat, and
-    — with label="MANUAL EXIT" — the dashboard's manual Exit button)."""
+    — with label="MANUAL EXIT" — the dashboard's manual Exit button).
+    Settles at evaluate_exit's raw mark minus trade.spread_penalty (2026-10-02,
+    explicit user decision — see bn_trade.force_close's identical comment)."""
     st = get_state()
     trade = st.active_trade_nf
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
     ev = evaluate_exit(trade, now, current_index_price, nf_closes_lookback)
-    return _settle(trade, now, current_index_price, ev.current_premium, label)
+    exit_premium = max(0.0, ev.current_premium - trade.spread_penalty)
+    return _settle(trade, now, current_index_price, exit_premium, label)
