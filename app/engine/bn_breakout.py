@@ -62,11 +62,14 @@ def detect_swing_breakouts(candles: List[Candle], swings: Dict[str, List[Dict]])
 def detect_sr_breakouts(candles: List[Candle], sr_levels: Dict[str, List[float]]) -> Dict:
     """Port of c.html's detectSRBreakouts — uses the nearest support/resistance
     to the latest close (2026-09-24 fix, found in review: this used to take
-    index [0] of sr_levels["supports"/"resistances"], which detect_support_
-    resistance builds as the 3 numerically-HIGHEST clustered levels sliced
-    with [-3:] — still ascending within that slice, so [0] was the SMALLEST
-    of those top-3, not necessarily anywhere near the current price at all,
-    contradicting this function's own "nearest" docstring)."""
+    index [0] of sr_levels["supports"/"resistances"], which at the time was
+    the 3 numerically-HIGHEST clustered levels, still ascending within that
+    slice — so [0] was the SMALLEST of those top-3, not necessarily anywhere
+    near the current price. detect_support_resistance itself was fixed
+    2026-10-02 to keep the 3 NEAREST-to-price clusters instead of the 3
+    numerically-highest ones, so this function's min(key=...) now has the
+    right candidates to choose from in the first place, not just the
+    right selection logic over a possibly-wrong candidate set)."""
     if not candles or not sr_levels["supports"] or not sr_levels["resistances"]:
         return {"type": None, "direction": None, "details": {}}
     latest = candles[-1]
@@ -146,9 +149,32 @@ def detect_support_resistance(candles: List[Candle]) -> Dict[str, List[float]]:
             resistances.append(c)
     clustered_supports    = cluster_levels(supports, 0.25)
     clustered_resistances = cluster_levels(resistances, 0.25)
+    # Keep the 3 clusters NEAREST the current price, not the 3 numerically
+    # highest (2026-10-02 fix, found in review). cluster_levels returns its
+    # output sorted ascending, so the old `[-3:]` kept the top-3 by VALUE —
+    # after a multi-day decline, those are stale levels from before the
+    # drop, while the actually-nearby levels (now the lowest clusters) got
+    # silently discarded. detect_sr_breakouts already picks the nearest
+    # level AMONG whatever 3 survive here (its own 2026-09-24 fix), but that
+    # can't recover a level this slice already dropped. latest_price falls
+    # back to the clusters' own values when there's no candle yet (keeps
+    # `[-3:]`'s old behavior rather than crashing on an empty candles list —
+    # this function is still called from a few sites that can hand it an
+    # empty/short buffer early in the session).
+    latest_price = candles[-1].close if candles else None
+    if latest_price:
+        clustered_supports    = sorted(clustered_supports,
+                                       key=lambda lvl: abs(lvl - latest_price))[:3]
+        clustered_resistances = sorted(clustered_resistances,
+                                       key=lambda lvl: abs(lvl - latest_price))[:3]
+        clustered_supports.sort()
+        clustered_resistances.sort()
+    else:
+        clustered_supports    = clustered_supports[-3:]
+        clustered_resistances = clustered_resistances[-3:]
     return {
-        "supports":    clustered_supports[-3:],
-        "resistances": clustered_resistances[-3:],
+        "supports":    clustered_supports,
+        "resistances": clustered_resistances,
     }
 
 

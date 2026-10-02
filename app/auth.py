@@ -55,7 +55,23 @@ class LoginAttemptLimiter:
             f = self._by_ip.get(ip)
             if f is not None and f.locked_until is not None and now <= f.locked_until:
                 return False
-            fresh_window = f is None or f.locked_until is not None
+            # fresh_window also needs an IDLE_RETENTION_SEC check against
+            # f.last_attempt (2026-10-02, found in review) — without it, an
+            # IP that never reached MAX_FAILURES (locked_until stays None)
+            # had its count accumulate FOREVER regardless of how far apart
+            # the attempts were in real time; the only thing that ever reset
+            # it was _maybe_sweep_locked's purely incidental, global (not
+            # per-IP), every-200-total-calls sweep. A handful of mistyped
+            # passwords spread across days could then combine with one more
+            # much later attempt to trigger a lockout, contradicting the
+            # 15-minute-window model IDLE_RETENTION_SEC == LOCKOUT_SEC
+            # implies. Checking it here makes the window genuinely per-IP
+            # and recency-based, not coupled to unrelated global traffic.
+            fresh_window = (
+                f is None
+                or f.locked_until is not None
+                or (now - f.last_attempt > IDLE_RETENTION_SEC)
+            )
             count = 1 if fresh_window else f.count + 1
             locked_until = now + LOCKOUT_SEC if count >= MAX_FAILURES else None
             self._by_ip[ip] = _Failures(count, locked_until, now)

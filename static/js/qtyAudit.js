@@ -88,7 +88,20 @@ function pruneOldStockRecords(daysToKeep = 2) {
 
   countReq.onsuccess = () => {
     const total = countReq.result;
-    if (total > 20000) {
+    // Threshold raised 20000 -> 500000 (2026-10-02, found in review) — at the
+    // documented ~100ms TICK_UPDATE cadence across up to 18 leader stocks,
+    // 20000 rows could be reached in well under 20 minutes of active trading,
+    // long before anything is actually `daysToKeep` days old. That silently
+    // defeated the age-based prune below: the store was never NOT oversized
+    // for more than a few minutes at a time, so this "clear outright" branch
+    // ran on every pruneOldStockRecords() tick instead of the intended rare
+    // "months of unpruned growth" case this guard was written for (see this
+    // function's own comment above). 500000 comfortably covers a full, heavy
+    // trading day's realistic volume so the cursor-based age prune below
+    // actually gets to do its job under normal conditions, while still
+    // bounding worst-case store size well short of the multi-hundred-MB
+    // backlog that made a cursor prune itself too slow in the first place.
+    if (total > 500000) {
       const clearTx = _qtyDb.transaction('stocks', 'readwrite');
       clearTx.objectStore('stocks').clear();
       clearTx.oncomplete = () => console.log(`Cleared oversized stocks store (${total} rows) instead of a slow row-by-row prune.`);
