@@ -620,18 +620,24 @@ SESSION_END_HOUR, SESSION_END_MIN = 15, 30   # terminate session
 
 # ── Static: BN Strategy.
 #
-# BN_SAME_DIRECTION_REQUIRED is the ONLY survivor of the old (2026-09-19)
+# BN_SAME_DIRECTION_REQUIRED is the last survivor of the old (2026-09-19)
 # leader-vote rule and the (2026-07-era) sideways-range/momentum/volume-
 # surge/composite-indicator gate sequence before it — both fully REMOVED
 # 2026-09-21 alongside app/engine/bn_signals.py/nf_signals.py (which
 # implemented them) once the Top-8 weighted-basket scalp strategy replaced
 # bn_entry_exit.evaluate_entry entirely (see "Static: Scalping strategy"
-# below). It survives ONLY because app/backtest/signal_study.py — a
-# standalone historical-analysis tool, entirely separate from the live/
-# backtest trading engine, never called by evaluate_entry/evaluate_exit —
-# still reads it for its own "what would the old leader-vote rule have
-# done" study. If signal_study.py is ever removed too, this can go with it.
-BN_SAME_DIRECTION_REQUIRED  = 9     # of 14 real NIFTY BANK stocks must agree — signal_study.py only, see above
+# below). NOW FULLY DEAD CODE, read by nothing (corrected 2026-10-02, found
+# in review — this comment used to claim app/backtest/signal_study.py still
+# reads it for its own "what would the old leader-vote rule have done"
+# study; that was true until a 2026-09-23 fix inside that same tool changed
+# its mode="direction" default to cfg.BN_ALERT_CONSENSUS_REQUIRED instead,
+# since BN_SAME_DIRECTION_REQUIRED's value of 9 is sized for the old
+# 14-stock leader population and is mathematically unreachable against that
+# tool's fixed 6-leader population — see signal_study.py's own docstring. A
+# repo-wide grep confirms zero remaining reads. Kept only as inert
+# historical context, not deleted — safe to remove entirely if ever noticed
+# again).
+BN_SAME_DIRECTION_REQUIRED  = 9     # of 14 real NIFTY BANK stocks — dead, see above
 
 # BN Strategy — per-stock volume-surge thresholds, compared against each
 # leader's latest 5m bar volume (see BN_QTY_THRESHOLD_ATTR above and

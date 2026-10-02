@@ -18,9 +18,9 @@ this replaced) and its dedicated config constants were fully DELETED
 2026-09-21 — this repo's earlier "kept unused for revert safety" stance
 (the 2026-09-19 rewrite's own comments) was explicitly superseded by a
 follow-up user decision to actually remove dead code once the replacement
-was confirmed working. BN_SAME_DIRECTION_REQUIRED survives in config.py
-only because app/backtest/signal_study.py (a standalone, unrelated
-historical-analysis tool) still reads it.
+was confirmed working. BN_SAME_DIRECTION_REQUIRED is now fully dead code
+itself (corrected 2026-10-02, found in review — see its own comment in
+config.py for the full history of why this claim went stale).
 
 _leader_qty_surge/_stock_qty_threshold below are UNRELATED to this
 strategy — kept only because scheduler.py separately uses them to annotate
