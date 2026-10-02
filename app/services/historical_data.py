@@ -74,7 +74,27 @@ async def _fetch(
     intervals: List[str],
     from_date: str,
     to_date:   str,
+    *,
+    update_api_status: bool = True,
 ) -> Dict[str, Dict[str, List[Candle]]]:
+    """
+    update_api_status (2026-10-02, found in review — default True preserves
+    this function's original unconditional behavior): st.api_status is the
+    SAME field the live dashboard's "API" health badge renders. This module
+    is called from four genuinely unrelated places — the live scheduler's
+    _load_all_historical (the one call that SHOULD reflect real live-feed
+    health), the 15m S/R refresh loop (cosmetic Stock Candles panel data,
+    every 5 min), signal_study.py (a standalone, documented-as-read-only
+    analysis tool, reachable live via POST /api/signal-study/bn at any time),
+    and backtest data loading (a background task in the same process/event
+    loop). Before this flag existed, ANY of the latter three failing (e.g. a
+    vendor timeout on a user-triggered backtest run) would flip the live
+    dashboard's badge to "API Error" even though market_data.py's WS feed
+    was completely healthy and ticks were still flowing — or, just as
+    wrongly, mask a real live-feed outage with a stale "API OK" from an
+    unrelated successful fetch. Callers that shouldn't affect the live
+    badge pass update_api_status=False.
+    """
     url     = cfg.API_URL_TEMPLATE.format(cfg.API_HOST, from_date, to_date)
     payload = [
         {"stockname": s["stockname"], "stock_symbol": s["stock_symbol"],
@@ -89,14 +109,17 @@ async def _fetch(
         # a worker thread so the event loop (dashboard WS, tick loop) never
         # stalls behind a big fetch.
         data   = await asyncio.to_thread(resp.json)
-        get_state().api_status = "API OK"
+        if update_api_status:
+            get_state().api_status = "API OK"
     except Exception as e:
-        get_state().api_status = f"API Error: {e}"
+        if update_api_status:
+            get_state().api_status = f"API Error: {e}"
         print(f"Historical fetch error: {e}")
         return {}
 
     if not isinstance(data, list):
-        get_state().api_status = "API Error: unexpected response shape"
+        if update_api_status:
+            get_state().api_status = "API Error: unexpected response shape"
         print(f"Historical fetch: expected a list, got {type(data).__name__}: {data!r:.200}")
         return {}
 
@@ -135,21 +158,26 @@ async def _fetch_all(
     intervals: List[str],
     from_date: str,
     to_date:   str,
+    *,
+    update_api_status: bool = True,
 ) -> Dict[str, Dict[str, List[Candle]]]:
     """
     Split stocks into HIST_BATCH_SIZE chunks and POST all chunks concurrently.
     For 500 stocks with batch=100: 5 parallel requests instead of one giant one.
     Failed batches are silently dropped so healthy batches still populate state.
+    update_api_status: see _fetch's own docstring.
     """
     if not stocks:
         return {}
     if len(stocks) <= cfg.HIST_BATCH_SIZE:
-        return await _fetch(stocks, intervals, from_date, to_date)
+        return await _fetch(stocks, intervals, from_date, to_date,
+                            update_api_status=update_api_status)
 
     batches   = [stocks[i : i + cfg.HIST_BATCH_SIZE]
                  for i in range(0, len(stocks), cfg.HIST_BATCH_SIZE)]
     responses = await asyncio.gather(
-        *[_fetch(b, intervals, from_date, to_date) for b in batches],
+        *[_fetch(b, intervals, from_date, to_date, update_api_status=update_api_status)
+          for b in batches],
         return_exceptions=True,
     )
     merged: Dict[str, Dict[str, List[Candle]]] = {}
@@ -175,7 +203,12 @@ async def fetch_indicator_history(
     watchlist: Dict[str, str],
     interval:  str = cfg.INTERVAL_5M,
     days_back: int = 5,
+    *,
+    update_api_status: bool = True,
 ) -> Dict[str, List[Candle]]:
+    """update_api_status: see _fetch's own docstring — pass False for any
+    caller other than the live scheduler's main historical load (e.g. the
+    15m S/R refresh loop, signal_study.py)."""
     today     = datetime.now(IST).date()
     from_date = (today - timedelta(days=days_back)).isoformat()
     to_date   = (today + timedelta(days=1)).isoformat()
@@ -183,7 +216,8 @@ async def fetch_indicator_history(
                  for sym, tok in watchlist.items()]
     if not stocks:
         return {}
-    data = await _fetch_all(stocks, [interval], from_date, to_date)
+    data = await _fetch_all(stocks, [interval], from_date, to_date,
+                            update_api_status=update_api_status)
     return {tok: node.get(interval, []) for tok, node in data.items()}
 
 
@@ -191,6 +225,8 @@ async def fetch_candles_for_date(
     watchlist:   Dict[str, str],
     target_date: _date,
     interval:    str = cfg.INTERVAL_5M,
+    *,
+    update_api_status: bool = False,
 ) -> Dict[str, List[Candle]]:
     """
     One specific calendar day's bars for each stock in `watchlist` (keyed by
@@ -209,5 +245,6 @@ async def fetch_candles_for_date(
                  for sym, tok in watchlist.items()]
     if not stocks:
         return {}
-    data = await _fetch_all(stocks, [interval], from_date, to_date)
+    data = await _fetch_all(stocks, [interval], from_date, to_date,
+                            update_api_status=update_api_status)
     return {tok: node.get(interval, []) for tok, node in data.items()}

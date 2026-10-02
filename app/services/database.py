@@ -119,6 +119,15 @@ CREATE TABLE IF NOT EXISTS app_settings (
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol_status ON positions(symbol, status);
 CREATE INDEX IF NOT EXISTS idx_positions_created_at_date ON positions(((created_at AT TIME ZONE 'Asia/Kolkata')::date));
+-- Added 2026-10-02, found in review: update_position_exit's actual hot-path
+-- predicate (`WHERE order_id=$N AND status='OPEN'`, run on every single
+-- trade close, algo or manual, BN and NF) had NO index support — every
+-- symbol value is a constant per instrument ("BANKNIFTY"/"NIFTY 50"), so
+-- idx_positions_symbol_status above is never actually selective enough to
+-- help this query (it's the wrong index for the workload, not removed here
+-- since dropping an existing index is a separate decision from adding the
+-- one this query actually needs).
+CREATE INDEX IF NOT EXISTS idx_positions_order_id_status ON positions(order_id, status);
 
 -- outcome widened 10->20 chars (2026-09-24, found in review) — the CREATE
 -- TABLE IF NOT EXISTS above only affects a brand-new database; an already-
@@ -392,9 +401,16 @@ class DatabaseService:
         # jsonb read path in this file does (found in review, 2026-10-02):
         # this was the one positions-table reader still returning it as a raw
         # JSON-text string instead of a real array, double-encoding it in any
-        # JSON response built from this. _restore_from_db doesn't use this
-        # method (it has its own ad hoc json.loads), so that path was never
-        # affected — only /api/positions-style HTTP reads were.
+        # JSON response built from this.
+        #
+        # CORRECTION (2026-10-02, found in review): this comment used to claim
+        # "_restore_from_db doesn't use this method... so that path was never
+        # affected" — that was wrong. scheduler._restore_from_db calls this
+        # method directly and its own `_apply_row` had its own ad hoc
+        # `json.loads(r["basket_legs_at_entry"])`, which this pre-decode
+        # change broke (TypeError on an already-decoded list) — fixed at that
+        # call site to accept either a raw string or an already-decoded list,
+        # same tolerant pattern `_decode_jsonb` itself already uses.
         return [self._decode_jsonb(dict(r), "basket_legs_at_entry") for r in rows]
 
     async def get_all_positions(self) -> List[Dict[str, Any]]:

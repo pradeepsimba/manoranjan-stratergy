@@ -915,9 +915,26 @@ class SchedulerService:
                 # "JSONB reads" gotcha) — decode it, defaulting to [] for a
                 # row saved before this column existed (NULL) same as every
                 # other backfilled-from-scratch field above.
+                #
+                # Tolerant of EITHER a raw string OR an already-decoded list
+                # (2026-10-02 fix, found in review) — get_today_positions
+                # (the only caller that feeds rows here) was itself fixed
+                # the same day to pre-decode this column via _decode_jsonb,
+                # which this call site wasn't updated to match: a plain
+                # json.loads() on an already-decoded list raises
+                # `TypeError: the JSON object must be str, bytes or
+                # bytearray, not list`. Caught per-row by this function's own
+                # try/except, so it didn't crash the process — it silently
+                # dropped every row with basket_legs_at_entry populated (every
+                # algo-fired trade since 2026-09-30) from restart recovery,
+                # reverting st.active_trade/active_trade_nf to None despite a
+                # real open position existing in the DB, and breaking the
+                # daily trade cap/cooldown/"Today's Trades" table for the
+                # rest of the session after any restart mid-day.
                 basket_legs_at_entry=(
                     json.loads(r["basket_legs_at_entry"])
-                    if r.get("basket_legs_at_entry") else []
+                    if isinstance(r.get("basket_legs_at_entry"), str)
+                    else (r.get("basket_legs_at_entry") or [])
                 ),
             )
             if status == PositionStatus.CLOSED:
@@ -1255,14 +1272,25 @@ class SchedulerService:
         while True:
             try:
                 if st.phase in (TradingPhase.ACTIVE, TradingPhase.WAIT_ZONE, TradingPhase.CUTOFF):
-                    hist = await fetch_indicator_history(cfg.BN_ALL_STOCKS, "15m", days_back=7)
+                    # update_api_status=False (2026-10-02, found in review) on
+                    # every call in this loop — this is the purely cosmetic
+                    # Stock Candles panel's 15m S/R refresh, not the live
+                    # feed's own health; a vendor hiccup here must not flip
+                    # the dashboard's main "API" badge (and conversely, a
+                    # successful 15m fetch must not mask a real outage in
+                    # _load_all_historical's own, separate status write).
+                    hist = await fetch_indicator_history(cfg.BN_ALL_STOCKS, "15m", days_back=7,
+                                                         update_api_status=False)
                     bn_hist = await fetch_indicator_history(
-                        {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, "15m", days_back=1)
+                        {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, "15m", days_back=1,
+                        update_api_status=False)
                     hist.update(bn_hist)
 
-                    nf_hist = await fetch_indicator_history(cfg.NF_ALL_STOCKS, "15m", days_back=7)
+                    nf_hist = await fetch_indicator_history(cfg.NF_ALL_STOCKS, "15m", days_back=7,
+                                                            update_api_status=False)
                     nf_idx_hist = await fetch_indicator_history(
-                        {cfg.NF_INDEX_NAME: cfg.NF_INDEX_TOKEN}, "15m", days_back=1)
+                        {cfg.NF_INDEX_NAME: cfg.NF_INDEX_TOKEN}, "15m", days_back=1,
+                        update_api_status=False)
                     hist.update(nf_hist)
                     hist.update(nf_idx_hist)
 

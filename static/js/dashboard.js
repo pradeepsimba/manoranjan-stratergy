@@ -385,7 +385,6 @@ function renderEntryLoop(d, liveLeaderRows, ids) {
     return;
   }
 
-  const req = d.sameDirectionRequired || 0;
   const sigOk = d.leaderSignal === 'BUY' || d.leaderSignal === 'SELL';
   const macdOk = !!d.macdDir;
   const emaOk = !!(d.emaBullish || d.emaBearish);
@@ -437,16 +436,45 @@ function renderEntryLoop(d, liveLeaderRows, ids) {
     ['Time window', '09:30–15:00', timeOk],
     ['No active trade', noTradeOk ? 'Clear' : 'Trade open', noTradeOk],
     ['Cooldown', d.cooldownOk ? 'Clear' : `${Math.ceil((d.cooldownMs || 0) / 1000)}s remaining`, d.cooldownOk],
-    ['Sideways range', (d.sidewaysRange != null ? fmt2(d.sidewaysRange) + ' pts' : '—'), d.sidewaysOk],
+    // Sideways range / Strong qty (2026-10-02, found in review): these two
+    // rows' indicators were hardcoded true server-side (sideways_ok/
+    // qty_surge_ok — see bn_entry_exit.py's own "no longer a real gate"
+    // comment) with no real backing data (sidewaysRange is never set;
+    // strongQty is always 0 of leaderRows.length), so they ALWAYS rendered
+    // a green ✔ next to a value that looked like real-but-broken telemetry
+    // ("0/8 above threshold" with a passing checkmark is actively
+    // misleading, not just incomplete). Shown as explicit retired/NA rows
+    // instead — null indicator, matching how RSI below already handles "no
+    // real data backs this row." Still counted in the "N/14 passed" summary
+    // via d.sidewaysOk/d.qtySurgeOk unchanged (those stay hardcoded true so
+    // a real trade can still reach "ENTRY READY" — only THIS row's own
+    // displayed claim was the lie, not the gate-count arithmetic).
+    ['Sideways range', 'retired gate (always clear)', null],
     ['Momentum', escHtml(d.momentumReason || (d.momentumOk ? 'OK' : 'weak')), d.momentumOk],
-    ['Leader vote', `${d.leaderSignal} (${d.green} green / ${d.red} red)`, sigOk],
-    ['Dir count', `G:${d.green} R:${d.red} (need ≥${req})`, d.dirCountOk],
-    ['Strong qty', `${d.strongQty}/${d.leaderRows ? d.leaderRows.length : req} above threshold (need ≥${req})`, d.qtySurgeOk],
+    // Dropped the "(0 green / 0 red)" suffix here too (2026-10-02, found in
+    // review) — same fake-vote-count issue as Dir count above; d.green/
+    // d.red are never set to anything but 0.
+    ['Leader vote', d.leaderSignal, sigOk],
+    // Dir count (2026-10-02, found in review): d.dirCountOk IS a real,
+    // meaningful mirror of the basket-score gate (unlike sidewaysOk/
+    // qtySurgeOk above) — but the "G:0 R:0 (need ≥0)" text it used to show
+    // was always-fake (green/red/sameDirectionRequired are never actually
+    // set), fabricating a vote count that no longer exists in this
+    // strategy. Replaced with an honest statement of what dirCountOk
+    // actually reflects.
+    ['Dir count', d.dirCountOk ? 'Basket score cleared threshold' : 'Basket score within threshold', d.dirCountOk],
+    ['Strong qty', 'retired gate (always clear)', null],
     ['Candle closed', ccOk ? 'Closed' : 'Forming', ccOk],
     ['RSI (14)', d.rsi != null ? Number(d.rsi).toFixed(1) : '—', null],
     ['MACD', `${d.macdDir || '—'}${d.macdVal != null ? ' (' + Number(d.macdVal).toFixed(2) + ')' : ''}`, macdOk],
     ['EMA stack', d.emaBullish ? 'Bullish' : d.emaBearish ? 'Bearish' : 'Neutral', emaOk],
-    ['BN gate', `${d.bnBullish ? 'Bullish' : d.bnBearish ? 'Bearish' : 'Neutral'} (bull ${Number(d.bnBull || 0).toFixed(1)} / bear ${Number(d.bnBear || 0).toFixed(1)})`, gateOk],
+    // BN gate (2026-10-02, found in review): dropped the "(bull X / bear Y)"
+    // suffix — d.bnBull/d.bnBear are separate float fields from
+    // d.bnBullish/d.bnBearish and are never actually set by evaluate_entry
+    // (always the dataclass default 0.0), so this always rendered a fake
+    // "(bull 0.0 / bear 0.0)" regardless of the real Bullish/Bearish/Neutral
+    // state shown right before it.
+    ['BN gate', d.bnBullish ? 'Bullish' : d.bnBearish ? 'Bearish' : 'Neutral', gateOk],
     ['No candle repeat', noRepeatOk ? 'New candle' : 'Already traded', noRepeatOk],
     ['Entry ITM strike/premium', d.itmStrike != null
       ? `${d.itmStrike} @ ₹${fmt2(d.itmPremium)} (IV ${d.itmIv != null ? (d.itmIv * 100).toFixed(1) + '%' : '—'})`

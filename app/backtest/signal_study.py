@@ -115,7 +115,13 @@ async def run_bn_leader_consensus_study(
     days_back = max((datetime.now(IST).date() - from_date).days + 1, 1)
 
     # 2. Leader stocks over that same span (fully archived on the vendor).
-    leader_hist = await fetch_indicator_history(cfg.BN_LEADER_STOCKS, cfg.INTERVAL_5M, days_back=days_back)
+    # update_api_status=False (2026-10-02, found in review) — this is a
+    # standalone, documented-as-read-only analysis tool (reachable live via
+    # POST /api/signal-study/bn at any time); a vendor hiccup on THIS fetch
+    # must not flip the live dashboard's "API" health badge, which is meant
+    # to reflect the actual live feed, not this tool's own study runs.
+    leader_hist = await fetch_indicator_history(cfg.BN_LEADER_STOCKS, cfg.INTERVAL_5M,
+                                                days_back=days_back, update_api_status=False)
     leader_by_time: Dict[str, Dict[str, Candle]] = {}
     for token, bars in leader_hist.items():
         for b in bars:
@@ -199,8 +205,13 @@ async def run_bn_leader_consensus_study(
         "max_down_count": max_down_count,
     }
     if result["total_signals"] == 0:
-        setting_hint = ("BN_SAME_DIRECTION_REQUIRED" if mode == "direction"
-                        else "BN_ALERT_CONSENSUS_REQUIRED or the per-stock point thresholds in Settings → BN Alerts")
+        # Both modes default `required` to cfg.BN_ALERT_CONSENSUS_REQUIRED
+        # (see the `if required is None:` line above) — this hint used to
+        # tell `mode="direction"` callers to try lowering
+        # BN_SAME_DIRECTION_REQUIRED instead (found in review, 2026-10-02),
+        # but nothing in this function reads that setting any more; lowering
+        # it would have had zero effect on a 0-signal result here.
+        setting_hint = "BN_ALERT_CONSENSUS_REQUIRED or the per-stock point thresholds in Settings → BN Alerts"
         result["note"] = (
             f"Scanned {bars_scanned} bars ({bars_with_leader_data} had matching leader data). "
             f"Closest it ever got: {max(max_up_count, max_down_count)} of 6 leaders agreed "

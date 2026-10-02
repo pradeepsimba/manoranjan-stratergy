@@ -104,8 +104,13 @@ async def load_backtest_data(db, from_d: date, to_d: date,
     fetch_to   = (to_d + timedelta(days=1)).isoformat()
 
     stock_list = [{"stockname": n, "stock_symbol": t} for n, t in cfg.BN_ALL_STOCKS.items()]
+    # update_api_status=False (2026-10-02, found in review) — a backtest run
+    # executes as a background task in the SAME process/event loop as the
+    # live scheduler; a vendor hiccup on this historical fetch must not flip
+    # the live dashboard's "API" health badge, which is meant to reflect the
+    # actual live feed, not a user-triggered backtest's own data load.
     stocks_raw, ibars = await asyncio.gather(
-        _fetch_all(stock_list, [tf], fetch_from, fetch_to),
+        _fetch_all(stock_list, [tf], fetch_from, fetch_to, update_api_status=False),
         db.get_bn_index_bars(fetch_from, fetch_to),
     )
 
