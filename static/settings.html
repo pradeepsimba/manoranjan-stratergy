@@ -180,6 +180,9 @@
     <input class="field-input set-search" id="set-search" type="text"
            placeholder="Filter settings…" oninput="filterSettings(this.value)">
     <button class="btn-mini" onclick="resetAll()" title="Reset every setting to its default">Reset all</button>
+    <button class="btn-mini" onclick="exportSettingsCsv()" title="Download every current setting as a CSV file">Export CSV</button>
+    <button class="btn-mini" onclick="document.getElementById('settings-csv-file').click()" title="Upload a CSV (key,value columns) to update settings in bulk">Import CSV</button>
+    <input type="file" id="settings-csv-file" accept=".csv,text/csv" style="display:none" onchange="importSettingsCsv(this)">
     <div class="nav-seg" id="settings-instr-filter" aria-label="Instrument settings">
       <button id="settings-instr-btn-both" onclick="setSettingsInstrFilter('both')">Both</button>
       <button id="settings-instr-btn-bn" onclick="setSettingsInstrFilter('bn')">BankNifty</button>
@@ -224,6 +227,6 @@
 
 
 <script src="/js/util.js?v=49"></script>
-<script src="/js/settings.js?v=27"></script>
+<script src="/js/settings.js?v=28"></script>
 </body>
 </html>

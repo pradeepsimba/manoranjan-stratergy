@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -104,6 +104,71 @@ async def reset_settings(req: SettingsReset) -> Dict[str, Any]:
         raise HTTPException(503, "Database not ready")
     try:
         return await settings.reset(_db, req.keys)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/settings/export.csv")
+def export_settings_csv() -> Response:
+    """
+    One row per SPEC entry (key/label/group/type/current value/default/
+    bounds) — current effective value, same format describe() already uses
+    for display (e.g. "HH:MM" for a time setting), so a round-trip through
+    import_settings_csv below with no edits is a no-op. Extra columns
+    (label/group/default/min/max/step/bt) are for a human editing the file
+    in a spreadsheet — import only ever reads "key"/"value".
+    """
+    desc = settings.describe()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["key", "value", "label", "group", "type", "default", "min", "max", "step", "bt"])
+    for group in desc["groups"]:
+        for s in group["settings"]:
+            writer.writerow([s["key"], s["value"], s["label"], group["name"], s["type"],
+                             s["default"], s["min"], s["max"], s["step"], s["bt"]])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=settings.csv"},
+    )
+
+
+@router.post("/api/settings/import")
+async def import_settings_csv(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """
+    Upload a CSV (as exported by export_settings_csv, or hand-edited/
+    hand-written) with at least "key"/"value" columns — any other columns
+    are ignored. Reuses apply_and_persist exactly like a manual Settings-
+    page edit, so a CSV import gets the IDENTICAL validation (type/bounds
+    coercion, validate_scalp_windows cross-check) and persistence (atomic
+    upsert/delete, runtime-override apply) — no separate, weaker path. A
+    single bad row aborts the WHOLE import with that row's exact error
+    (expand_changes' existing all-or-nothing behavior, same as a multi-key
+    PUT /api/settings body) rather than silently partially applying.
+    """
+    if _db is None:
+        raise HTTPException(503, "Database not ready")
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")   # -sig strips a BOM (Excel-exported CSVs commonly have one)
+    except UnicodeDecodeError:
+        raise HTTPException(400, "CSV file must be UTF-8 encoded")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames or "key" not in reader.fieldnames or "value" not in reader.fieldnames:
+        raise HTTPException(400, "CSV must have \"key\" and \"value\" column headers")
+
+    changes: Dict[str, Any] = {}
+    for row in reader:
+        key = (row.get("key") or "").strip()
+        if not key:
+            continue
+        changes[key] = row.get("value", "")
+    if not changes:
+        raise HTTPException(400, "No settings rows found in CSV")
+
+    try:
+        return await settings.apply_and_persist(_db, changes)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

@@ -288,6 +288,44 @@ function resetAll() {
                  'All settings reset to defaults', 'Reset failed', 'all');
 }
 
+// ── CSV export / import ──────────────────────────────────────────────────────
+// Export is a plain browser download (same pattern as dashboard.js's backtest
+// exportCsv) — the server streams every current setting's key/value/label/
+// group/type/default/bounds as CSV. Import re-uploads a key/value CSV (only
+// those two columns are read server-side; everything else is for a human
+// editing the file in a spreadsheet) through the SAME apply_and_persist
+// validation path a manual Settings-page edit uses — no separate, weaker
+// validation for the bulk path.
+
+function exportSettingsCsv() {
+  window.location.href = '/api/settings/export.csv';
+}
+
+function importSettingsCsv(input) {
+  const file = input.files && input.files[0];
+  input.value = '';   // allow re-selecting the same file name next time
+  if (!file) return;
+
+  const form = new FormData();
+  form.append('file', file);
+
+  _settingsToast('Importing ' + file.name + '…', true);
+  fetch('/api/settings/import', { method: 'POST', body: form })
+    .then(async r => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
+      specData = d;
+      // A CSV import can touch any number of settings at once — clear every
+      // pending unsaved edit rather than trying to reconcile key-by-key
+      // (same 'all' semantics resetAll already uses above), since the
+      // just-imported values now ARE the live state.
+      edits = {};
+      render();
+      _settingsToast('Imported settings from ' + file.name, true);
+    })
+    .catch(e => _settingsToast('Import failed: ' + e.message, false));
+}
+
 // ── Toast / theme ──────────────────────────────────────────────────────────────
 // Renamed from toast() to _settingsToast() (2026-09-24, found in review) —
 // this was silently SHADOWING static/js/util.js's shared global toast(msg,
