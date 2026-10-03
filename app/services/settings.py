@@ -154,10 +154,10 @@ SPEC: List[Dict[str, Any]] = [
     # simulated outcome — it never did. Still a real, dynamic LIVE-only
     # tunable; only the backtest per-run override is disabled.
     _s("BN_SCALP_TIME_STOP_S", "BankNifty time-stop (s)", "float", "Scalp Timing",
-       min_=1, max_=60, step=0.5, bt=False,
+       min_=1, max_=1800, step=1, bt=False,
        help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade. Live-only: has no effect on backtest, which always resolves on the next 5m bar regardless of this value (no sub-5-minute historical data exists to simulate the real time-stop)."),
     _s("NF_SCALP_TIME_STOP_S", "Nifty 50 time-stop (s)", "float", "Scalp Timing",
-       min_=1, max_=60, step=0.5, bt=False,
+       min_=1, max_=1800, step=1, bt=False,
        help_="Force a scratch exit if neither target nor stop is touched within this many seconds of entry. Frozen at entry — a live edit never affects an already-open trade. Live-only: has no effect on backtest, which always resolves on the next 5m bar regardless of this value (no sub-5-minute historical data exists to simulate the real time-stop)."),
     # Added 2026-10-01 (found in review — this had been claimed "dynamic
     # since 2026-09-23" throughout this doc's own history, but was actually
