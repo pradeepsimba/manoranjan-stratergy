@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, List, Optional
 from zoneinfo import ZoneInfo
 
 import app.config as cfg
-from app.engine import bn_breakout
+from app.engine import bn_breakout, scalp_signals
 from app.engine.bn_entry_exit import _leader_qty_surge, _stock_qty_threshold, evaluate_entry
 from app.engine.bn_pricing import build_monthly_option_symbol, get_atm_strike
 from app.engine.bn_pricing import get_next_expiry as bn_get_next_expiry
@@ -1212,6 +1212,19 @@ class SchedulerService:
                 # a torn read mid-reassignment.
                 with st.candle_lock(token_key):
                     st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
+                # Evict this token's VWAP/S-R memoization (2026-10-03, found
+                # in review) — both caches' correctness proof (see
+                # scalp_signals._session_vwap_cached / bn_breakout.
+                # detect_support_resistance_cached) only holds for the
+                # INCREMENTAL live-tick mutation path (only the last bar ever
+                # changes); this whole-list REPLACE is a different kind of
+                # write that could, in principle, change an EARLIER bar's
+                # content (e.g. a vendor backfill revision) while keeping an
+                # identical last-bar fingerprint, which the fingerprint check
+                # alone can't detect. Explicit eviction here closes that gap
+                # outright instead of just documenting around it.
+                scalp_signals._vwap_cache.pop(token_key, None)
+                bn_breakout._sr_cache.pop(token_key, None)
 
             bn_hist = await fetch_indicator_history(
                 {cfg.BN_INDEX_NAME: cfg.BN_INDEX_TOKEN}, cfg.INTERVAL_5M, days_back=1)
@@ -1236,6 +1249,9 @@ class SchedulerService:
             for token_key, candles in nf_hist.items():
                 with st.candle_lock(token_key):
                     st.candles_5m[token_key] = _deque(candles, maxlen=cfg.MAX_CANDLE_BUFFER)
+                # Same whole-list-replace cache eviction as the BN block above.
+                scalp_signals._vwap_cache.pop(token_key, None)
+                bn_breakout._sr_cache.pop(token_key, None)
 
             # 1 day back, matching BN_INDEX_NAME's own fetch — an older repo
             # comment claimed the vendor's REST API returns full multi-day
@@ -1519,7 +1535,7 @@ class SchedulerService:
         # table entry needs it anyway — compute each token's once here (incl.
         # the index) and hand the index's result into compute_breakout_prediction
         # instead of letting it silently redo that same scan a second time.
-        sr_by_token = {tok: bn_breakout.detect_support_resistance(candles)
+        sr_by_token = {tok: bn_breakout.detect_support_resistance_cached(tok, candles)
                        for tok, candles in all_candles.items()}
         bn_swings = bn_breakout.detect_swings(bn_candles, 2)
         breakout = bn_breakout.compute_breakout_prediction(
@@ -1539,17 +1555,25 @@ class SchedulerService:
         # threshold _leader_qty_surge uses for the latest bar, so the Big
         # Trades table's highlight and the Entry Loop Monitor's SURGE column
         # are always reading the identical volume + threshold.
-        stock_candles = {
-            token_to_name.get(tok, tok): [
+        # name/is_leader/threshold hoisted out of the per-candle loop
+        # (2026-10-03, performance pass) — all three are invariant per
+        # TOKEN, but used to get recomputed once per CANDLE (up to
+        # _STOCK_TABLE_BARS times) purely because they were written inline
+        # inside the candle-level comprehension. No behavior change, just
+        # avoids redundant cfg.BN_LEADER_STOCKS membership checks and
+        # _stock_qty_threshold's cfg lookups on every bar instead of once.
+        stock_candles = {}
+        for tok, candles in all_candles.items():
+            name = token_to_name.get(tok, tok)
+            is_leader = name in cfg.BN_LEADER_STOCKS
+            threshold = _stock_qty_threshold(name) if is_leader else None
+            stock_candles[name] = [
                 {"startTime": c.start_time, "open": c.open, "close": c.close,
                  "high": c.high, "low": c.low, "volume": c.volume, "lastQty": c.last_qty,
                  "buyQty": c.buy_qty, "sellQty": c.sell_qty,
-                 "surged": (c.volume >= _stock_qty_threshold(token_to_name.get(tok, tok)))
-                           if token_to_name.get(tok, tok) in cfg.BN_LEADER_STOCKS else False}
+                 "surged": (c.volume >= threshold) if is_leader else False}
                 for c in candles[-_STOCK_TABLE_BARS:]
             ]
-            for tok, candles in all_candles.items()
-        }
         sr_levels = {
             token_to_name.get(tok, tok): {
                 "m5":  sr_by_token.get(tok, {"supports": [], "resistances": []}),
@@ -1565,7 +1589,7 @@ class SchedulerService:
         token_to_name_nf = {cfg.NF_INDEX_TOKEN: cfg.NF_INDEX_NAME,
                            **{tok: name for name, tok in cfg.NF_ALL_STOCKS.items()}}
 
-        sr_by_token_nf = {tok: bn_breakout.detect_support_resistance(candles)
+        sr_by_token_nf = {tok: bn_breakout.detect_support_resistance_cached(tok, candles)
                           for tok, candles in all_candles_nf.items()}
         nf_swings = bn_breakout.detect_swings(nf_candles, 2)
         breakout_nf = bn_breakout.compute_breakout_prediction(
@@ -1580,17 +1604,19 @@ class SchedulerService:
         weighted_red_green_nf = bn_breakout.compute_weighted_red_green(
             latest_by_token_nf, cfg.NF_INDEX_WEIGHTS, cfg.NF_INDEX_WEIGHTS_CONFIRMED)
 
-        stock_candles_nf = {
-            token_to_name_nf.get(tok, tok): [
+        # Same per-token hoist as the BN block above — see its comment.
+        stock_candles_nf = {}
+        for tok, candles in all_candles_nf.items():
+            name = token_to_name_nf.get(tok, tok)
+            is_leader = name in cfg.NF_LEADER_STOCKS
+            threshold = _nf_stock_qty_threshold(name) if is_leader else None
+            stock_candles_nf[name] = [
                 {"startTime": c.start_time, "open": c.open, "close": c.close,
                  "high": c.high, "low": c.low, "volume": c.volume, "lastQty": c.last_qty,
                  "buyQty": c.buy_qty, "sellQty": c.sell_qty,
-                 "surged": (c.volume >= _nf_stock_qty_threshold(token_to_name_nf.get(tok, tok)))
-                           if token_to_name_nf.get(tok, tok) in cfg.NF_LEADER_STOCKS else False}
+                 "surged": (c.volume >= threshold) if is_leader else False}
                 for c in candles[-_STOCK_TABLE_BARS:]
             ]
-            for tok, candles in all_candles_nf.items()
-        }
         sr_levels_nf = {
             token_to_name_nf.get(tok, tok): {
                 "m5":  sr_by_token_nf.get(tok, {"supports": [], "resistances": []}),

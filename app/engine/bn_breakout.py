@@ -20,7 +20,7 @@ oldest-to-newest (see CLAUDE.md), so every "arr[0]" in the source becomes
 "candles[-1]" here, "arr[1]" becomes "candles[-2]", etc.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from app.models import Candle
 
@@ -176,6 +176,61 @@ def detect_support_resistance(candles: List[Candle]) -> Dict[str, List[float]]:
         "supports":    clustered_supports,
         "resistances": clustered_resistances,
     }
+
+
+# Per-token memoization for the HOT 1-second scheduler._build_payload path
+# ONLY (2026-10-03, performance pass). detect_support_resistance is O(n) per
+# token (pivot scan + clustering) and _build_payload calls it once per token
+# across BN's ~15 + NF's ~52 token universe EVERY SECOND, even though a
+# token's underlying 5m candle history only changes once a new bar actually
+# closes — same redundant-recompute pattern already fixed for the VWAP score
+# (see scalp_signals._session_vwap_cached for the full correctness writeup
+# this mirrors). Verified against this function's actual code, not assumed:
+# only `.close` is ever read from any candle here (the pivot loop's `c`/`p1`/
+# `p2`/`n1`/`n2` and the final `latest_price` nearest-selection), and only
+# the LAST bar can change in place (closed bars are immutable once a newer
+# one is appended — CLAUDE.md's chronological-candle-list convention) — so a
+# fingerprint of the last bar's fields + the list length is an EXACT (not
+# probabilistic) proxy for "would a fresh call return a different result,"
+# for the INCREMENTAL live-WS-tick path (market_data._upsert_list, the only
+# thing that ever mutates candles_5m one bar at a time).
+#
+# This exactness guarantee holds only for the INCREMENTAL path — it does NOT
+# cover scheduler._load_all_historical()'s WHOLE-LIST REPLACEMENT at 09:15
+# WAIT_ZONE and 15:30 EOD (`st.candles_5m[token] = _deque(candles, ...)`): a
+# REST re-fetch could in principle produce the same length and an identical
+# last-bar fingerprint while a genuinely different EARLIER bar changed (e.g.
+# a vendor backfill revision), which the fingerprint alone can't detect.
+# Found in review, 2026-10-03 — closed by having _load_all_historical
+# explicitly evict each reloaded token from this cache (and scalp_signals.
+# _vwap_cache, which has the identical gap) right after replacing its
+# candles_5m entry, rather than relying on the fingerprint to catch it.
+#
+# Deliberately NOT shared with scheduler._refresh_15m_sr_loop's own direct
+# detect_support_resistance call — that one passes 15-MINUTE candles for the
+# same token strings, a genuinely different computation; sharing one
+# token-keyed cache between the two would silently serve the wrong
+# timeframe's S/R levels. That loop runs once every 5 minutes anyway, so
+# there's no redundant work there to eliminate in the first place.
+#
+# Thread safety: this is only ever called from scheduler._build_payload,
+# which runs in a worker thread via run_in_executor — but always ONE call at
+# a time (the driving loop awaits each call before submitting the next), so
+# there's no concurrent access to memoize-guard against.
+_sr_cache: Dict[str, Tuple[tuple, Dict[str, List[float]]]] = {}
+
+
+def detect_support_resistance_cached(token: str, candles: List[Candle]) -> Dict[str, List[float]]:
+    if not candles:
+        return detect_support_resistance(candles)
+    last = candles[-1]
+    fingerprint = (len(candles), last.start_time, last.volume, last.close, last.high, last.low)
+    cached = _sr_cache.get(token)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    result = detect_support_resistance(candles)
+    _sr_cache[token] = (fingerprint, result)
+    return result
 
 
 # ── Contribution analysis + the combined breakout-prediction banner ─────────

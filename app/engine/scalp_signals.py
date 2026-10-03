@@ -83,6 +83,15 @@ def session_vwap(candles: List[Candle], today: date) -> Optional[float]:
 # and every call's last bar carries a real, date-stamped start_time, so a
 # fingerprint can never coincidentally match across two different simulated
 # days or two different gidx positions within the same day.
+# Live-only caveat (found in review, 2026-10-03): the invalidation proof
+# above covers the INCREMENTAL live-tick mutation path only. scheduler.
+# _load_all_historical() does a WHOLE-LIST REPLACE of a token's candles_5m
+# entry at 09:15 WAIT_ZONE/15:30 EOD, which could in principle change an
+# EARLIER bar's content while leaving an identical last-bar fingerprint
+# (e.g. a vendor backfill revision) — not something this fingerprint alone
+# could detect. Closed by having _load_all_historical explicitly evict each
+# reloaded token from this cache right after replacing it, rather than
+# relying on the fingerprint to catch a whole-list replace.
 _vwap_cache: Dict[str, Tuple[tuple, Optional[float]]] = {}
 
 
