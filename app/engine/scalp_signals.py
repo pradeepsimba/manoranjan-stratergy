@@ -36,6 +36,8 @@ def session_vwap(candles: List[Candle], today: date) -> Optional[float]:
     `candles` restricted to bars whose start_time falls on `today`. None if
     there's no volume yet today (session just started, or a feed gap for
     this stock) — callers must treat that leg as having no data, not zero.
+    Pure/stateless — no caching here; see _session_vwap_cached below for the
+    memoized wrapper compute_basket_reading actually calls on its hot path.
     """
     pv = vol = 0.0
     prefix = today.isoformat()
@@ -48,6 +50,53 @@ def session_vwap(candles: List[Candle], today: date) -> Optional[float]:
         pv += typical * c.volume
         vol += c.volume
     return (pv / vol) if vol > 0 else None
+
+
+# Per-token VWAP memoization (2026-10-03, performance pass — found in review:
+# evaluate_entry/nf_evaluate_entry call compute_basket_reading on EVERY tick
+# while no trade is open, which is nearly the entire session; each call did a
+# full O(len(candles)) rescan — up to MAX_CANDLE_BUFFER=300 bars, ~4 trading
+# days — for ALL 8 basket legs, even though only the ONE leg whose own tick
+# just arrived has any new data; the other 7 legs' forming bar is byte-
+# identical to the previous pass, so re-scanning their full history produced
+# the exact same result every time). Candle lists are strictly chronological
+# (CLAUDE.md) — only the LAST bar can ever be mutated in place (the
+# in-progress one); every earlier bar is immutable once a newer one is
+# appended. So a cheap fingerprint of just the last bar (plus the list
+# length, to detect a brand-new bar appending) is sufficient to detect ANY
+# change to a token's day-to-date VWAP inputs — no need to rescan the whole
+# buffer just to find out nothing changed.
+#
+# Keyed by the TOKEN STRING, not id(candles) (the latter was tried and
+# rejected here, found in review before shipping: scheduler.py's
+# _tick_entries/_tick_entries_nf build `basket_candles[token] =
+# list(st.candles_5m.get(token, []))` — a BRAND NEW list object on every
+# single tick — so an id()-based key would never hit the cache at all,
+# silently providing zero speedup). Keying by token is also the semantically
+# correct choice, not just the effective one: st.candles_5m is ONE shared
+# dict keyed by token across BOTH instruments (CLAUDE.md's "Hard
+# conventions" — BN and NF baskets share ~11 real tokens), so a token's VWAP
+# is the same real-world quantity regardless of which strategy is asking,
+# and correctly reusing one cached value for both is a feature, not a risk
+# of cross-contamination. Backtest safety: each spawned day-worker PROCESS
+# gets its own fresh, empty cache (separate interpreters, no shared memory)
+# and every call's last bar carries a real, date-stamped start_time, so a
+# fingerprint can never coincidentally match across two different simulated
+# days or two different gidx positions within the same day.
+_vwap_cache: Dict[str, Tuple[tuple, Optional[float]]] = {}
+
+
+def _session_vwap_cached(token: str, candles: List[Candle], today: date) -> Optional[float]:
+    if not candles:
+        return None
+    last = candles[-1]
+    fingerprint = (len(candles), last.start_time, last.volume, last.close, last.high, last.low)
+    cached = _vwap_cache.get(token)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    vwap = session_vwap(candles, today)
+    _vwap_cache[token] = (fingerprint, vwap)
+    return vwap
 
 
 @dataclass(slots=True)
@@ -99,7 +148,7 @@ def compute_basket_reading(
     for token, weight in basket.items():
         name = name_by_token.get(token, token)
         candles = candles_by_token.get(token) or []
-        vwap = session_vwap(candles, today)
+        vwap = _session_vwap_cached(token, candles, today)
         ltp = (ltp_by_token or {}).get(token) or (candles[-1].close if candles else None)
         dev: Optional[float] = None
         if vwap and vwap > 0 and ltp:
