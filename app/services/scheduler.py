@@ -31,6 +31,7 @@ from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
 from app.engine.nf_pricing import build_weekly_option_symbol
 from app.engine.nf_pricing import get_atm_strike as nf_get_atm_strike
 from app.engine.nf_pricing import get_next_expiry as nf_get_next_expiry
+from app.engine.risk_guardrails import day_candle_color
 from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase, closed_tail_closes, iv_lookback_closes
 from app.services import bn_trade, nf_trade, price_alerts
 from app.services.historical_data import fetch_indicator_history
@@ -609,6 +610,42 @@ class SchedulerService:
         # since dashboard.js doesn't render this field yet, but the data
         # contract itself was wrong).
         diagnostic.trades_today = st.bn_trades_today
+
+        # Trend-fade entry filter (2026-10-12, data-driven decision — see
+        # config.py's BN_REQUIRE_AGAINST_TREND comment for the real-trade-
+        # history numbers behind this). Checked HERE, before arming, not
+        # inside bn_trade.place_paper_order (which also computes
+        # day_candle_color, but only once the fill-delay has already
+        # elapsed) — rejecting a with-trend signal before it's ever armed
+        # means the very next tick is immediately free to evaluate a fresh
+        # signal, instead of burning the whole arm-then-reject cycle on one
+        # that was always going to be dropped. Reuses the same
+        # risk_guardrails.day_candle_color function bn_trade.py already
+        # calls for the (purely informational) entry-decision snapshot —
+        # this is the one call site where that same value also becomes a
+        # real gate, per CLAUDE.md's "do it at the caller level" convention
+        # (evaluate_entry's own signature is untouched).
+        #
+        # Mutates `diagnostic` BEFORE `st.bn_diagnostic = diagnostic` below
+        # (found in review, 2026-10-12) — matches the existing
+        # diagnostic.trades_today line immediately above, which deliberately
+        # mutates before publishing for the same reason: _build_payload runs
+        # in a separate executor thread and reads st.bn_diagnostic at
+        # whatever instant it happens to run, so any field it should see
+        # needs to be set before the object becomes visible there, not after
+        # — otherwise there's a narrow window where a concurrent read could
+        # observe the pre-mutation value.
+        if signal is not None and cfg.BN_REQUIRE_AGAINST_TREND:
+            day_color = day_candle_color(bn_candles, st.bn_index_ltp, now.strftime("%Y-%m-%d"))
+            with_trend = ((signal.direction == "BUY" and day_color == "GREEN") or
+                         (signal.direction == "SELL" and day_color == "RED"))
+            if with_trend:
+                print(f"[filter] {signal.direction} dropped — trend-following "
+                      f"({day_color} day, BN_REQUIRE_AGAINST_TREND is on)")
+                diagnostic.no_trade_reason = (
+                    f"{signal.direction} is WITH today's {day_color} trend (against-trend only)")
+                signal = None
+
         st.bn_diagnostic = diagnostic
 
         if signal is None:
@@ -690,6 +727,22 @@ class SchedulerService:
                                                current_index_price=st.nf_index_ltp, basket_ltp=basket_ltp)
         # See the BN mirror's identical comment above (2026-09-24, found in review).
         diagnostic.trades_today = st.nf_trades_today
+
+        # Trend-fade entry filter — see the BN mirror's identical comment in
+        # _tick_entries above (2026-10-12, data-driven decision), including
+        # why this mutates `diagnostic` before publishing it to
+        # st.nf_diagnostic below (found in review, same day).
+        if signal is not None and cfg.NF_REQUIRE_AGAINST_TREND:
+            day_color = day_candle_color(nf_candles, st.nf_index_ltp, now.strftime("%Y-%m-%d"))
+            with_trend = ((signal.direction == "BUY" and day_color == "GREEN") or
+                         (signal.direction == "SELL" and day_color == "RED"))
+            if with_trend:
+                print(f"[filter] {signal.direction} dropped — trend-following "
+                      f"({day_color} day, NF_REQUIRE_AGAINST_TREND is on)")
+                diagnostic.no_trade_reason = (
+                    f"{signal.direction} is WITH today's {day_color} trend (against-trend only)")
+                signal = None
+
         st.nf_diagnostic = diagnostic
 
         if signal is None:

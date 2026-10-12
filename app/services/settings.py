@@ -200,6 +200,18 @@ SPEC: List[Dict[str, Any]] = [
     _s("SCALP_MAX_TRADES_PER_DAY", "Max trades per day (shared)", "int", "Scalp Timing",
        min_=1, max_=200,
        help_="Hard cap on total executed trades per day, shared across BOTH BankNifty and Nifty 50 combined (not a separate limit per instrument). Checked live before every new entry — not frozen onto a trade."),
+    # Trend-fade filter (2026-10-12, data-driven decision — see config.py's
+    # own comment on these two keys for the real-trade-history numbers
+    # behind this). bt=False: the caller-level gate lives in scheduler.py's
+    # _tick_entries, which backtest's _try_entry doesn't go through (and
+    # backtest has no day_candle_color concept at all currently), so a
+    # per-run override would silently do nothing.
+    _s("BN_REQUIRE_AGAINST_TREND", "BankNifty: only trade against today's trend", "bool", "Scalp Timing",
+       bt=False,
+       help_="When ON, rejects a BUY signal on a day already trading GREEN, or a SELL signal on a day already trading RED — i.e. only takes entries that fade today's established direction. Added after real trade history showed with-trend entries net heavily negative while against-trend entries were net positive over the same period. Cuts trade volume substantially — turn off to go back to taking every signal regardless of trend."),
+    _s("NF_REQUIRE_AGAINST_TREND", "Nifty 50: only trade against today's trend", "bool", "Scalp Timing",
+       bt=False,
+       help_="When ON, rejects a BUY signal on a day already trading GREEN, or a SELL signal on a day already trading RED — i.e. only takes entries that fade today's established direction. Added after real trade history showed with-trend entries net heavily negative while against-trend entries were net positive over the same period. Cuts trade volume substantially — turn off to go back to taking every signal regardless of trend."),
 
     # ── Paper account (2026-09-25, explicit user decision — capital control
     # from Settings). bt=False: backtest has no notion of a running account

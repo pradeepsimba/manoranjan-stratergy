@@ -1052,6 +1052,23 @@ _DEFAULTS: Dict[str, Any] = {
     # risk_guardrails.max_trades_ok, same as the trading windows above.
     "SCALP_MAX_TRADES_PER_DAY": 5,
 
+    # Trend-fade entry filter (2026-10-12, data-driven decision — real trade
+    # history analysis of 1200 live trades showed WITH-trend entries (BUY on
+    # a day already trading GREEN, SELL on a day already RED) net
+    # -₹32,266.76 combined, while AGAINST-trend entries (BUY on RED, SELL on
+    # GREEN) net +₹1,282.70 over the same period — a real, if modest-sample,
+    # reversal across both instruments. Gated at the CALLER level in
+    # scheduler.py's _tick_entries/_tick_entries_nf, reusing the existing
+    # risk_guardrails.day_candle_color diagnostic (already computed every
+    # trade, previously informational-only) as an actual entry gate — does
+    # NOT touch evaluate_entry's own signature, matching CLAUDE.md's "do it
+    # at the caller level" convention. Defaults to ON since that's the
+    # change being deployed, but fully toggleable live with no restart if it
+    # doesn't hold up — this is a real behavior change (cuts trade volume by
+    # roughly 90%), not a bug fix, so it's a dynamic setting, not hardcoded.
+    "BN_REQUIRE_AGAINST_TREND": True,
+    "NF_REQUIRE_AGAINST_TREND": True,
+
     # ── Paper account (2026-09-25, explicit user decision — Settings page
     # capital control). Seeds st.funds on a genuinely first-ever startup
     # (before any `_BN_FUNDS` row exists in app_settings — scheduler.
