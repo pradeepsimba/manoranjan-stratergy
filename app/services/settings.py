@@ -452,6 +452,23 @@ def validate_scalp_windows(effective: Dict[str, Any]) -> None:
     for sh, sm, eh, em, label in _WINDOWS:
         if effective[sh] * 60 + effective[sm] >= effective[eh] * 60 + effective[em]:
             raise ValueError(f"{label}: start time must be before end time")
+        # Found in review, 2026-10-13: nothing previously checked a window's
+        # own end against CUTOFF, so e.g. WINDOW2_END=15:29 with CUTOFF=15:28
+        # could be saved without error — CUTOFF (the stricter, phase-level
+        # gate) silently makes that window's last minute dead/unreachable,
+        # since _tick_entries/_tick_entries_nf block ALL new entries once
+        # st.phase flips to CUTOFF regardless of what any window says. Not
+        # dangerous (errs toward cutting off entries EARLIER than a window
+        # alone implies, never later), but a real, silently-saveable
+        # inconsistency the per-window-only and SCAN_START/CUTOFF/
+        # SESSION_END-only checks above didn't cover.
+        if effective[eh] * 60 + effective[em] > cutoff_m:
+            raise ValueError(
+                f"{label}: end time must not be after the "
+                f"{effective['CUTOFF_HOUR']:02d}:{effective['CUTOFF_MIN']:02d} "
+                f"cutoff, or that window's tail end would be unreachable "
+                f"(CUTOFF blocks all new entries regardless of any window)"
+            )
 
 
 def effective_state(overrides: Dict[str, Any]) -> Dict[str, Any]:
