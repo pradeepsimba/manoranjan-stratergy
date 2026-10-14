@@ -150,6 +150,20 @@ class BNSignal:
     # fill_delayed_entry's replace() (same as top2_names above — it was
     # part of the DECISION, not the later fill repricing).
     basket_legs:       List[Dict[str, Any]] = field(default_factory=list)
+    # day_candle_color computed at the exact instant the trend-fade gate
+    # decided whether to fire this signal (2026-10-14, found in review —
+    # the real-trade data showed the PERSISTED positions.day_candle_color
+    # occasionally disagreeing with what the gate must have seen, since
+    # that column used to be recomputed independently, later, in
+    # place_paper_order after the entry fill delay — day_candle_color is
+    # price-relative to today's open and CAN genuinely flip within that
+    # ~0.3-1.5s window, especially early in the session when price is still
+    # close to the open). "" means not set here (e.g. a manual order, which
+    # never goes through the gate) — place_paper_order falls back to its own
+    # fresh computation in that case, same as before this fix. Carries over
+    # unchanged through fill_delayed_entry's replace() (not part of the
+    # later fill repricing, same treatment as top2_names/basket_legs above).
+    day_color_at_signal: str = ""
 
 
 @dataclass(slots=True)   # the single active trade — at most one at a time
@@ -335,6 +349,7 @@ class NFSignal:
     wobi:              float = 0.0
     top2_names:        Tuple[str, str] = ("", "")   # NF mirror of BNSignal's field above
     basket_legs:       List[Dict[str, Any]] = field(default_factory=list)   # NF mirror of BNSignal's field above
+    day_color_at_signal: str = ""   # NF mirror of BNSignal's field above
 
 
 @dataclass(slots=True)   # the single active Nifty 50 trade — at most one at a time

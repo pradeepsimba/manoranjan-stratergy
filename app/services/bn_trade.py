@@ -54,10 +54,25 @@ def place_paper_order(signal: BNSignal, now: datetime) -> BNTrade:
 
     order_id = f"BN-{now.strftime('%H%M%S')}-{next(_order_seq)}"
     trade = open_trade_from_signal(signal, now, order_id)
-    with st._bn_index_lock:
-        bn_candles_for_color = list(st.bn_index_candles_5m)
-    trade.day_candle_color_at_entry = _day_candle_color(
-        bn_candles_for_color, trade.entry_index_price, now.strftime("%Y-%m-%d"))
+    # Reuse the EXACT day_candle_color the entry gate saw at decision time
+    # (2026-10-14, found in review) if the signal carries one —
+    # scheduler.py's _tick_entries/_tick_entries_nf stash it on every algo
+    # signal before arming. Recomputing independently here, AFTER the entry
+    # fill delay has elapsed, used to let this diagnostic disagree with what
+    # the gate actually decided: day_candle_color is relative to today's
+    # open and can genuinely flip within that ~0.3-1.5s window, confirmed
+    # happening on 2 real trades. A manual order's signal never goes
+    # through that gate (signal.day_color_at_signal stays "" — place_manual_
+    # order doesn't set it), so it still falls back to a fresh computation
+    # here, same as before this fix — there's no earlier "decision instant"
+    # to reuse for a human-placed trade.
+    if signal.day_color_at_signal:
+        trade.day_candle_color_at_entry = signal.day_color_at_signal
+    else:
+        with st._bn_index_lock:
+            bn_candles_for_color = list(st.bn_index_candles_5m)
+        trade.day_candle_color_at_entry = _day_candle_color(
+            bn_candles_for_color, trade.entry_index_price, now.strftime("%Y-%m-%d"))
 
     st.active_trade = trade
     st.bn_trades_today += 1

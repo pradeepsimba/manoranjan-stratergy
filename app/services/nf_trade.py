@@ -49,10 +49,17 @@ def place_paper_order(signal: NFSignal, now: datetime) -> NFTrade:
 
     order_id = f"NF-{now.strftime('%H%M%S')}-{next(_order_seq)}"
     trade = open_trade_from_signal(signal, now, order_id)
-    with st._nf_index_lock:
-        nf_candles_for_color = list(st.nf_index_candles_5m)
-    trade.day_candle_color_at_entry = _day_candle_color(
-        nf_candles_for_color, trade.entry_index_price, now.strftime("%Y-%m-%d"))
+    # Reuse the exact day_candle_color the entry gate saw at decision time —
+    # see bn_trade.place_paper_order's identical comment (2026-10-14, found
+    # in review). Falls back to a fresh computation for a manual order,
+    # which never goes through that gate.
+    if signal.day_color_at_signal:
+        trade.day_candle_color_at_entry = signal.day_color_at_signal
+    else:
+        with st._nf_index_lock:
+            nf_candles_for_color = list(st.nf_index_candles_5m)
+        trade.day_candle_color_at_entry = _day_candle_color(
+            nf_candles_for_color, trade.entry_index_price, now.strftime("%Y-%m-%d"))
 
     st.active_trade_nf = trade
     st.nf_trades_today += 1

@@ -635,8 +635,25 @@ class SchedulerService:
         # needs to be set before the object becomes visible there, not after
         # — otherwise there's a narrow window where a concurrent read could
         # observe the pre-mutation value.
-        if signal is not None and cfg.BN_REQUIRE_AGAINST_TREND:
+        if signal is not None:
+            # Computed and attached to the signal UNCONDITIONALLY (not just
+            # when BN_REQUIRE_AGAINST_TREND is on) — 2026-10-14, found in
+            # review: bn_trade.place_paper_order used to recompute
+            # day_candle_color independently, AFTER the entry fill delay had
+            # elapsed, at whatever price was current THEN — since this value
+            # is relative to today's open and can genuinely flip within that
+            # ~0.3-1.5s window (especially early in the session, when price
+            # is still close to the open), the PERSISTED positions.
+            # day_candle_color could disagree with what this gate actually
+            # saw at decision time, confirmed happening with 2 real trades.
+            # Stashing the exact value here and threading it through
+            # (BNSignal.day_color_at_signal survives fill_delayed_entry's
+            # replace() unchanged, like top2_names/basket_legs) means the
+            # persisted diagnostic always matches the real decision, not a
+            # later, possibly-different recomputation.
             day_color = day_candle_color(bn_candles, st.bn_index_ltp, now.strftime("%Y-%m-%d"))
+            signal.day_color_at_signal = day_color
+        if signal is not None and cfg.BN_REQUIRE_AGAINST_TREND:
             with_trend = ((signal.direction == "BUY" and day_color == "GREEN") or
                          (signal.direction == "SELL" and day_color == "RED"))
             if with_trend:
@@ -732,8 +749,12 @@ class SchedulerService:
         # _tick_entries above (2026-10-12, data-driven decision), including
         # why this mutates `diagnostic` before publishing it to
         # st.nf_diagnostic below (found in review, same day).
-        if signal is not None and cfg.NF_REQUIRE_AGAINST_TREND:
+        if signal is not None:
+            # day_color_at_signal stashing — see the BN mirror's identical
+            # comment in _tick_entries above (2026-10-14, found in review).
             day_color = day_candle_color(nf_candles, st.nf_index_ltp, now.strftime("%Y-%m-%d"))
+            signal.day_color_at_signal = day_color
+        if signal is not None and cfg.NF_REQUIRE_AGAINST_TREND:
             with_trend = ((signal.direction == "BUY" and day_color == "GREEN") or
                          (signal.direction == "SELL" and day_color == "RED"))
             if with_trend:
