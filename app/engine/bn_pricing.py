@@ -16,7 +16,7 @@ backtest (which only has bar closes, never a tick stream) and live.
 """
 
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -105,26 +105,55 @@ def get_next_expiry(now: datetime) -> datetime:
     15:30 IST — NSE discontinued BankNifty weekly options and moved the
     monthly/quarterly expiry day from Thursday to Tuesday, both effective
     2025-09-01 (confirmed via web search 2026-09-19; see CLAUDE.md). If the
-    current month's last Tuesday has already passed (the date is past, or
-    it's today but past 15:30), rolls to next month's last Tuesday.
+    current month's (holiday-adjusted — see _previous_trading_day) last
+    Tuesday has already passed, rolls to next month's.
     """
     if now.tzinfo is None:
         now = now.replace(tzinfo=IST)
-    expiry = _last_tuesday_of_month(now.year, now.month)
+    expiry = _adjusted_last_tuesday_of_month(now.year, now.month)
     if now > expiry:
         year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
-        expiry = _last_tuesday_of_month(year, month)
+        expiry = _adjusted_last_tuesday_of_month(year, month)
     return expiry
 
 
 def _last_tuesday_of_month(year: int, month: int) -> datetime:
-    """15:30 IST on the last Tuesday of (year, month)."""
+    """15:30 IST on the last Tuesday of (year, month) — the NOMINAL expiry
+    day, before any holiday adjustment (see _adjusted_last_tuesday_of_month).
+    Also reused by nf_pricing._is_last_tuesday_of_month/_nominal_tuesday to
+    identify which week's contract a (possibly holiday-adjusted) NF expiry
+    nominally belongs to."""
     first_of_next = (datetime(year + 1, 1, 1, tzinfo=IST) if month == 12
                      else datetime(year, month + 1, 1, tzinfo=IST))
     last_day = first_of_next - timedelta(days=1)
     offset = (last_day.weekday() - 1) % 7   # Tuesday = 1
     last_tue = last_day - timedelta(days=offset)
     return last_tue.replace(hour=15, minute=30, second=0, microsecond=0)
+
+
+def _previous_trading_day(d: date) -> date:
+    """
+    Walks `d` back to the nearest NSE trading day (2026-10-15, found in
+    review — see cfg.NSE_TRADING_HOLIDAYS's own comment for the production
+    incident this fixes). NSE shifts an expiry landing on a holiday to the
+    PREVIOUS trading day, not the next one — confirmed via web search for
+    the real 2026-10-20 Dussehra case (real expiry: Monday 2026-10-19).
+    Shared by both bn_pricing.get_next_expiry (monthly) and
+    nf_pricing.get_next_expiry (weekly) — this is shared calendar DATA, not
+    the diverging weekly-vs-monthly cycle RULE those two functions
+    deliberately keep separate (see nf_pricing.py's module docstring).
+    """
+    while d.weekday() >= 5 or d in cfg.NSE_TRADING_HOLIDAYS:
+        d -= timedelta(days=1)
+    return d
+
+
+def _adjusted_last_tuesday_of_month(year: int, month: int) -> datetime:
+    """15:30 IST on the last Tuesday of (year, month), shifted back to the
+    nearest earlier real trading day if that Tuesday is an NSE holiday."""
+    raw = _last_tuesday_of_month(year, month)
+    adj_date = _previous_trading_day(raw.date())
+    return datetime(adj_date.year, adj_date.month, adj_date.day, 15, 30, tzinfo=IST)
 
 
 def time_to_expiry_years(now: datetime, expiry: datetime) -> float:

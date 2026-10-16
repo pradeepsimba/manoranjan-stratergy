@@ -116,6 +116,26 @@ class SchedulerService:
         # see _tick_atm_watch for how this is used.
         self._bn_atm_watch_last_resub_at: datetime | None = None
         self._nf_atm_watch_last_resub_at: datetime | None = None
+        # Strike HYSTERESIS (2026-10-15, found in review — a real, confirmed
+        # production issue, not the anticipated-but-mitigated one the
+        # debounce above already covers): the 100ms resub-rate debounce
+        # caps how FAST this can reconnect, but does nothing about spot
+        # genuinely sitting within a few points of a strike boundary for an
+        # extended stretch — every tiny wiggle across the exact midpoint
+        # still flips get_atm_strike's result, and each flip is a genuine
+        # SYMBOL change the debounce has no reason to suppress. Confirmed
+        # live: 1569 reconnects on the shared options WS connection in one
+        # 6-hour session, in repeated multi-reconnect-per-second bursts, far
+        # beyond anything the debounce alone should allow through — the
+        # connection never stayed up long enough to receive a single real
+        # tick for whatever symbol was briefly subscribed before the next
+        # flip tore it down again. Tracks the last strike _tick_atm_watch
+        # actually committed to, separately from the derived (ce, pe)
+        # symbol pair above, so a fresh get_atm_strike() result can be
+        # compared against it with a buffer (see _atm_strike_with_hysteresis)
+        # instead of accepted the instant it differs even by one grid step.
+        self._bn_atm_watch_strike: int | None = None
+        self._nf_atm_watch_strike: int | None = None
         # Previous tick's client-connected state, for _tick_alerts's
         # reconnect edge-reset (found in review, 2026-09-23) — see there.
         self._had_alert_clients = False
@@ -828,6 +848,35 @@ class SchedulerService:
             return True
         return (now - last_resub_at).total_seconds() * 1000.0 >= cfg.TICK_EVAL_INTERVAL_MS
 
+    # Hysteresis buffer (points) added on top of the naive half-a-grid-step
+    # flip point (2026-10-15, found in review — see _tick_atm_watch's own
+    # docstring for the confirmed 1569-reconnects-in-6-hours production
+    # incident this fixes). ~20% of each instrument's real strike grid —
+    # small enough that the watchlist still tracks a genuine, sustained
+    # move promptly, large enough to absorb spot merely wobbling across the
+    # exact midpoint between two strikes.
+    _BN_ATM_HYSTERESIS_PTS = 20.0   # on BankNifty's 100-pt grid
+    _NF_ATM_HYSTERESIS_PTS = 10.0   # on Nifty 50's 50-pt grid
+
+    @staticmethod
+    def _strike_with_hysteresis(spot: float, last_strike: int | None,
+                                step: int, buffer_points: float, round_fn) -> int:
+        """
+        Returns `last_strike` unchanged unless spot has moved more than
+        HALF A GRID STEP PLUS `buffer_points` away from it — not just a
+        hair past the naive nearest-strike midpoint. `round_fn` (get_atm_
+        strike/nf_get_atm_strike) is only actually called once that
+        threshold is cleared, so a fresh, correct strike is computed from
+        the real spot rather than just incrementing/decrementing by one
+        step (correctly handles a big, fast move that jumps more than one
+        grid step in a single tick too).
+        """
+        if last_strike is None:
+            return round_fn(spot)
+        if abs(spot - last_strike) <= (step / 2.0 + buffer_points):
+            return last_strike
+        return round_fn(spot)
+
     async def _tick_atm_watch(self) -> None:
         """
         Live ATM CE/PE watchlist (2026-09-18, explicit user decision) — keeps
@@ -868,23 +917,29 @@ class SchedulerService:
         st = get_state()
         now = _now()
         if st.bn_index_ltp > 0:
-            strike = get_atm_strike(st.bn_index_ltp)
+            strike = self._strike_with_hysteresis(
+                st.bn_index_ltp, self._bn_atm_watch_strike, 100,
+                self._BN_ATM_HYSTERESIS_PTS, get_atm_strike)
             expiry = bn_get_next_expiry(now)
             ce = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "CE")
             pe = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, "PE")
             if (ce, pe) != self._bn_atm_watch_symbols and self._atm_resub_ok(
                     now, self._bn_atm_watch_last_resub_at):
                 self._bn_atm_watch_symbols = (ce, pe)
+                self._bn_atm_watch_strike = strike
                 self._bn_atm_watch_last_resub_at = now
                 self._mkt.set_bn_atm_watch(ce, pe, strike=strike)
         if st.nf_index_ltp > 0:
-            strike = nf_get_atm_strike(st.nf_index_ltp)
+            strike = self._strike_with_hysteresis(
+                st.nf_index_ltp, self._nf_atm_watch_strike, 50,
+                self._NF_ATM_HYSTERESIS_PTS, nf_get_atm_strike)
             expiry = nf_get_next_expiry(now)
             ce = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "CE")
             pe = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, "PE")
             if (ce, pe) != self._nf_atm_watch_symbols and self._atm_resub_ok(
                     now, self._nf_atm_watch_last_resub_at):
                 self._nf_atm_watch_symbols = (ce, pe)
+                self._nf_atm_watch_strike = strike
                 self._nf_atm_watch_last_resub_at = now
                 self._mkt.set_nf_atm_watch(ce, pe, strike=strike)
 
@@ -1106,6 +1161,8 @@ class SchedulerService:
         self._nf_atm_watch_symbols = None
         self._bn_atm_watch_last_resub_at = None
         self._nf_atm_watch_last_resub_at = None
+        self._bn_atm_watch_strike = None
+        self._nf_atm_watch_strike = None
 
         # Reset the leader-consensus alert's edge-trigger state at day
         # boundary too (found in review, 2026-09-24) — previously only reset

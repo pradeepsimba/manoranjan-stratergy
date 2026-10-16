@@ -54,6 +54,7 @@ places.
 import os
 import threading
 from contextlib import contextmanager
+from datetime import date
 from typing import Any, Dict, Iterator, List, Optional
 
 # ── Static: custom market data server ────────────────────────────────────────
@@ -319,6 +320,43 @@ NF_INDEX_TOKEN = "NIFTY 50"
 # — but this vendor's feed still doesn't stream any option data at all under
 # that (or any other) symbol, confirmed via direct WS/REST probing the same
 # day; see CLAUDE.md's "Real-option-LTP paper trading" note.
+# NSE/BSE full-day trading holidays (2026-10-15, found in review from a real
+# production incident) — bn_pricing.get_next_expiry/nf_pricing.get_next_expiry
+# used pure weekday arithmetic ("last Tuesday of month" / "next Tuesday") with
+# NO holiday awareness, so a week whose computed Tuesday falls on an NSE
+# holiday produced a NON-EXISTENT contract symbol. Confirmed live: NF's
+# 2026-10-20 weekly expiry (a Tuesday) is Dussehra — the vendor's REST API
+# returned zero candles across 120 different strikes for that symbol, while
+# the correct, holiday-shifted real contract (expiry Monday 2026-10-19 — NSE
+# moves an expiry landing on a holiday to the PREVIOUS trading day) returned
+# hundreds of real candles per strike when queried directly. Both
+# get_next_expiry functions now shift their computed Tuesday back to the
+# nearest earlier trading day via this list (see
+# bn_pricing._previous_trading_day). Static, not a Settings-page value — a
+# holiday calendar isn't a strategy tunable. Sourced by cross-referencing
+# several 2026 NSE-holiday-calendar aggregator sites against each other, NOT
+# fetched from NSE's own circular directly — re-verify against the official
+# NSE trading-holiday circular if a symbol ever again returns zero vendor
+# data around a suspected holiday, and extend this set for 2027+ as each
+# year's circular is published (this list intentionally only covers 2026).
+NSE_TRADING_HOLIDAYS = frozenset({
+    date(2026, 1, 26),   # Republic Day
+    date(2026, 3, 3),    # Holi
+    date(2026, 3, 26),   # Ram Navami
+    date(2026, 3, 31),   # Mahavir Jayanti
+    date(2026, 4, 3),    # Good Friday
+    date(2026, 4, 14),   # Ambedkar Jayanti
+    date(2026, 5, 1),    # Maharashtra Day
+    date(2026, 5, 28),   # Bakri Id
+    date(2026, 6, 26),   # Muharram
+    date(2026, 9, 14),   # Ganesh Chaturthi
+    date(2026, 10, 2),   # Gandhi Jayanti
+    date(2026, 10, 20),  # Dussehra
+    date(2026, 11, 10),  # Diwali Balipratipada
+    date(2026, 11, 24),  # Guru Nanak Jayanti
+    date(2026, 12, 25),  # Christmas
+})
+
 NF_OPTION_UNDERLYING = "NIFTY"
 
 # The 12 highest-weighted of the 32 (by real-world NSE index weight) — drive

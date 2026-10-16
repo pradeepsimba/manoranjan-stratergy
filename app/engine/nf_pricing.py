@@ -23,7 +23,7 @@ half the time.
 """
 
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -36,6 +36,7 @@ from app.engine.bn_pricing import (  # noqa: F401 — re-exported for nf_entry_e
     time_to_expiry_years,
 )
 from app.engine.bn_pricing import _last_tuesday_of_month  # reused, not re-exported — see build_weekly_option_symbol
+from app.engine.bn_pricing import _previous_trading_day  # reused, not re-exported — see get_next_expiry
 
 _STRIKE_STEP = 50   # Nifty 50's real strike grid — NOT BankNifty's 100-point one (see module docstring)
 
@@ -82,8 +83,33 @@ _WEEKLY_MONTH_CODE = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
                       7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"}
 
 
+def _nominal_tuesday(d: date) -> date:
+    """The Tuesday a (possibly holiday-shifted-earlier, see get_next_expiry)
+    real trading day's weekly contract nominally belongs to — recovers the
+    original un-adjusted Tuesday so _is_last_tuesday_of_month can still
+    correctly identify month-end contracts after the shift."""
+    days_until = (1 - d.weekday()) % 7
+    return d + timedelta(days=days_until)
+
+
 def _is_last_tuesday_of_month(expiry: datetime) -> bool:
-    return expiry.date() == _last_tuesday_of_month(expiry.year, expiry.month).date()
+    """
+    2026-10-15 fix (found in review, alongside the NSE_TRADING_HOLIDAYS
+    adjustment in get_next_expiry below): this used to compare `expiry`'s
+    OWN date directly against the month's nominal last Tuesday — correct
+    when expiry was never holiday-adjusted, but wrong once get_next_expiry
+    started shifting a holiday-landing Tuesday back to the previous trading
+    day (e.g. 2026-11-24, Guru Nanak Jayanti, is November's real last
+    Tuesday — the adjusted expiry lands on 2026-11-23 instead, which no
+    longer equals 2026-11-24 under a naive direct comparison, silently
+    misclassifying a genuine month-end contract as an ordinary week and
+    building the wrong symbol format). Now recovers the NOMINAL Tuesday
+    first and compares that instead — the vendor's monthly-vs-weekly symbol
+    choice tracks which week's contract this nominally is, not which exact
+    day it happens to actually stop trading on.
+    """
+    nominal = _nominal_tuesday(expiry.date())
+    return nominal == _last_tuesday_of_month(nominal.year, nominal.month).date()
 
 
 def build_weekly_option_symbol(underlying: str, expiry: datetime, strike: int, option_type: str) -> str:
@@ -132,21 +158,42 @@ def get_next_expiry(now: datetime) -> datetime:
     """
     Nifty 50's real expiry: WEEKLY, next Tuesday 15:30 IST — NSE moved this
     from Thursday, effective 2025-09-01 (confirmed via web search
-    2026-09-19; see CLAUDE.md). If `now` IS a Tuesday past 15:30, that
-    week's expiry has already happened intraday — roll to next week's.
-    Deliberately NOT shared with bn_pricing.get_next_expiry any more —
-    BankNifty's real cycle diverged to monthly (see there); reusing one
-    function for both would silently be wrong for whichever one changed.
+    2026-09-19; see CLAUDE.md). Deliberately NOT shared with
+    bn_pricing.get_next_expiry any more — BankNifty's real cycle diverged to
+    monthly (see there); reusing one function for both would silently be
+    wrong for whichever one changed.
+
+    **Holiday adjustment (2026-10-15, found in review, real production
+    incident):** if the computed Tuesday is an NSE trading holiday, NSE
+    shifts that contract's expiry to the previous trading day — confirmed
+    live: the 2026-10-20 weekly expiry is Dussehra, and the vendor's REST
+    API returned zero candles across 120 strikes for that Tuesday's symbol,
+    while the real, holiday-shifted Monday 2026-10-19 symbol returned
+    hundreds of real candles per strike. See
+    bn_pricing._previous_trading_day/cfg.NSE_TRADING_HOLIDAYS. The "has this
+    week's expiry already passed" check below now compares against the
+    ADJUSTED expiry (correct either way: with no holiday in play, the
+    adjusted and nominal Tuesday 15:30 are identical, so this is a strict
+    generalization of the old now-is-Tuesday-past-15:30 special case, not a
+    behavior change for the common path).
     """
     if now.tzinfo is None:
         now = now.replace(tzinfo=IST)
     weekday = now.weekday()          # Mon=0 .. Sun=6; Tuesday=1
     days_until = (1 - weekday) % 7
-    expiry = (now + timedelta(days=days_until)).replace(
-        hour=15, minute=30, second=0, microsecond=0)
-    if days_until == 0 and now > expiry:
-        expiry += timedelta(days=7)
+    tuesday_date = (now + timedelta(days=days_until)).date()
+    expiry = _adjusted_weekly_expiry(tuesday_date)
+    if now > expiry:
+        tuesday_date += timedelta(days=7)
+        expiry = _adjusted_weekly_expiry(tuesday_date)
     return expiry
+
+
+def _adjusted_weekly_expiry(tuesday_date: date) -> datetime:
+    """15:30 IST on `tuesday_date`, shifted back to the nearest earlier real
+    trading day if that Tuesday is an NSE holiday."""
+    adj_date = _previous_trading_day(tuesday_date)
+    return datetime(adj_date.year, adj_date.month, adj_date.day, 15, 30, tzinfo=IST)
 
 
 def estimate_iv(closes: np.ndarray, manual_override: Optional[float] = None) -> float:
