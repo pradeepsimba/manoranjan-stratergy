@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>P&amp;L Report · Bank Nifty Options Paper Trader</title>
+  <meta name="description" content="Pick a day, see that day's trades with real brokerage/fees applied">
+  <!-- PWA installability — see static/manifest.json / static/sw.js -->
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#111111">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="BN Options">
+  <link rel="stylesheet" href="/css/dashboard.css?v=54">
+  <script>
+    (function(){
+      var t = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
+      });
+    }
+  </script>
+  <style>
+    .pnl-wrap {
+      max-width: 1180px;
+      margin: 18px auto 90px;
+      padding: 0 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .pnl-filter-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 12px;
+      padding: 14px;
+    }
+    .pnl-field { display: flex; flex-direction: column; gap: 4px; }
+    .pnl-field label { font-size: 10.5px; color: var(--txt-3); text-transform: uppercase; letter-spacing: .03em; }
+    .pnl-empty { font-size: 12.5px; color: var(--txt-3); padding: 18px; text-align: center; }
+
+    /* `.hdr-actions` (the <div> wrapping the pages-nav/theme-toggle/logout
+       group) has NO rule for it at all in dashboard.css — index.html's app
+       bar never uses that wrapper (its action items are direct flex
+       children of .app-bar itself), it only exists as a settings.html
+       convention, which supplies this exact override itself. Copied here
+       verbatim (2026-10-20, found via a real reported screenshot) — without
+       it, `.hdr-actions` falls back to a plain block <div>, and
+       `.theme-toggle`'s own `display:flex` (block-level, not inline-flex)
+       then forces a hard line break before/after itself inside that block
+       context: the nav links, theme toggle and Logout button stack as 3
+       separate full-height lines instead of sitting in one row, making
+       `.hdr-actions` ~100px tall — taller than the 56px `.app-bar`, which
+       vertically centers it (`align-items:center`), pushing the nav links
+       up above the visible viewport entirely and leaving only the toggle/
+       Logout partially visible. Confirmed via actual computed
+       getBoundingClientRect() values during debugging, not guessed. */
+    .hdr-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    @media (max-width: 640px) {
+      .hdr-actions { width: 100%; }
+    }
+
+    /* .stat-strip's base styling (dashboard.css) is a full-bleed bar meant
+       to sit flush under the app-bar — borderless on 3 sides, square
+       corners. Nested inside this page's padded/centered .pnl-wrap instead,
+       give it the same card look every other panel on this page has so it
+       doesn't read as a stray misaligned strip. */
+    .pnl-wrap .stat-strip {
+      border: 1px solid var(--edge-soft);
+      border-radius: var(--r-lg);
+      box-shadow: 0 1px 6px rgba(0,0,0,.4);
+    }
+
+    /* Narrow phones: the date + instrument fields plus Submit no longer fit
+       one row even wrapped two-wide without feeling cramped — stack each
+       control full-width instead, and let the summary tiles go one-per-row
+       (stat-strip's own auto-fit grid already does this once minmax(160px)
+       stops fitting 2-up, but widening the minmum here reads better at the
+       tightest widths than the global 160px floor). */
+    @media (max-width: 480px) {
+      .pnl-filter-row { flex-direction: column; align-items: stretch; }
+      .pnl-field, #pnl-submit { width: 100%; }
+      .pnl-field .field-input { width: 100%; }
+    }
+
+    /* The site-wide mobile cardify rule (dashboard.css, <=640px) lays each
+       row out as a 2-column grid (1fr 1fr) — fine for short label/value
+       pairs elsewhere, but this table's rows (INSTRUMENT: BANKNIFTY,
+       OUTCOME: TIME_SCRATCH HIT, FEES: -₹100.29, …) are long enough that
+       two side-by-side columns clip values at the card's edge instead of
+       wrapping (confirmed via a real mobile-width screenshot — "DIR"
+       showed only "B", "STRIKE" showed "230" instead of "23000"). Scoped to
+       just this table (not a dashboard.css change) since it's this page's
+       particular field lengths causing it, not a site-wide issue. */
+    @media (max-width: 640px) {
+      #pnl-trades-body tr { grid-template-columns: 1fr !important; }
+    }
+  </style>
+</head>
+<body>
+
+<header class="app-bar">
+  <div class="brand">
+    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <polyline points="3,17 8,10 12,14 17,7 21,11"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-name">Bank Nifty Options</span>
+      <span class="brand-sub">P&amp;L Report</span>
+    </div>
+  </div>
+
+  <div class="hdr-actions">
+    <nav class="nav-seg" aria-label="Pages">
+      <a href="/">Dashboard</a>
+      <a href="/settings">Settings</a>
+      <a href="/pnl-report" class="active">P&amp;L Report</a>
+    </nav>
+    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <a href="/logout" class="btn-indicators" title="Log out">Logout</a>
+  </div>
+</header>
+
+<div class="pnl-wrap">
+  <div class="panel">
+    <div class="panel-header"><span class="panel-title">Pick a day</span></div>
+    <div class="pnl-filter-row">
+      <div class="pnl-field">
+        <label for="pnl-date">Date</label>
+        <input class="field-input" id="pnl-date" type="date">
+      </div>
+      <div class="pnl-field">
+        <label for="pnl-instrument">Instrument</label>
+        <select class="field-input" id="pnl-instrument">
+          <option value="ALL">Both</option>
+          <option value="BANKNIFTY">BankNifty</option>
+          <option value="NIFTY50">Nifty 50</option>
+        </select>
+      </div>
+      <button class="btn-mini" id="pnl-submit" onclick="runPnlReport()">Submit</button>
+    </div>
+  </div>
+
+  <div class="stat-strip" id="pnl-summary" style="display:none">
+    <div class="stat-card">
+      <span class="stat-label">Trades</span>
+      <span class="stat-value" id="pnl-stat-trades">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Gross P&amp;L</span>
+      <span class="stat-value" id="pnl-stat-gross">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Fees</span>
+      <span class="stat-value" id="pnl-stat-fees">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Net P&amp;L</span>
+      <span class="stat-value" id="pnl-stat-net">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Win rate (net)</span>
+      <span class="stat-value" id="pnl-stat-winrate">—</span>
+    </div>
+  </div>
+
+  <div class="panel" id="pnl-trades-panel" style="display:none">
+    <div class="panel-header"><span class="panel-title">Trades</span></div>
+    <div class="panel-body">
+      <div class="tbl-wrap expanded">
+        <table class="cardify">
+          <thead>
+            <tr>
+              <th>Time</th><th>Instrument</th><th>Dir</th><th>Type</th><th>Strike</th>
+              <th>Entry</th><th>Exit</th><th>Qty</th><th>Outcome</th>
+              <th>Gross</th><th>Fees</th><th>Net</th>
+            </tr>
+          </thead>
+          <tbody id="pnl-trades-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="pnl-empty" id="pnl-empty" style="display:none">No trades found for that day/filter.</div>
+</div>
+
+<script src="/js/util.js?v=49"></script>
+<script src="/js/pnlReport.js?v=1"></script>
+</body>
+</html>

@@ -185,6 +185,85 @@ async def get_all_positions() -> List[Dict[str, Any]]:
     return await _db.get_all_positions() if _db else []
 
 
+# ── P&L report (2026-10-20) — date-picker + instrument filter, fees applied ───
+# Live trading itself charges zero brokerage/fees (see finalize_exit) — this
+# report answers "what would that day's P&L have looked like net of real
+# trading costs," using the same BN_COST_*/NF_COST_* placeholder rates the
+# backtest engine already uses (app/backtest/fills.round_trip_costs_options),
+# just picked per-trade by instrument instead of that function's BN-only
+# hardcoding, since NF_COST_* could diverge from BN_COST_* in the future.
+
+def _trade_costs(instrument: str, buy_value: float, sell_value: float) -> float:
+    if instrument == "NIFTY50":
+        brokerage_flat, stt_pct, txn_pct, gst_pct, sebi_pct = (
+            cfg.NF_COST_BROKERAGE_FLAT, cfg.NF_COST_STT_SELL_PCT,
+            cfg.NF_COST_TXN_PCT, cfg.NF_COST_GST_PCT, cfg.NF_COST_SEBI_PCT)
+    else:
+        brokerage_flat, stt_pct, txn_pct, gst_pct, sebi_pct = (
+            cfg.BN_COST_BROKERAGE_FLAT, cfg.BN_COST_STT_SELL_PCT,
+            cfg.BN_COST_TXN_PCT, cfg.BN_COST_GST_PCT, cfg.BN_COST_SEBI_PCT)
+    brokerage = brokerage_flat * 2   # flat per executed order, both legs
+    stt       = stt_pct * sell_value
+    txn       = txn_pct * (buy_value + sell_value)
+    gst       = gst_pct * (brokerage + txn)
+    sebi      = sebi_pct * (buy_value + sell_value)
+    return brokerage + stt + txn + gst + sebi
+
+
+@router.get("/api/pnl-report")
+async def pnl_report(report_date: str, instrument: str = "ALL") -> Dict[str, Any]:
+    try:
+        target_date = date.fromisoformat(report_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    if instrument not in ("ALL", "BANKNIFTY", "NIFTY50"):
+        raise HTTPException(status_code=400, detail="instrument must be ALL, BANKNIFTY or NIFTY50")
+
+    rows = await _db.get_positions_for_date(target_date) if _db else []
+    if instrument != "ALL":
+        rows = [r for r in rows if r["instrument"] == instrument]
+
+    trades: List[Dict[str, Any]] = []
+    gross_total = fees_total = net_total = 0.0
+    wins_gross = wins_net = 0
+
+    for r in rows:
+        qty        = r["quantity"]
+        buy_value  = float(r["entry_premium"]) * qty
+        sell_value = float(r["exit_premium"]) * qty
+        gross      = float(r["pnl"])   # identical to sell_value - buy_value; reuse the stored value directly
+        fees       = _trade_costs(r["instrument"], buy_value, sell_value)
+        net        = gross - fees
+
+        gross_total += gross
+        fees_total  += fees
+        net_total   += net
+        wins_gross  += gross > 0
+        wins_net    += net > 0
+
+        created_ist = r["created_at"].astimezone(IST)
+        trades.append({
+            "orderId": r["order_id"], "instrument": r["instrument"],
+            "direction": r["direction"], "optionType": r["option_type"],
+            "strike": r["strike"], "entryPremium": float(r["entry_premium"]),
+            "exitPremium": float(r["exit_premium"]), "quantity": qty,
+            "outcome": r["outcome"], "entryWindow": r["entry_window"],
+            "time": created_ist.strftime("%H:%M:%S"),
+            "grossPnl": round(gross, 2), "fees": round(fees, 2), "netPnl": round(net, 2),
+        })
+
+    n = len(trades)
+    summary = {
+        "trades": n,
+        "grossPnl": round(gross_total, 2),
+        "fees": round(fees_total, 2),
+        "netPnl": round(net_total, 2),
+        "winRateGross": round(wins_gross / n, 4) if n else None,
+        "winRateNet": round(wins_net / n, 4) if n else None,
+    }
+    return {"date": report_date, "instrument": instrument, "trades": trades, "summary": summary}
+
+
 # ── Manual order (dashboard's Kite-style BankNifty order form) ────────────────
 # Places/closes the SAME single st.active_trade the automated engine uses —
 # a manual trading-desk override, not a second/parallel trade concept. See

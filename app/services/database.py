@@ -7,7 +7,7 @@ and dynamic settings overrides.
 """
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
@@ -411,6 +411,17 @@ class DatabaseService:
         # change broke (TypeError on an already-decoded list) — fixed at that
         # call site to accept either a raw string or an already-decoded list,
         # same tolerant pattern `_decode_jsonb` itself already uses.
+        return [self._decode_jsonb(dict(r), "basket_legs_at_entry") for r in rows]
+
+    async def get_positions_for_date(self, target_date: date) -> List[Dict[str, Any]]:
+        """Same query as get_today_positions, parameterized by date — backs
+        the /pnl-report page's date-picker (2026-10-20)."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM positions "
+                "WHERE (created_at AT TIME ZONE 'Asia/Kolkata')::date = $1 ORDER BY id",
+                target_date,
+            )
         return [self._decode_jsonb(dict(r), "basket_legs_at_entry") for r in rows]
 
     async def get_all_positions(self) -> List[Dict[str, Any]]:

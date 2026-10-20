@@ -127,6 +127,11 @@ def settings_page() -> FileResponse:
     return FileResponse("static/settings.html")
 
 
+@app.get("/pnl-report", dependencies=[Depends(require_login_page)])
+def pnl_report_page() -> FileResponse:
+    return FileResponse("static/pnl-report.html")
+
+
 # ── Login / logout (see app/auth.py) ────────────────────────────────────────────
 
 @app.get("/login")
