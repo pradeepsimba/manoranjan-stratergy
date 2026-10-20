@@ -222,6 +222,15 @@ async def pnl_report(report_date: str, instrument: str = "ALL") -> Dict[str, Any
     rows = await _db.get_positions_for_date(target_date) if _db else []
     if instrument != "ALL":
         rows = [r for r in rows if r["instrument"] == instrument]
+    # Exclude still-OPEN positions (found in review, 2026-10-20) — exit_premium/
+    # pnl are both SQL NULL until update_position_exit runs at close, so
+    # float(r["exit_premium"])/float(r["pnl"]) below would raise TypeError
+    # on a currently-active trade for the selected day (reachable any time
+    # the report is run while a position is open, e.g. "today"). An open
+    # trade has no realized gross/fees/net yet anyway — this report is about
+    # REALIZED P&L, so excluding it (not erroring, not fabricating a
+    # mark-to-market fee estimate) is the correct behavior, not a workaround.
+    rows = [r for r in rows if r["status"] == "CLOSED"]
 
     trades: List[Dict[str, Any]] = []
     gross_total = fees_total = net_total = 0.0
