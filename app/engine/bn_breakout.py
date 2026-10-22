@@ -161,8 +161,18 @@ def detect_support_resistance(candles: List[Candle]) -> Dict[str, List[float]]:
     # `[-3:]`'s old behavior rather than crashing on an empty candles list —
     # this function is still called from a few sites that can hand it an
     # empty/short buffer early in the session).
-    latest_price = candles[-1].close if candles else None
-    if latest_price:
+    # Walk back to the latest candle with a genuinely non-zero close
+    # (2026-10-22, found in review) — taking candles[-1].close directly and
+    # treating it as "no price available" via a truthy check whenever it's
+    # 0.0 (Candle's own float default, a legitimately-possible sentinel for
+    # a just-created still-forming bar) silently fell back to the top-3-by-
+    # VALUE branch below — exactly the stale-level regression the 2026-10-02
+    # fix above was written to eliminate, reintroduced for this one edge
+    # case. A single still-forming bar shouldn't discard an otherwise full
+    # candle buffer's worth of real price history — only genuinely empty
+    # (or all-zero) input should fall back to the old top-3 behavior.
+    latest_price = next((c.close for c in reversed(candles) if c.close), None)
+    if latest_price is not None:
         clustered_supports    = sorted(clustered_supports,
                                        key=lambda lvl: abs(lvl - latest_price))[:3]
         clustered_resistances = sorted(clustered_resistances,
