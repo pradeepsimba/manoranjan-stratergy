@@ -31,7 +31,7 @@ from app.engine.nf_entry_exit import evaluate_entry as nf_evaluate_entry
 from app.engine.nf_pricing import build_weekly_option_symbol
 from app.engine.nf_pricing import get_atm_strike as nf_get_atm_strike
 from app.engine.nf_pricing import get_next_expiry as nf_get_next_expiry
-from app.engine.risk_guardrails import day_candle_color
+from app.engine.risk_guardrails import day_candle_color, is_flat_market
 from app.models import BNTrade, NFTrade, PositionStatus, TradingPhase, closed_tail_closes, iv_lookback_closes
 from app.services import bn_trade, nf_trade, price_alerts
 from app.services.historical_data import fetch_indicator_history
@@ -683,6 +683,20 @@ class SchedulerService:
                     f"{signal.direction} is WITH today's {day_color} trend (against-trend only)")
                 signal = None
 
+        # Flat-market entry filter (2026-10-23, explicit user decision) —
+        # see risk_guardrails.is_flat_market and config.py's comment on
+        # BN_REQUIRE_MIN_VOLATILITY for why this is OFF by default (unlike
+        # the trend filter above, not yet validated against real trade
+        # history). Same caller-level convention as the trend filter: reject
+        # before arming, mutate diagnostic before publishing it below.
+        if signal is not None and cfg.BN_REQUIRE_MIN_VOLATILITY:
+            if is_flat_market(bn_candles, cfg.FLAT_MARKET_LOOKBACK_BARS, cfg.BN_MIN_VOLATILITY_PTS):
+                print(f"[filter] {signal.direction} dropped — flat market "
+                      f"(range below {cfg.BN_MIN_VOLATILITY_PTS}pts, BN_REQUIRE_MIN_VOLATILITY is on)")
+                diagnostic.no_trade_reason = (
+                    f"Market too flat (range below {cfg.BN_MIN_VOLATILITY_PTS}pts)")
+                signal = None
+
         st.bn_diagnostic = diagnostic
 
         if signal is None:
@@ -782,6 +796,16 @@ class SchedulerService:
                       f"({day_color} day, NF_REQUIRE_AGAINST_TREND is on)")
                 diagnostic.no_trade_reason = (
                     f"{signal.direction} is WITH today's {day_color} trend (against-trend only)")
+                signal = None
+
+        # Flat-market entry filter — see the BN mirror's identical comment in
+        # _tick_entries above (2026-10-23, explicit user decision).
+        if signal is not None and cfg.NF_REQUIRE_MIN_VOLATILITY:
+            if is_flat_market(nf_candles, cfg.FLAT_MARKET_LOOKBACK_BARS, cfg.NF_MIN_VOLATILITY_PTS):
+                print(f"[filter] {signal.direction} dropped — flat market "
+                      f"(range below {cfg.NF_MIN_VOLATILITY_PTS}pts, NF_REQUIRE_MIN_VOLATILITY is on)")
+                diagnostic.no_trade_reason = (
+                    f"Market too flat (range below {cfg.NF_MIN_VOLATILITY_PTS}pts)")
                 signal = None
 
         st.nf_diagnostic = diagnostic

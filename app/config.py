@@ -999,6 +999,12 @@ NF_SCALP_SCRATCH_SLIPPAGE_RS = 0.10
 # trades_today gate, so a per-run override really does change how many
 # trades a backtest day can take, not a silent no-op.
 
+# Shared lookback (bars) for risk_guardrails.is_flat_market — static, not a
+# Settings-page value, same treatment as every other "how many bars" detail
+# in this file (e.g. BN_INDICATOR_LOOKBACK_BARS's own IV lookback). 3 closed
+# 5m bars = a 15-minute window.
+FLAT_MARKET_LOOKBACK_BARS = 3
+
 # ── Dynamic tunables — hard defaults. Only BN/NF Alerts remain here (2026-
 # 09-09, explicit user decision "remove all except threshold") — everything
 # else above is now a plain static attribute. ─────────────────────────────
@@ -1106,6 +1112,24 @@ _DEFAULTS: Dict[str, Any] = {
     # roughly 90%), not a bug fix, so it's a dynamic setting, not hardcoded.
     "BN_REQUIRE_AGAINST_TREND": True,
     "NF_REQUIRE_AGAINST_TREND": True,
+
+    # Flat-market entry filter (2026-10-23, explicit user decision — "don't
+    # trade in a flat market" toggle). Gated at the CALLER level in
+    # scheduler.py's _tick_entries/_tick_entries_nf, same convention as
+    # BN_REQUIRE_AGAINST_TREND above — see risk_guardrails.is_flat_market for
+    # the actual check. Defaults to OFF, unlike the trend filter: this
+    # hasn't been validated against real trade history, only sanity-checked
+    # against one real incident (2026-10-22's BankNifty chop), where it
+    # turned out that day's own 3-bar range was NOT unusually low — so this
+    # is offered as an available lever, not a proven fix. Thresholds are
+    # instrument-specific (BankNifty trades ~2.4x Nifty 50's index level, so
+    # the same ₹/point move is a much bigger % move for NF) — picked from
+    # this app's own recorded 5m-bar ranges (BN's quietest observed 3-bar
+    # stretches were single digits to ~20pts; NF scaled proportionally).
+    "BN_REQUIRE_MIN_VOLATILITY": False,
+    "NF_REQUIRE_MIN_VOLATILITY": False,
+    "BN_MIN_VOLATILITY_PTS": 20.0,
+    "NF_MIN_VOLATILITY_PTS": 10.0,
 
     # ── Paper account (2026-09-25, explicit user decision — Settings page
     # capital control). Seeds st.funds on a genuinely first-ever startup

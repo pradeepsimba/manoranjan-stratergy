@@ -73,6 +73,39 @@ def day_candle_color(candles: list, current_price: float, today: str) -> str:
     return "FLAT"
 
 
+def is_flat_market(candles: list, lookback_bars: int, min_range_points: float) -> bool:
+    """
+    True when the index has moved less than `min_range_points` (high-low
+    range) over the last `lookback_bars` CLOSED bars — a cheap proxy for
+    "nothing is really happening right now." Added 2026-10-23 (explicit
+    user decision) after a real incident (2026-10-22: BankNifty traded the
+    SAME strike all day, 20% win rate, 5 straight stop-outs in one ~2-hour
+    stretch) raised the question of whether a flat-market filter would help.
+
+    Checked directly against that day's own self-recorded 5m bars before
+    building this: that stretch's range was actually NORMAL-TO-HIGHER than
+    several genuinely good trading days, not unusually quiet — the problem
+    there was no NET direction (chop), not literally low movement. This
+    filter catches the "nothing moving" case specifically, not general chop
+    — don't expect it alone to prevent a repeat of that exact day.
+    `BN_REQUIRE_MIN_VOLATILITY`/`NF_REQUIRE_MIN_VOLATILITY` gate whether
+    this runs at all — OFF by default (unlike the trend-fade filter, this
+    hasn't been validated against real trade history, just sanity-checked).
+
+    `candles[-(lookback_bars+1):-1]` — same closed-bar-only slicing
+    convention as models.closed_tail (excludes the still-forming last bar,
+    mutated in place tick by tick, which would understate this exact tick's
+    own range). Returns False (never blocks) if fewer than `lookback_bars`
+    closed bars exist yet — same fail-open choice in_trading_window/
+    day_candle_color make for insufficient data; this filter should never
+    be what silently freezes entries during the first few bars of a session.
+    """
+    closed = candles[-(lookback_bars + 1):-1]
+    if len(closed) < lookback_bars:
+        return False
+    return (max(c.high for c in closed) - min(c.low for c in closed)) < min_range_points
+
+
 def which_window(now: datetime) -> str:
     """
     Which of the two configured scalp windows `now` actually falls inside —

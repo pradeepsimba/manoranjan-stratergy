@@ -213,6 +213,23 @@ SPEC: List[Dict[str, Any]] = [
        bt=False,
        help_="When ON, rejects a BUY signal on a day already trading GREEN, or a SELL signal on a day already trading RED — i.e. only takes entries that fade today's established direction. Added after real trade history showed with-trend entries net heavily negative while against-trend entries were net positive over the same period. Cuts trade volume substantially — turn off to go back to taking every signal regardless of trend."),
 
+    # Flat-market filter (2026-10-23, explicit user decision — see config.py's
+    # own comment on these keys). bt=False: same reason as the trend filter
+    # above — this is a caller-level gate in scheduler.py's _tick_entries,
+    # which backtest's _try_entry doesn't go through.
+    _s("BN_REQUIRE_MIN_VOLATILITY", "BankNifty: skip entries in a flat market", "bool", "Scalp Timing",
+       bt=False,
+       help_="When ON, rejects a new entry if BankNifty's index range over the last 3 closed 5m bars is below the threshold below — i.e. skips entering when the market genuinely isn't moving. OFF by default: checked against one real bad day (2026-10-22) and that day's own range was NOT unusually low, so this is an available lever, not a validated fix — it catches a literally-quiet market, not general chop/whipsaw."),
+    _s("NF_REQUIRE_MIN_VOLATILITY", "Nifty 50: skip entries in a flat market", "bool", "Scalp Timing",
+       bt=False,
+       help_="When ON, rejects a new entry if Nifty 50's index range over the last 3 closed 5m bars is below the threshold below — i.e. skips entering when the market genuinely isn't moving. OFF by default: checked against one real bad day (2026-10-22) and that day's own range was NOT unusually low, so this is an available lever, not a validated fix — it catches a literally-quiet market, not general chop/whipsaw."),
+    _s("BN_MIN_VOLATILITY_PTS", "BankNifty min 15-min range (pts)", "float", "Scalp Timing",
+       min_=1, max_=500, step=1, bt=False,
+       help_="Minimum BankNifty index range (high-low) required over the last 3 closed 5m bars before a new entry is allowed, when the toggle above is ON. Only matters if BN_REQUIRE_MIN_VOLATILITY is ON."),
+    _s("NF_MIN_VOLATILITY_PTS", "Nifty 50 min 15-min range (pts)", "float", "Scalp Timing",
+       min_=1, max_=500, step=1, bt=False,
+       help_="Minimum Nifty 50 index range (high-low) required over the last 3 closed 5m bars before a new entry is allowed, when the toggle above is ON. Only matters if NF_REQUIRE_MIN_VOLATILITY is ON."),
+
     # ── Paper account (2026-09-25, explicit user decision — capital control
     # from Settings). bt=False: backtest has no notion of a running account
     # balance at all (app/backtest/metrics.py reports pure P&L/R-multiples,
