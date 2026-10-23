@@ -213,6 +213,16 @@ SPEC: List[Dict[str, Any]] = [
        bt=False,
        help_="When ON, rejects a BUY signal on a day already trading GREEN, or a SELL signal on a day already trading RED — i.e. only takes entries that fade today's established direction. Added after real trade history showed with-trend entries net heavily negative while against-trend entries were net positive over the same period. Cuts trade volume substantially — turn off to go back to taking every signal regardless of trend."),
 
+    # Opposite filter (2026-10-23, explicit user decision) — see config.py's
+    # own comment on these keys for why this can't be ON at the same time as
+    # BN_REQUIRE_AGAINST_TREND/NF_REQUIRE_AGAINST_TREND (validated on save).
+    _s("BN_REQUIRE_WITH_TREND", "BankNifty: only trade with today's trend", "bool", "Scalp Timing",
+       bt=False,
+       help_="When ON, rejects a SELL signal on a day already trading GREEN, or a BUY signal on a day already trading RED — i.e. only takes entries that follow today's established direction. The opposite of the filter above — conventional trading wisdom, but this app's own real trade history actually favored against-trend entries (see that filter's help text), so treat this as an available lever, not a recommendation. Cannot be ON at the same time as the against-trend filter above."),
+    _s("NF_REQUIRE_WITH_TREND", "Nifty 50: only trade with today's trend", "bool", "Scalp Timing",
+       bt=False,
+       help_="When ON, rejects a SELL signal on a day already trading GREEN, or a BUY signal on a day already trading RED — i.e. only takes entries that follow today's established direction. The opposite of the filter above — conventional trading wisdom, but this app's own real trade history actually favored against-trend entries (see that filter's help text), so treat this as an available lever, not a recommendation. Cannot be ON at the same time as the against-trend filter above."),
+
     # Flat-market filter (2026-10-23, explicit user decision — see config.py's
     # own comment on these keys). bt=False: same reason as the trend filter
     # above — this is a caller-level gate in scheduler.py's _tick_entries,
@@ -486,6 +496,23 @@ def validate_scalp_windows(effective: Dict[str, Any]) -> None:
                 f"cutoff, or that window's tail end would be unreachable "
                 f"(CUTOFF blocks all new entries regardless of any window)"
             )
+
+    # Against-trend / with-trend filters are mutually exclusive per
+    # instrument (2026-10-23, found in review while adding the with-trend
+    # filter) — both ON would reject every GREEN/RED-day signal and only
+    # let FLAT-day ones through, a confusing state nobody actually wants.
+    # Checked here (not a narrower helper) for the same "every call site
+    # gets it for free" reason SCAN_START/CUTOFF joined this function.
+    if effective["BN_REQUIRE_AGAINST_TREND"] and effective["BN_REQUIRE_WITH_TREND"]:
+        raise ValueError(
+            "BankNifty: \"only trade against today's trend\" and \"only trade "
+            "with today's trend\" can't both be ON — turn one off first"
+        )
+    if effective["NF_REQUIRE_AGAINST_TREND"] and effective["NF_REQUIRE_WITH_TREND"]:
+        raise ValueError(
+            "Nifty 50: \"only trade against today's trend\" and \"only trade "
+            "with today's trend\" can't both be ON — turn one off first"
+        )
 
 
 def effective_state(overrides: Dict[str, Any]) -> Dict[str, Any]:

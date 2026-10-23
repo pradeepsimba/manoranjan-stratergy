@@ -683,6 +683,21 @@ class SchedulerService:
                     f"{signal.direction} is WITH today's {day_color} trend (against-trend only)")
                 signal = None
 
+        # Opposite filter (2026-10-23, explicit user decision) — only take
+        # entries that FOLLOW today's trend. Mutually exclusive with the
+        # against-trend filter above (enforced at save time by
+        # settings.validate_scalp_windows), so only one of these two blocks
+        # can ever actually fire for a given GREEN/RED day.
+        if signal is not None and cfg.BN_REQUIRE_WITH_TREND:
+            against_trend = ((signal.direction == "BUY" and day_color == "RED") or
+                             (signal.direction == "SELL" and day_color == "GREEN"))
+            if against_trend:
+                print(f"[filter] {signal.direction} dropped — counter-trend "
+                      f"({day_color} day, BN_REQUIRE_WITH_TREND is on)")
+                diagnostic.no_trade_reason = (
+                    f"{signal.direction} is AGAINST today's {day_color} trend (with-trend only)")
+                signal = None
+
         # Flat-market entry filter (2026-10-23, explicit user decision) —
         # see risk_guardrails.is_flat_market and config.py's comment on
         # BN_REQUIRE_MIN_VOLATILITY for why this is OFF by default (unlike
@@ -796,6 +811,18 @@ class SchedulerService:
                       f"({day_color} day, NF_REQUIRE_AGAINST_TREND is on)")
                 diagnostic.no_trade_reason = (
                     f"{signal.direction} is WITH today's {day_color} trend (against-trend only)")
+                signal = None
+
+        # Opposite filter — see the BN mirror's identical comment in
+        # _tick_entries above (2026-10-23, explicit user decision).
+        if signal is not None and cfg.NF_REQUIRE_WITH_TREND:
+            against_trend = ((signal.direction == "BUY" and day_color == "RED") or
+                             (signal.direction == "SELL" and day_color == "GREEN"))
+            if against_trend:
+                print(f"[filter] {signal.direction} dropped — counter-trend "
+                      f"({day_color} day, NF_REQUIRE_WITH_TREND is on)")
+                diagnostic.no_trade_reason = (
+                    f"{signal.direction} is AGAINST today's {day_color} trend (with-trend only)")
                 signal = None
 
         # Flat-market entry filter — see the BN mirror's identical comment in

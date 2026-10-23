@@ -1113,6 +1113,21 @@ _DEFAULTS: Dict[str, Any] = {
     "BN_REQUIRE_AGAINST_TREND": True,
     "NF_REQUIRE_AGAINST_TREND": True,
 
+    # Opposite of the filter above (2026-10-23, explicit user decision) —
+    # "only trade WITH today's established trend" instead of against it.
+    # Mutually exclusive with BN_REQUIRE_AGAINST_TREND/NF_REQUIRE_AGAINST_
+    # TREND (enabling both for the same instrument would reject every
+    # GREEN/RED-day signal and only let FLAT-day signals through, a
+    # confusing state nobody actually wants) — enforced by
+    # settings.validate_scalp_windows, which despite its name is this
+    # repo's one shared cross-field validation checkpoint (see its own
+    # docstring). Defaults to OFF, same as BN_REQUIRE_MIN_VOLATILITY —
+    # conventional "trade with the trend" wisdom, but NOT what this app's
+    # own real trade history showed (see BN_REQUIRE_AGAINST_TREND's
+    # comment above) — offered as an available lever, not a recommendation.
+    "BN_REQUIRE_WITH_TREND": False,
+    "NF_REQUIRE_WITH_TREND": False,
+
     # Flat-market entry filter (2026-10-23, explicit user decision — "don't
     # trade in a flat market" toggle). Gated at the CALLER level in
     # scheduler.py's _tick_entries/_tick_entries_nf, same convention as
