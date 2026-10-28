@@ -30,6 +30,7 @@ guards remain correct as-is.
 
 import asyncio
 import json
+import math
 import re
 from collections import deque as _deque
 from datetime import datetime
@@ -291,10 +292,16 @@ class MarketDataService:
                 try:
                     data  = json.loads(message)
                     items = data if isinstance(data, list) else [data]
-                    for item in items:
-                        self._process_tick(item)
                 except Exception as e:
                     print(f"Tick parse error (conn {conn_idx}): {e}")
+                    continue
+                for item in items:
+                    # Per-item isolation: one malformed entry in a batch used to abort the whole
+                    # list, silently dropping every valid tick after it.
+                    try:
+                        self._process_tick(item)
+                    except Exception as e:
+                        print(f"Tick process error (conn {conn_idx}): {e}")
 
         self._conn_status[conn_idx] = "Disconnected"
         self._refresh_ws_status()
@@ -468,7 +475,17 @@ class MarketDataService:
 
         ltp = _parse_ltp(n)
 
-        if symbol == cfg.BN_INDEX_TOKEN:
+        # A tick whose bar has a missing/zero/non-finite price or no start_time must not touch
+        # the candle buffers or the synthetic-index latch. Missing keys defaulted to 0.0 above, so such a tick used to
+        # overwrite the forming bar with zeros (or append a zero bar), feeding log(0)/NaN into the
+        # IV estimate and VWAP - and, for an index tick, flip the synthetic-index latch below
+        # permanently on a tick that carried no usable data.
+        candle_ok = bool(candle.start_time) and all(
+            math.isfinite(x) and x > 0 for x in (candle.open, candle.close, candle.high, candle.low))
+
+        if not candle_ok:
+            pass   # no usable bar in this tick: skip every candle write below; a valid ltp is still applied
+        elif symbol == cfg.BN_INDEX_TOKEN:
             # A genuine index tick arrived — the vendor may have resumed
             # streaming it (currently doesn't). One-way latch: once real
             # data is seen, never fall back to synthesizing again this run.
@@ -540,17 +557,27 @@ class MarketDataService:
         total_weight = 0.0
         latest_time: Optional[str] = None
 
+        # Two passes: find the newest bar time first, then count ONLY constituents whose latest
+        # candle is for that bar. A stock that hasn't ticked yet in a freshly-rolled bar still has
+        # the PREVIOUS bar as its last candle - counting its full-bar % move again on top of the
+        # anchor (which already includes that move) double-counted it for every such stock until
+        # all of them had ticked, jumping the synthetic index by up to ~100+ points at rollover.
+        latest_bars = []
         for symbol, weight in cfg.BN_INDEX_WEIGHTS.items():
             with self.state.candle_lock(symbol):
                 candles = self.state.candles_5m.get(symbol)
                 candle = candles[-1] if candles else None
-            if not candle or not candle.open or not candle.close:
+            if not candle or not candle.open or not candle.close or not candle.start_time:
+                continue
+            latest_bars.append((candle, weight))
+            if latest_time is None or candle.start_time > latest_time:
+                latest_time = candle.start_time
+        for candle, weight in latest_bars:
+            if candle.start_time != latest_time:
                 continue
             pct = (candle.close - candle.open) / candle.open * 100.0
             weighted_pct += pct * (weight / 100.0)
             total_weight += weight
-            if candle.start_time and (latest_time is None or candle.start_time > latest_time):
-                latest_time = candle.start_time
 
         if total_weight == 0 or latest_time is None:
             return   # no constituent candles yet either
@@ -601,17 +628,27 @@ class MarketDataService:
         total_weight = 0.0
         latest_time: Optional[str] = None
 
+        # Two passes: find the newest bar time first, then count ONLY constituents whose latest
+        # candle is for that bar. A stock that hasn't ticked yet in a freshly-rolled bar still has
+        # the PREVIOUS bar as its last candle - counting its full-bar % move again on top of the
+        # anchor (which already includes that move) double-counted it for every such stock until
+        # all of them had ticked, jumping the synthetic index by up to ~100+ points at rollover.
+        latest_bars = []
         for symbol, weight in cfg.NF_INDEX_WEIGHTS.items():
             with self.state.candle_lock(symbol):
                 candles = self.state.candles_5m.get(symbol)
                 candle = candles[-1] if candles else None
-            if not candle or not candle.open or not candle.close:
+            if not candle or not candle.open or not candle.close or not candle.start_time:
+                continue
+            latest_bars.append((candle, weight))
+            if latest_time is None or candle.start_time > latest_time:
+                latest_time = candle.start_time
+        for candle, weight in latest_bars:
+            if candle.start_time != latest_time:
                 continue
             pct = (candle.close - candle.open) / candle.open * 100.0
             weighted_pct += pct * (weight / 100.0)
             total_weight += weight
-            if candle.start_time and (latest_time is None or candle.start_time > latest_time):
-                latest_time = candle.start_time
 
         if total_weight == 0 or latest_time is None:
             return

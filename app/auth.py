@@ -134,7 +134,10 @@ def check_credentials(username: str, password: str) -> bool:
     # `and`-short-circuiting would make "wrong username" measurably faster
     # than "right username, wrong password", leaking which one was correct
     # through timing despite each compare_digest() call being constant-time.
-    username_ok = hmac.compare_digest(username, cfg.SETTINGS_USER)
+    # Compared as UTF-8 bytes: hmac.compare_digest() raises TypeError for a str containing
+    # non-ASCII characters, which turned a login attempt with e.g. 'é' into a 500 (after the
+    # lockout limiter had already counted it) instead of the normal invalid-credentials path.
+    username_ok = hmac.compare_digest(username.encode(), cfg.SETTINGS_USER.encode())
     # `bool(password) and` removed (2026-09-24, found in review) — it used to
     # short-circuit AROUND compare_digest for an empty submitted password,
     # contradicting this function's own stated constant-time invariant (an
@@ -145,7 +148,7 @@ def check_credentials(username: str, password: str) -> bool:
     # SETTINGS_PASSWORD can never match an empty submitted password (which
     # hmac.compare_digest("", "") would otherwise consider equal).
     password_ok = bool(cfg.SETTINGS_PASSWORD) \
-        and hmac.compare_digest(password, cfg.SETTINGS_PASSWORD)
+        and hmac.compare_digest(password.encode(), cfg.SETTINGS_PASSWORD.encode())
     return username_ok and password_ok
 
 

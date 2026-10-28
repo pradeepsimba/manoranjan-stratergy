@@ -654,9 +654,17 @@ function updateLocalTradeLog(activeTrade, closedTrades) {
 // function was never updated alongside it). Keyed 'bn'/'nf' so each
 // instrument's own open/closed transition is tracked independently.
 const _hadActiveTrade = { bn: false, nf: false };
+// The first STATE_UPDATE after a page load only establishes the baseline: a trade that was
+// ALREADY open then is not a new entry, so it must not trigger a screenshot download.
+const _screenshotPrimed = { bn: false, nf: false };
 
 function checkTradeTransitionForScreenshot(activeTrade, instr) {
   const hasNow = !!activeTrade;
+  if (!_screenshotPrimed[instr]) {
+    _screenshotPrimed[instr] = true;
+    _hadActiveTrade[instr] = hasNow;
+    return;
+  }
   if (hasNow && !_hadActiveTrade[instr] && typeof html2canvas === 'function') {
     const label = `${activeTrade.direction}_ENTRY_${activeTrade.entryIndexPrice}`;
     html2canvas(document.body).then(canvas => {

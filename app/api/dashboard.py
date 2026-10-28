@@ -230,7 +230,11 @@ async def pnl_report(report_date: str, instrument: str = "ALL") -> Dict[str, Any
     # trade has no realized gross/fees/net yet anyway — this report is about
     # REALIZED P&L, so excluding it (not erroring, not fabricating a
     # mark-to-market fee estimate) is the correct behavior, not a workaround.
-    rows = [r for r in rows if r["status"] == "CLOSED"]
+    # ...and legacy rows from before the premium/pnl columns existed (added later via ALTER ... ADD
+    # COLUMN IF NOT EXISTS) are CLOSED but carry NULLs there - skip them rather than 500 on float(None).
+    rows = [r for r in rows if r["status"] == "CLOSED"
+            and r["entry_premium"] is not None and r["exit_premium"] is not None
+            and r["pnl"] is not None and r["quantity"] is not None]
 
     trades: List[Dict[str, Any]] = []
     gross_total = fees_total = net_total = 0.0

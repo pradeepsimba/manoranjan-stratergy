@@ -81,6 +81,7 @@ async def refresh(client: httpx.AsyncClient) -> None:
             print(f"Option-expiry refresh failed for {underlying}: {e}")
             continue
         if expiries:
+            expiries.sort()          # next_expiry() takes the first live entry, so order matters
             _CACHE[underlying.upper()] = (datetime.now(IST).date(), expiries)
             _warned.discard(underlying)
 

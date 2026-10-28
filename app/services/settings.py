@@ -24,6 +24,7 @@ Add a new tunable by adding its default to app.config._DEFAULTS AND an entry
 here — nothing else is required for it to appear on the Settings page.
 """
 
+import asyncio
 import math
 import re
 from typing import Any, Dict, List, Optional
@@ -598,7 +599,19 @@ async def load_and_apply(db) -> None:
         print(f"Settings: applied {len(valid)} stored overrides")
 
 
+# Serializes validate -> persist -> apply across concurrent PUT/reset requests. Each one validated
+# against the live cfg, then awaited the DB write before applying, so two overlapping requests
+# (e.g. turning BN_REQUIRE_AGAINST_TREND and BN_REQUIRE_WITH_TREND on at once) could both pass
+# validation and leave the mutually-exclusive combination applied and persisted.
+_apply_lock = asyncio.Lock()
+
+
 async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
+    async with _apply_lock:
+        return await _apply_and_persist_locked(db, changes)
+
+
+async def _apply_and_persist_locked(db, changes: Dict[str, Any]) -> Dict[str, Any]:
     """
     Validate + apply {spec_key: value} changes, persist overrides, and drop
     stored rows for values set back to their default (so future default
@@ -621,6 +634,11 @@ async def apply_and_persist(db, changes: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def reset(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
+    async with _apply_lock:
+        return await _reset_locked(db, keys)
+
+
+async def _reset_locked(db, keys: Optional[List[str]] = None) -> Dict[str, Any]:
     """Reset the given spec keys (or ALL settings) to defaults."""
     if keys is None:
         attr_keys = [k for s in SPEC for k in _attr_keys(s)]

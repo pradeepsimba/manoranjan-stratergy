@@ -51,10 +51,13 @@ def resolve_premium_touch(sl_level: float, target_level: float,
     check, else a forced TIME_SCRATCH at that bar's close since 12s has by
     then long since elapsed relative to the bar).
     """
+    # A gap THROUGH a level fills at the open (the first price actually available), not at the
+    # level itself - booking an adverse gap at the stop understated losses (a bar opening 8
+    # below entry was booked as a 3 loss), and a favourable gap at the target understated wins.
     if premium_open <= sl_level:
-        return sl_level, "STOP"
+        return premium_open, "STOP"
     if premium_open >= target_level:
-        return target_level, "TARGET"
+        return premium_open, "TARGET"
     if premium_low <= sl_level:
         return sl_level, "STOP"
     if premium_high >= target_level:

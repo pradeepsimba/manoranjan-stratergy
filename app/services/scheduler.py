@@ -493,9 +493,8 @@ class SchedulerService:
         """
         print("=== ACTIVE: tick-driven engine open ===")
         st = get_state()
-        fallback_s = max(0.01, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)
-
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
+            fallback_s = max(0.01, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)   # re-read: it is a dynamic setting
             try:
                 if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
                     st.phase = TradingPhase.CUTOFF
@@ -504,12 +503,20 @@ class SchedulerService:
                 else:
                     st.phase = TradingPhase.WAIT_ZONE
 
-                await self._tick_exits()
-                await self._tick_entries()
-                await self._tick_exits_nf()
-                await self._tick_entries_nf()
             except Exception as e:
                 print(f"Tick loop error: {e}")
+
+            # Each trading stage has its own try/except, and BOTH exit stages run before either
+            # entry stage. They used to share one try in the order BN exit, BN entry, NF exit, NF
+            # entry, so any stage raising skipped everything after it on that pass - e.g. a
+            # persistently failing BN entry left an open NF trade with no target/stop/time-scratch
+            # checks until the 15:30 square-off.
+            for stage in (self._tick_exits, self._tick_exits_nf,
+                          self._tick_entries, self._tick_entries_nf):
+                try:
+                    await stage()
+                except Exception as e:
+                    print(f"Tick loop error in {stage.__name__}: {e}")
 
             # Informational stages get their own try/except and always run: previously they sat
             # at the end of the trading stages' single try, so one stage raising (e.g. on a bad
@@ -1216,8 +1223,13 @@ class SchedulerService:
         # Stop the live ATM CE/PE watchlist for the day — no point holding a
         # WS subscription for stale strikes once the market's closed; it'll
         # naturally resume tomorrow on the first live tick that moves it.
-        self._mkt.set_bn_atm_watch(None, None)
-        self._mkt.set_nf_atm_watch(None, None)
+        try:
+            self._mkt.set_bn_atm_watch(None, None)
+            self._mkt.set_nf_atm_watch(None, None)
+        except Exception as e:
+            # Must not abort EOD: the daily state reset at the end never ran if this raised, and
+            # yesterday's trade count/P&L then carried into the next session.
+            print(f"EOD ATM-watch teardown error: {e}")
         self._bn_atm_watch_symbols = None
         self._nf_atm_watch_symbols = None
         self._bn_atm_watch_last_resub_at = None
@@ -1236,7 +1248,10 @@ class SchedulerService:
         # at the day boundary instead of the client-connection boundary.
         price_alerts.reset_consensus_state()
 
-        await self._mkt.stop()
+        try:
+            await self._mkt.stop()
+        except Exception as e:
+            print(f"EOD market-data stop error: {e}")   # same reason as above - never abort EOD
         await self._persist_funds()
 
         # Grow our own BankNifty/Nifty 50 history archives (see

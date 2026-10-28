@@ -11,7 +11,11 @@
   // the session is running, and this page is for reviewing a closed day.
   const yday = new Date(today);
   yday.setDate(yday.getDate() - 1);
-  dateInput.value = yday.toISOString().slice(0, 10);
+  // Local calendar date, not toISOString() (UTC): between 00:00 and 05:30 IST the UTC date is
+  // still the previous day, which preselected a report date two days back.
+  dateInput.value = yday.getFullYear() + '-' +
+    String(yday.getMonth() + 1).padStart(2, '0') + '-' +
+    String(yday.getDate()).padStart(2, '0');
 })();
 
 function fmtMoney(n) {

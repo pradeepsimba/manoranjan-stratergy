@@ -99,7 +99,9 @@ def _session_vwap_cached(token: str, candles: List[Candle], today: date) -> Opti
     if not candles:
         return None
     last = candles[-1]
-    fingerprint = (len(candles), last.start_time, last.volume, last.close, last.high, last.low)
+    # `today` is part of the key: the same candle list means "no bar today" (VWAP None) on one day
+    # and would otherwise return the previous day's cached VWAP on the next.
+    fingerprint = (today, len(candles), last.start_time, last.volume, last.close, last.high, last.low)
     cached = _vwap_cache.get(token)
     if cached is not None and cached[0] == fingerprint:
         return cached[1]
