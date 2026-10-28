@@ -44,6 +44,7 @@ class DashboardWSManager:
         # _SEND_TIMEOUT_S) can delay the NEXT broadcast() call from
         # starting, but never lets two sends to one client overlap.
         self._broadcast_lock = asyncio.Lock()
+        self._close_tasks: set = set()   # strong refs to in-flight _force_close tasks
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
@@ -91,7 +92,9 @@ class DashboardWSManager:
                     # _broadcast_lock, so no other (necessarily later, since
                     # they're serialized) broadcast() call can ever see this ws
                     # again and schedule a second close for it.
-                    asyncio.create_task(self._force_close(ws))
+                    task = asyncio.create_task(self._force_close(ws))
+                    self._close_tasks.add(task)          # keep a reference: a bare task can be GC'd mid-run
+                    task.add_done_callback(self._close_tasks.discard)
 
     async def _force_close(self, ws: WebSocket) -> None:
         try:

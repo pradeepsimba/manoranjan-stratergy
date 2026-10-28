@@ -62,6 +62,12 @@ def day_candle_color(candles: list, current_price: float, today: str) -> str:
     slice — evaluate_entry's own bn_recent_candles (last 5 bars only) is
     NOT sufficient once the day is more than 5 bars old.
     """
+    # A non-positive price means "no live tick yet" (e.g. right after a restart), not a real
+    # price of 0 - without this it compared below every day_open and reported a bogus "RED",
+    # which the trend filters would then act on. "" is what every caller already treats as
+    # "no data" (the filters fail open on it).
+    if current_price <= 0:
+        return ""
     todays = [c for c in candles if c.start_time[:10] == today]
     if not todays:
         return ""
