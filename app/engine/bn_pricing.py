@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 import app.config as cfg
+from app.services import option_expiries
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -96,6 +97,9 @@ def build_monthly_option_symbol(underlying: str, expiry: datetime, strike: int, 
     contract — if a subscribed symbol never produces a real tick, suspect
     this format first (same gotcha class as the Kotak Bank naming issue).
     """
+    prefix = option_expiries.symbol_prefix(underlying, expiry)   # the broker's own symbol prefix
+    if prefix is not None:
+        return f"{prefix}{strike}{option_type}"
     return f"{underlying}{expiry.strftime('%y%b').upper()}{strike}{option_type}"
 
 
@@ -110,6 +114,10 @@ def get_next_expiry(now: datetime) -> datetime:
     """
     if now.tzinfo is None:
         now = now.replace(tzinfo=IST)
+    broker = option_expiries.next_expiry(cfg.BN_OPTION_UNDERLYING, now)
+    if broker is not None:
+        return broker
+    option_expiries.warn_fallback(cfg.BN_OPTION_UNDERLYING)
     expiry = _adjusted_last_tuesday_of_month(now.year, now.month)
     if now > expiry:
         year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)

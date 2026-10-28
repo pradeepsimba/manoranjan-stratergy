@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 import app.config as cfg
+from app.services import option_expiries
 from app.engine.bn_pricing import (  # noqa: F401 — re-exported for nf_entry_exit.py
     black_scholes,
     normal_cdf,
@@ -148,6 +149,9 @@ def build_weekly_option_symbol(underlying: str, expiry: datetime, strike: int, o
     Only affects Nifty 50 — BankNifty has no equivalent ambiguity since it
     only ever has the one (monthly) contract type.
     """
+    prefix = option_expiries.symbol_prefix(underlying, expiry)   # the broker's own symbol prefix
+    if prefix is not None:
+        return f"{prefix}{strike}{option_type}"
     if _is_last_tuesday_of_month(expiry):
         return f"{underlying}{expiry.strftime('%y%b').upper()}{strike}{option_type}"
     month_code = _WEEKLY_MONTH_CODE[expiry.month]
@@ -179,6 +183,10 @@ def get_next_expiry(now: datetime) -> datetime:
     """
     if now.tzinfo is None:
         now = now.replace(tzinfo=IST)
+    broker = option_expiries.next_expiry(cfg.NF_OPTION_UNDERLYING, now)
+    if broker is not None:
+        return broker
+    option_expiries.warn_fallback(cfg.NF_OPTION_UNDERLYING)
     weekday = now.weekday()          # Mon=0 .. Sun=6; Tuesday=1
     days_until = (1 - weekday) % 7
     tuesday_date = (now + timedelta(days=days_until)).date()

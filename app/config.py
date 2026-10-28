@@ -60,6 +60,7 @@ from typing import Any, Dict, Iterator, List, Optional
 # ── Static: custom market data server ────────────────────────────────────────
 API_HOST          = "algo.vaangamart.com"
 API_URL_TEMPLATE  = "https://{}:8000/api/historical-data/?from_date={}&to_date={}"
+OPTION_EXPIRIES_URL_TEMPLATE = "https://{}:8000/api/option-expiries/?underlying={}"
 WS_URL            = f"ws://{API_HOST}:8083/historical-data"
 
 # ── Static: credentials / DSN ─────────────────────────────────────────────────
@@ -339,6 +340,9 @@ NF_INDEX_TOKEN = "NIFTY 50"
 # NSE trading-holiday circular if a symbol ever again returns zero vendor
 # data around a suspected holiday, and extend this set for 2027+ as each
 # year's circular is published (this list intentionally only covers 2026).
+# FALLBACK ONLY: real expiry dates now come from the broker's instrument master via
+# backend_server_algo (app/services/option_expiries.py). This hand-kept list is used solely when
+# that data has never been reachable - see bn_pricing/nf_pricing get_next_expiry.
 NSE_TRADING_HOLIDAYS = frozenset({
     date(2026, 1, 26),   # Republic Day
     date(2026, 3, 3),    # Holi

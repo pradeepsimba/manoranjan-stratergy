@@ -24,6 +24,7 @@ import app.config as cfg
 from app.engine import bn_breakout, scalp_signals
 from app.engine.bn_entry_exit import _leader_qty_surge, _stock_qty_threshold, evaluate_entry
 from app.engine.bn_pricing import build_monthly_option_symbol, get_atm_strike
+from app.services import option_expiries
 from app.engine.bn_pricing import get_next_expiry as bn_get_next_expiry
 from app.engine.nf_entry_exit import _leader_qty_surge as _nf_leader_qty_surge
 from app.engine.nf_entry_exit import _stock_qty_threshold as _nf_stock_qty_threshold
@@ -148,6 +149,7 @@ class SchedulerService:
             asyncio.create_task(self._push_dashboard_loop()),
             asyncio.create_task(self._push_tick_updates_loop()),
             asyncio.create_task(self._refresh_15m_sr_loop()),
+            asyncio.create_task(option_expiries.refresh_loop()),
         ]
 
     async def stop(self) -> None:
@@ -506,10 +508,18 @@ class SchedulerService:
                 await self._tick_entries()
                 await self._tick_exits_nf()
                 await self._tick_entries_nf()
-                await self._tick_alerts()
-                await self._tick_atm_watch()
             except Exception as e:
                 print(f"Tick loop error: {e}")
+
+            # Informational stages get their own try/except and always run: previously they sat
+            # at the end of the trading stages' single try, so one stage raising (e.g. on a bad
+            # tick) skipped them for that pass - and a persistent failure left the live ATM
+            # watchlist frozen on a stale strike ("waiting for live tick") for the whole session.
+            for stage in (self._tick_alerts, self._tick_atm_watch):
+                try:
+                    await stage()
+                except Exception as e:
+                    print(f"Tick loop error in {stage.__name__}: {e}")
 
             try:
                 await asyncio.wait_for(st.tick_event.wait(), timeout=fallback_s)
