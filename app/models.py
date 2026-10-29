@@ -276,6 +276,12 @@ class BNTrade:
     # value. Backtest's BTPosition has no equivalent fields; this only ever
     # applied to a live BNTrade.
     option_symbol:      str  = ""
+    # Pricing basis this trade was OPENED with: True = broker's real option price, False = the
+    # Black-Scholes calculation, None = unknown (a trade restored after a restart) -> follow the
+    # USE_REAL_OPTION_PRICES setting. Exits keep the entry's basis even if the setting is toggled
+    # mid-trade, so entry and exit are never priced from two different sources (that mismatch is
+    # what jumped the premium past the target/stop bracket in the 2026-09-22 incident).
+    premium_real:       Optional[bool] = None
     # ── Pending-exit fill delay (2026-09-24, explicit user decision: "200ms
     # Exit Delay") — see bn_trade.check_tick_exit's docstring. None while no
     # exit condition has fired yet. The instant evaluate_exit's target/stop/
@@ -394,6 +400,12 @@ class NFTrade:
     # NF mirror of BNTrade's option_symbol comment above — see there
     # (including why premium_synthetic used to live here too).
     option_symbol:      str  = ""
+    # Pricing basis this trade was OPENED with: True = broker's real option price, False = the
+    # Black-Scholes calculation, None = unknown (a trade restored after a restart) -> follow the
+    # USE_REAL_OPTION_PRICES setting. Exits keep the entry's basis even if the setting is toggled
+    # mid-trade, so entry and exit are never priced from two different sources (that mismatch is
+    # what jumped the premium past the target/stop bracket in the 2026-09-22 incident).
+    premium_real:       Optional[bool] = None
     # NF mirror of BNTrade's pending-exit fill-delay fields above — see there.
     pending_exit_reason:     Optional[str] = None
     pending_exit_fill_after: Optional[str] = None

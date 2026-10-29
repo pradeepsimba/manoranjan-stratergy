@@ -263,7 +263,7 @@ class ExitEvaluation:
 
 
 def evaluate_exit(trade: NFTrade, now: datetime, current_index_price: float,
-                  nf_closes_lookback: np.ndarray) -> ExitEvaluation:
+                  nf_closes_lookback: np.ndarray, live_premium: Optional[float] = None) -> ExitEvaluation:
     """NF mirror of bn_entry_exit.evaluate_exit — see there for the full lifecycle
     walkthrough, including why the live_premium_override this used to accept was removed.
     Pure DECISION function (2026-10-02) — current_premium is always the raw
@@ -275,7 +275,11 @@ def evaluate_exit(trade: NFTrade, now: datetime, current_index_price: float,
     # See bn_entry_exit.evaluate_exit's identical >0 guard (2026-09-24, found in review).
     safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
     bs = black_scholes(safe_price, trade.strike, T, cfg.NF_RISK_FREE_RATE, iv, trade.option_type)
-    premium = bs["price"]
+    # live_premium: the broker's REAL option price for this trade's contract (passed by the live
+    # caller when USE_REAL_OPTION_PRICES is on - see app/services/option_prices.py). None (backtest,
+    # or the setting off) keeps the Black-Scholes mark. delta/theta/iv below stay model values: they
+    # are display-only and never feed a decision.
+    premium = live_premium if live_premium is not None else bs["price"]
 
     entry_time = datetime.fromisoformat(trade.entry_time)
     elapsed_s = (now - entry_time).total_seconds()
@@ -338,7 +342,7 @@ def open_trade_from_signal(signal: NFSignal, now: datetime, order_id: str = "") 
 
 
 def fill_delayed_entry(signal: NFSignal, now: datetime, current_index_price: float,
-                       nf_closes_lookback: np.ndarray) -> NFSignal:
+                       nf_closes_lookback: np.ndarray, live_premium: Optional[float] = None) -> NFSignal:
     """NF mirror of bn_entry_exit.fill_delayed_entry — see there. entry_premium
     adds cfg.NF_SPREAD_PENALTY_RS to the raw mark (2026-10-02, explicit user
     decision — simulates crossing the Ask)."""
@@ -347,13 +351,15 @@ def fill_delayed_entry(signal: NFSignal, now: datetime, current_index_price: flo
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(nf_closes_lookback)
     bs = black_scholes(current_index_price, signal.strike, T, cfg.NF_RISK_FREE_RATE, iv, option_type)
-    entry_premium = bs["price"] + cfg.NF_SPREAD_PENALTY_RS
+    # Real broker price when supplied (see evaluate_exit's live_premium note), else the model mark.
+    raw_premium = live_premium if live_premium is not None else bs["price"]
+    entry_premium = raw_premium + cfg.NF_SPREAD_PENALTY_RS
     return replace(signal, entry_index_price=current_index_price,
                    entry_premium=entry_premium, iv_used=iv)
 
 
 def resolve_delayed_exit_premium(trade: NFTrade, now: datetime, current_index_price: float,
-                                 nf_closes_lookback: np.ndarray) -> float:
+                                 nf_closes_lookback: np.ndarray, live_premium: Optional[float] = None) -> float:
     """NF mirror of bn_entry_exit.resolve_delayed_exit_premium — see there.
     Subtracts trade.spread_penalty UNCONDITIONALLY (2026-10-02, explicit user
     decision — every exit reason crosses the spread, not just TIME_SCRATCH)."""
@@ -362,7 +368,8 @@ def resolve_delayed_exit_premium(trade: NFTrade, now: datetime, current_index_pr
     iv = estimate_iv(nf_closes_lookback)
     safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
     bs = black_scholes(safe_price, trade.strike, T, cfg.NF_RISK_FREE_RATE, iv, trade.option_type)
-    return max(0.0, bs["price"] - trade.spread_penalty)
+    raw_premium = live_premium if live_premium is not None else bs["price"]
+    return max(0.0, raw_premium - trade.spread_penalty)
 
 
 def finalize_exit(trade: NFTrade, now: datetime, exit_index_price: float,

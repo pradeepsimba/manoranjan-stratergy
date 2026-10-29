@@ -1180,6 +1180,13 @@ _DEFAULTS: Dict[str, Any] = {
     "BN_FILL_MAX_WAIT_MS":    1500.0,
     "NF_FILL_MAX_WAIT_MS":    1500.0,
 
+    # Paper-trade option pricing (live only): price entries/exits from the broker's REAL option
+    # LTP (streamed via the websocket server) instead of a Black-Scholes calculation. See
+    # app/services/option_prices.py. OPTION_PRICE_MAX_AGE_S is how recent a real tick must be to
+    # OPEN a trade (an exit always uses the latest known price, however old).
+    "USE_REAL_OPTION_PRICES": True,
+    "OPTION_PRICE_MAX_AGE_S": 20.0,
+
     # ── Strike & execution pricing (2026-10-02, explicit user decision —
     # "Dynamic Strike Selection" + "Dynamic Spread Penalty"). ITM_OFFSET is
     # bt=True (backtest's shared evaluate_entry calls get_itm_strike with

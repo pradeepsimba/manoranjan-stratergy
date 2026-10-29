@@ -32,6 +32,7 @@ import asyncio
 import json
 import math
 import re
+import time
 from collections import deque as _deque
 from datetime import datetime
 from typing import Optional
@@ -95,6 +96,14 @@ class MarketDataService:
         self._nf_atm_watch: Optional[tuple] = None
         self._option_task: Optional[asyncio.Task] = None
         self._option_filters: list = []
+        # Extra option symbols to keep subscribed besides the ATM pair, so the broker's REAL price
+        # is already flowing for the deep-ITM contracts the strategy trades (set by
+        # set_option_ladder, called from SchedulerService._tick_atm_watch). Every symbol on the
+        # option connection - ATM, ladder or held - has its ticks cached in state.opt_ltp.
+        self._bn_ladder: tuple = ()
+        self._nf_ladder: tuple = ()
+        self._held_option_symbols: tuple = ()
+        self._option_symbols: frozenset = frozenset()
         # stock_symbol (token) -> this app's own internal ALL-CAPS display
         # name. The vendor's per-tick echoed `stockname` field does NOT
         # reliably match the casing we sent in the subscription request (e.g.
@@ -192,6 +201,15 @@ class MarketDataService:
             self.state.nf_atm_watch_strike = strike
         self._resync_option_connection()
 
+    def set_option_ladder(self, bn_symbols: tuple, nf_symbols: tuple, held_symbols: tuple) -> None:
+        """Keep these option symbols subscribed (see __init__). Cheap no-op when nothing changed, so
+        the scheduler may call it every pass; a real change reconnects the option connection once."""
+        bn, nf, held = tuple(bn_symbols), tuple(nf_symbols), tuple(held_symbols)
+        if (bn, nf, held) == (self._bn_ladder, self._nf_ladder, self._held_option_symbols):
+            return
+        self._bn_ladder, self._nf_ladder, self._held_option_symbols = bn, nf, held
+        self._resync_option_connection()
+
     def _resync_option_connection(self) -> None:
         """
         Recomputes the option connection's desired filter set from
@@ -224,8 +242,16 @@ class MarketDataService:
             ce, pe = self._nf_atm_watch
             merged[ce] = cfg.NF_OPTION_UNDERLYING
             merged[pe] = cfg.NF_OPTION_UNDERLYING
-        new_filters = [{"stock_symbol": sym, "stockname": name, "interval": "1m"}
-                       for sym, name in merged.items()]
+        for sym in self._bn_ladder:
+            merged[sym] = cfg.BN_OPTION_UNDERLYING
+        for sym in self._nf_ladder:
+            merged[sym] = cfg.NF_OPTION_UNDERLYING
+        for sym in self._held_option_symbols:
+            merged.setdefault(sym, cfg.BN_OPTION_UNDERLYING if sym.startswith(cfg.BN_OPTION_UNDERLYING)
+                                   else cfg.NF_OPTION_UNDERLYING)
+        self._option_symbols = frozenset(merged)
+        new_filters = [{"stock_symbol": sym, "stockname": merged[sym], "interval": "1m"}
+                       for sym in sorted(merged)]
         if new_filters == self._option_filters:
             return
         self._option_filters = new_filters
@@ -394,6 +420,22 @@ class MarketDataService:
         # so a future vendor protocol quirk can't silently disable this path
         # the same way again.
         st = self.state
+        # Real option price cache for ANY subscribed option symbol (ATM, ITM ladder, held contract):
+        # this is what paper trades are priced from (app/services/option_prices.py).
+        if interval == "1m" and symbol in self._option_symbols:
+            opt_ltp = _parse_ltp(n)
+            if opt_ltp > 0:
+                # Timestamp = receipt time, capped at the END of the tick's own 1-minute candle. After
+                # every (re)connect the server first resends each contract's LAST STORED price; stamping
+                # that with "now" made a price from hours ago look fresh and tradable. A live tick
+                # arrives inside its candle's minute, so it keeps its receipt time.
+                stamp = time.time()
+                try:
+                    bar_start = datetime.fromisoformat(str(n.get("start_time", ""))).replace(tzinfo=IST)
+                    stamp = min(stamp, bar_start.timestamp() + 60.0)
+                except ValueError:
+                    pass
+                st.opt_ltp[symbol] = (opt_ltp, stamp)
         with st._atm_watch_lock:
             is_bn_atm_ce = st.bn_atm_ce_symbol and symbol == st.bn_atm_ce_symbol
             is_bn_atm_pe = st.bn_atm_pe_symbol and symbol == st.bn_atm_pe_symbol

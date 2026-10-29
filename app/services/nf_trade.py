@@ -25,10 +25,13 @@ from app.engine.nf_entry_exit import (
     open_trade_from_signal,
     resolve_delayed_exit_premium,
 )
-from app.engine.nf_pricing import black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years
+from app.engine.nf_pricing import (
+    build_weekly_option_symbol, black_scholes, estimate_iv, get_itm_strike, get_next_expiry, time_to_expiry_years,
+)
 from app.engine.risk_guardrails import day_candle_color as _day_candle_color
 from app.engine.risk_guardrails import trading_window_description as _trading_window_description
 from app.models import NFSignal, NFTrade, PendingNFEntry, PositionStatus, TradingPhase, closed_tail_closes, iv_lookback_closes
+from app.services import option_prices
 from app.state import get_state
 
 _order_seq = itertools.count(1)
@@ -109,9 +112,24 @@ def try_fill_pending_entry(now: datetime, current_index_price: float,
         print("NF pending entry abandoned — no live price at fill time")
         return None
 
-    filled_signal = fill_delayed_entry(pending.signal, now, current_index_price, nf_closes_lookback)
+    # Real broker option price for the contract being bought (USE_REAL_OPTION_PRICES). A fresh tick is
+    # REQUIRED: with none the signal is dropped rather than priced from a model.
+    live = None
+    if option_prices.use_real_prices():
+        option_type = "CE" if pending.signal.direction == "BUY" else "PE"
+        symbol = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, datetime.fromisoformat(pending.signal.expiry),
+                         pending.signal.strike, option_type)
+        live = option_prices.live_option_premium(symbol, cfg.OPTION_PRICE_MAX_AGE_S)
+        if live is None:
+            print(f"NF pending entry abandoned — no live broker price for {symbol} within "
+                  f"{cfg.OPTION_PRICE_MAX_AGE_S:.0f}s")
+            return None
+
+    filled_signal = fill_delayed_entry(pending.signal, now, current_index_price, nf_closes_lookback, live_premium=live)
     try:
-        return place_paper_order(filled_signal, now)
+        trade = place_paper_order(filled_signal, now)
+        trade.premium_real = live is not None
+        return trade
     except ValueError as e:
         print(f"NF order rejected at fill time: {e}")
         return None
@@ -156,7 +174,13 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
     bs = black_scholes(spot, strike, T, cfg.NF_RISK_FREE_RATE, iv, option_type)
     # Spread-crossing slippage on the Ask (2026-10-02, explicit user decision
     # — see bn_trade.place_manual_order's identical comment).
-    entry_premium = bs["price"] + cfg.NF_SPREAD_PENALTY_RS
+    live = None
+    if option_prices.use_real_prices():
+        symbol = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, option_type)
+        live = option_prices.live_option_premium(symbol, cfg.OPTION_PRICE_MAX_AGE_S)
+        if live is None:
+            raise ValueError(f"No recent live broker price for {symbol} yet - try again in a moment.")
+    entry_premium = (live if live is not None else bs["price"]) + cfg.NF_SPREAD_PENALTY_RS
 
     signal = NFSignal(
         direction=direction, entry_index_price=spot, bar_time=now.isoformat(),
@@ -164,7 +188,9 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
         bn_bull=0.0, bn_bear=0.0, strike=strike, expiry=expiry.isoformat(),
         entry_premium=entry_premium, iv_used=iv,
     )
-    return place_paper_order(signal, now)
+    trade = place_paper_order(signal, now)
+    trade.premium_real = live is not None
+    return trade
 
 
 def _settle(trade: NFTrade, now: datetime, exit_index_price: float,
@@ -204,7 +230,8 @@ def check_tick_exit(now: datetime, current_index_price: float,
     if trade.pending_exit_reason is not None:
         return _try_fill_pending_exit(trade, now, current_index_price, nf_closes_lookback)
 
-    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, nf_closes_lookback)
+    ev: ExitEvaluation = evaluate_exit(trade, now, current_index_price, nf_closes_lookback,
+                                       live_premium=option_prices.exit_mark(trade))
     trade.current_sl = ev.new_sl
     trade.sl_stage = ev.sl_stage
     trade.current_premium = ev.current_premium
@@ -237,7 +264,8 @@ def _try_fill_pending_exit(trade: NFTrade, now: datetime, current_index_price: f
         return None
 
     reason = trade.pending_exit_reason
-    premium = resolve_delayed_exit_premium(trade, now, current_index_price, nf_closes_lookback)
+    premium = resolve_delayed_exit_premium(trade, now, current_index_price, nf_closes_lookback,
+                                           live_premium=option_prices.exit_mark(trade))
     return _settle(trade, now, current_index_price, premium, f"{reason} HIT")
 
 
@@ -251,6 +279,6 @@ def force_close(now: datetime, current_index_price: float,
     trade = st.active_trade_nf
     if trade is None or trade.status != PositionStatus.OPEN:
         return None
-    ev = evaluate_exit(trade, now, current_index_price, nf_closes_lookback)
+    ev = evaluate_exit(trade, now, current_index_price, nf_closes_lookback, live_premium=option_prices.exit_mark(trade))
     exit_premium = max(0.0, ev.current_premium - trade.spread_penalty)
     return _settle(trade, now, current_index_price, exit_premium, label)

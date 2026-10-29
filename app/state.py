@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
-from typing import Deque, Dict, List, Optional
+from typing import Deque, Dict, List, Optional, Tuple
 
 import app.config as cfg
 from app.models import (
@@ -198,6 +198,13 @@ class AppState:
         # NEW strike's ce/pe symbols paired with the PREVIOUS strike's
         # stale LTP (2026-09-23 fix, found in review).
         self._atm_watch_lock: threading.Lock = threading.Lock()
+
+        # Latest REAL option last-traded price per option symbol, from the broker feed (every
+        # option symbol on the dedicated option websocket connection: the ATM pair, the ITM
+        # ladder and any held contract): symbol -> (ltp, time.time() of the tick). Written only
+        # from the event loop (MarketDataService._process_tick); a single dict assignment per
+        # tick, so readers need no lock. Cleared at EOD. See app/services/option_prices.py.
+        self.opt_ltp: Dict[str, Tuple[float, float]] = {}
 
         # Guards self.ltp (2026-09-24, found in review) — MarketDataService.
         # _process_tick's write (`self.state.ltp[name] = ltp`) is event-loop-

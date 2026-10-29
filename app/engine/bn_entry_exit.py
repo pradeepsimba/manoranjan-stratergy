@@ -369,7 +369,7 @@ class ExitEvaluation:
 
 
 def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
-                  bn_closes_lookback: np.ndarray) -> ExitEvaluation:
+                  bn_closes_lookback: np.ndarray, live_premium: Optional[float] = None) -> ExitEvaluation:
     """
     12-second premium-based lifecycle (2026-09-21) — REPLACES the old
     index-points target/stop/breakeven/trail state machine entirely.
@@ -418,7 +418,11 @@ def evaluate_exit(trade: BNTrade, now: datetime, current_index_price: float,
     # shouldn't depend on every future caller getting it right.
     safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
     bs = black_scholes(safe_price, trade.strike, T, cfg.BN_RISK_FREE_RATE, iv, trade.option_type)
-    premium = bs["price"]
+    # live_premium: the broker's REAL option price for this trade's contract (passed by the live
+    # caller when USE_REAL_OPTION_PRICES is on - see app/services/option_prices.py). None (backtest,
+    # or the setting off) keeps the Black-Scholes mark. delta/theta/iv below stay model values: they
+    # are display-only and never feed a decision.
+    premium = live_premium if live_premium is not None else bs["price"]
 
     entry_time = datetime.fromisoformat(trade.entry_time)
     elapsed_s = (now - entry_time).total_seconds()
@@ -487,7 +491,7 @@ def open_trade_from_signal(signal: BNSignal, now: datetime, order_id: str = "") 
 
 
 def fill_delayed_entry(signal: BNSignal, now: datetime, current_index_price: float,
-                       bn_closes_lookback: np.ndarray) -> BNSignal:
+                       bn_closes_lookback: np.ndarray, live_premium: Optional[float] = None) -> BNSignal:
     """
     Recompute a pending entry's ACTUAL fill (2026-09-24, explicit user
     decision: "300ms Entry Delay ... Realistic Slippage"). `signal`'s
@@ -508,13 +512,15 @@ def fill_delayed_entry(signal: BNSignal, now: datetime, current_index_price: flo
     T = time_to_expiry_years(now, expiry)
     iv = estimate_iv(bn_closes_lookback)
     bs = black_scholes(current_index_price, signal.strike, T, cfg.BN_RISK_FREE_RATE, iv, option_type)
-    entry_premium = bs["price"] + cfg.BN_SPREAD_PENALTY_RS
+    # Real broker price when supplied (see evaluate_exit's live_premium note), else the model mark.
+    raw_premium = live_premium if live_premium is not None else bs["price"]
+    entry_premium = raw_premium + cfg.BN_SPREAD_PENALTY_RS
     return replace(signal, entry_index_price=current_index_price,
                    entry_premium=entry_premium, iv_used=iv)
 
 
 def resolve_delayed_exit_premium(trade: BNTrade, now: datetime, current_index_price: float,
-                                 bn_closes_lookback: np.ndarray) -> float:
+                                 bn_closes_lookback: np.ndarray, live_premium: Optional[float] = None) -> float:
     """
     Recompute a pending exit's ACTUAL settlement premium (2026-09-24,
     explicit user decision: "200ms Exit Delay", filled symmetrically to
@@ -532,7 +538,8 @@ def resolve_delayed_exit_premium(trade: BNTrade, now: datetime, current_index_pr
     iv = estimate_iv(bn_closes_lookback)
     safe_price = current_index_price if current_index_price > 0 else trade.entry_index_price
     bs = black_scholes(safe_price, trade.strike, T, cfg.BN_RISK_FREE_RATE, iv, trade.option_type)
-    return max(0.0, bs["price"] - trade.spread_penalty)
+    raw_premium = live_premium if live_premium is not None else bs["price"]
+    return max(0.0, raw_premium - trade.spread_penalty)
 
 
 def finalize_exit(trade: BNTrade, now: datetime, exit_index_price: float,

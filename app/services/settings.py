@@ -291,6 +291,12 @@ SPEC: List[Dict[str, Any]] = [
     # model; nothing in backtest reads this cfg key, so offering it as a
     # per-run override would silently do nothing — same reasoning as
     # BN_SCALP_TIME_STOP_S's bt=False above.
+    _s("USE_REAL_OPTION_PRICES", "Price paper trades from real broker option prices", "bool", "Strike & Execution Pricing",
+       bt=False,
+       help_="When ON, a paper trade's entry and exit premiums are the broker's REAL option last-traded price (streamed live via the websocket server), plus/minus the spread penalty - not a Black-Scholes calculation. A signal is skipped (not priced from a model) if there is no recent real price for the contract. When OFF, the old calculated price is used. Live-only: backtest has no historical option ticks and always uses the calculated price. Needs the backend to track the strikes around your ITM offset (poll_index_options --strikes-each-side 7 covers offsets up to about 400 BankNifty / 200 Nifty points)."),
+    _s("OPTION_PRICE_MAX_AGE_S", "Max age of a real option price to open a trade (s)", "float", "Strike & Execution Pricing",
+       min_=1, max_=300, step=1, bt=False,
+       help_="A new trade only opens if the broker's last price for its option contract arrived within this many seconds. An exit always uses the latest known price regardless of age. Only used when real option prices are ON."),
     _s("BN_ITM_OFFSET_POINTS", "BankNifty ITM offset (pts)", "float", "Strike & Execution Pricing",
        min_=0, max_=2000, step=50,
        help_="Deep-ITM strike offset from spot (CE: spot-offset, PE: spot+offset), snapped to the nearest 100-pt strike. 0 = trade the exact ATM strike instead."),

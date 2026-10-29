@@ -24,7 +24,7 @@ import app.config as cfg
 from app.engine import bn_breakout, scalp_signals
 from app.engine.bn_entry_exit import _leader_qty_surge, _stock_qty_threshold, evaluate_entry
 from app.engine.bn_pricing import build_monthly_option_symbol, get_atm_strike
-from app.services import option_expiries
+from app.services import option_expiries, option_prices
 from app.engine.bn_pricing import get_next_expiry as bn_get_next_expiry
 from app.engine.nf_entry_exit import _leader_qty_surge as _nf_leader_qty_surge
 from app.engine.nf_entry_exit import _stock_qty_threshold as _nf_stock_qty_threshold
@@ -105,6 +105,12 @@ class SchedulerService:
         # key could miss a format-only change (nf_pricing.
         # build_weekly_option_symbol's weekly-vs-monthly-style format flips
         # at the Tuesday-15:30-IST expiry rollover independent of strike).
+        # ITM option ladder (see _option_ladder): the strike the ladder is currently centred on, and
+        # the symbols last handed to MarketDataService.set_option_ladder.
+        self._bn_ladder_center: int | None = None
+        self._nf_ladder_center: int | None = None
+        self._bn_ladder_symbols: tuple = ()
+        self._nf_ladder_symbols: tuple = ()
         self._bn_atm_watch_symbols: tuple[str, str] | None = None
         self._nf_atm_watch_symbols: tuple[str, str] | None = None
         # Resubscribe-rate debounce (2026-09-24, found in review) — the
@@ -729,6 +735,16 @@ class SchedulerService:
                     f"Market too flat (range below {cfg.BN_MIN_VOLATILITY_PTS}pts)")
                 signal = None
 
+        # No recent REAL broker price for the contract -> don't arm. Arming would only be dropped at fill
+        # time and re-armed on the very next tick (an arm/log loop). Checked before the diagnostic is
+        # published, like the entry filters above.
+        if signal is not None and option_prices.use_real_prices():
+            sym = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, datetime.fromisoformat(signal.expiry),
+                                              signal.strike, "CE" if signal.direction == "BUY" else "PE")
+            if option_prices.live_option_premium(sym, cfg.OPTION_PRICE_MAX_AGE_S) is None:
+                diagnostic.no_trade_reason = f"No recent live broker price for {sym}"
+                signal = None
+
         st.bn_diagnostic = diagnostic
 
         if signal is None:
@@ -852,6 +868,16 @@ class SchedulerService:
                     f"Market too flat (range below {cfg.NF_MIN_VOLATILITY_PTS}pts)")
                 signal = None
 
+        # No recent REAL broker price for the contract -> don't arm. Arming would only be dropped at fill
+        # time and re-armed on the very next tick (an arm/log loop). Checked before the diagnostic is
+        # published, like the entry filters above.
+        if signal is not None and option_prices.use_real_prices():
+            sym = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, datetime.fromisoformat(signal.expiry),
+                                             signal.strike, "CE" if signal.direction == "BUY" else "PE")
+            if option_prices.live_option_premium(sym, cfg.OPTION_PRICE_MAX_AGE_S) is None:
+                diagnostic.no_trade_reason = f"No recent live broker price for {sym}"
+                signal = None
+
         st.nf_diagnostic = diagnostic
 
         if signal is None:
@@ -945,6 +971,22 @@ class SchedulerService:
             return last_strike
         return round_fn(spot)
 
+    @staticmethod
+    def _option_ladder(center: int, step: int, itm_offset: float, underlying: str, expiry, build) -> tuple:
+        """CE and PE symbols for a band of strikes around where the deep-ITM contracts sit.
+
+        The strategy trades CE at (spot - offset) and PE at (spot + offset), `n` strikes away from
+        ATM. Their REAL prices must already be flowing when a signal fires, so subscribe n-2..n+2
+        strikes each way around `center`. center only moves when ATM drifts 2+ strikes from it
+        (see _tick_atm_watch), so the band always still covers n±1 - and the vendor limits one
+        connection to ~35 symbols, hence a band rather than the whole chain."""
+        n = int(math.ceil(itm_offset / step)) if itm_offset > 0 else 0
+        symbols = []
+        for k in range(n - 2, n + 3):
+            symbols.append(build(underlying, expiry, center - k * step, "CE"))
+            symbols.append(build(underlying, expiry, center + k * step, "PE"))
+        return tuple(symbols)
+
     async def _tick_atm_watch(self) -> None:
         """
         Live ATM CE/PE watchlist (2026-09-18, explicit user decision) — keeps
@@ -997,6 +1039,15 @@ class SchedulerService:
                 self._bn_atm_watch_strike = strike
                 self._bn_atm_watch_last_resub_at = now
                 self._mkt.set_bn_atm_watch(ce, pe, strike=strike)
+        if st.bn_index_ltp > 0 and cfg.USE_REAL_OPTION_PRICES:
+            atm = get_atm_strike(st.bn_index_ltp)
+            if self._bn_ladder_center is None or abs(atm - self._bn_ladder_center) >= 2 * 100:
+                self._bn_ladder_center = atm
+            self._bn_ladder_symbols = self._option_ladder(
+                self._bn_ladder_center, 100, cfg.BN_ITM_OFFSET_POINTS, cfg.BN_OPTION_UNDERLYING,
+                bn_get_next_expiry(now), build_monthly_option_symbol)
+        elif not cfg.USE_REAL_OPTION_PRICES:
+            self._bn_ladder_symbols = ()
         if st.nf_index_ltp > 0:
             strike = self._strike_with_hysteresis(
                 st.nf_index_ltp, self._nf_atm_watch_strike, 50,
@@ -1010,6 +1061,36 @@ class SchedulerService:
                 self._nf_atm_watch_strike = strike
                 self._nf_atm_watch_last_resub_at = now
                 self._mkt.set_nf_atm_watch(ce, pe, strike=strike)
+        if st.nf_index_ltp > 0 and cfg.USE_REAL_OPTION_PRICES:
+            atm = nf_get_atm_strike(st.nf_index_ltp)
+            if self._nf_ladder_center is None or abs(atm - self._nf_ladder_center) >= 2 * 50:
+                self._nf_ladder_center = atm
+            self._nf_ladder_symbols = self._option_ladder(
+                self._nf_ladder_center, 50, cfg.NF_ITM_OFFSET_POINTS, cfg.NF_OPTION_UNDERLYING,
+                nf_get_next_expiry(now), build_weekly_option_symbol)
+        elif not cfg.USE_REAL_OPTION_PRICES:
+            self._nf_ladder_symbols = ()
+
+        # Hand the ladders (plus any OPEN trade's own contract, so its price keeps flowing even if
+        # the market has since moved away from it) to the market-data service. A no-op unless
+        # something actually changed.
+        held = tuple(t.option_symbol for t in (st.active_trade, st.active_trade_nf)
+                     if t is not None and t.option_symbol)
+        self._mkt.set_option_ladder(self._bn_ladder_symbols, self._nf_ladder_symbols, held)
+
+    @staticmethod
+    def _restored_option_symbol(is_nf: bool, r) -> str:
+        """The option symbol isn't persisted, so rebuild it for a trade restored after a restart -
+        without it the trade could neither be priced from the real feed nor kept subscribed."""
+        try:
+            expiry = datetime.fromisoformat(str(r.get("expiry") or ""))
+            strike = int(r.get("strike") or 0)
+            opt = str(r.get("option_type") or "CE")
+            if is_nf:
+                return build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, expiry, strike, opt)
+            return build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, expiry, strike, opt)
+        except Exception:
+            return ""
 
     async def _restore_from_db(self) -> None:
         """
@@ -1082,6 +1163,7 @@ class SchedulerService:
                 strike=int(r.get("strike") or 0),
                 option_type=str(r.get("option_type") or "CE"),
                 expiry=str(r.get("expiry") or ""),
+                option_symbol=self._restored_option_symbol(is_nf, r),
                 entry_premium=_f(r.get("entry_premium")),
                 target_rs=target_rs, stop_rs=stop_rs, time_stop_s=time_stop_s,
                 scratch_slippage_rs=scratch_slippage_rs,
@@ -1224,6 +1306,7 @@ class SchedulerService:
         # WS subscription for stale strikes once the market's closed; it'll
         # naturally resume tomorrow on the first live tick that moves it.
         try:
+            self._mkt.set_option_ladder((), (), ())
             self._mkt.set_bn_atm_watch(None, None)
             self._mkt.set_nf_atm_watch(None, None)
         except Exception as e:
@@ -1236,6 +1319,11 @@ class SchedulerService:
         self._nf_atm_watch_last_resub_at = None
         self._bn_atm_watch_strike = None
         self._nf_atm_watch_strike = None
+        self._bn_ladder_center = None
+        self._nf_ladder_center = None
+        self._bn_ladder_symbols = ()
+        self._nf_ladder_symbols = ()
+        st.opt_ltp.clear()    # yesterday's option prices must never price tomorrow's trades
 
         # Reset the leader-consensus alert's edge-trigger state at day
         # boundary too (found in review, 2026-09-24) — previously only reset
