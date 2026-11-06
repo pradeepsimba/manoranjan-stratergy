@@ -21,6 +21,10 @@ services:
       SETTINGS_USER: ${SETTINGS_USER:-admin}
       SETTINGS_PASSWORD: ${SETTINGS_PASSWORD:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
+      # Direct live-tick channel from the feed container (see app/services/direct_feed.py). Unset =
+      # disabled, websocket path only. Must match DIRECT_FEED_TOKEN in ws_real_time_data's .env.
+      DIRECT_FEED_ADDR: ${DIRECT_FEED_ADDR:-}
+      DIRECT_FEED_TOKEN: ${DIRECT_FEED_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:

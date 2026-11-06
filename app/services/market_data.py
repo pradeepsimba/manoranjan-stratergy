@@ -42,6 +42,7 @@ import websockets
 
 import app.config as cfg
 from app.models import Candle, TradingPhase
+from app.services.direct_feed import DirectFeedClient
 from app.state import get_state
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -100,6 +101,13 @@ class MarketDataService:
         # is already flowing for the deep-ITM contracts the strategy trades (set by
         # set_option_ladder, called from SchedulerService._tick_atm_watch). Every symbol on the
         # option connection - ATM, ladder or held - has its ticks cached in state.opt_ltp.
+        # Direct tick channel from the feed process (None = disabled/not started). While it is live,
+        # websocket ticks for a (symbol, interval) it has recently served are ignored - see
+        # _process_tick. _direct_last: (symbol, interval) -> time.monotonic() of the last direct tick.
+        self._direct_client: Optional[DirectFeedClient] = None
+        self._direct_task: Optional[asyncio.Task] = None
+        self._direct_last: dict = {}
+        self._universe_symbols: set = set()
         self._bn_ladder: tuple = ()
         self._nf_ladder: tuple = ()
         self._held_option_symbols: tuple = ()
@@ -151,17 +159,51 @@ class MarketDataService:
         if self._option_filters:
             self._conn_status[_OPTION_CONN_ID] = "Disconnected"
             self._option_task = asyncio.create_task(self._connect_loop(self._option_filters, _OPTION_CONN_ID))
+        self._start_direct_feed(all_filters)
+
+    def _start_direct_feed(self, all_filters: list) -> None:
+        """Start the direct tick channel if configured. Additive: the websocket connections above keep
+        running and carry the data whenever this channel is not delivering."""
+        addr, token = cfg.DIRECT_FEED_ADDR, cfg.DIRECT_FEED_TOKEN
+        if not addr or not token or self._direct_task is not None:
+            return
+        try:
+            host, port_s = addr.rsplit(":", 1)
+            port = int(port_s)
+        except ValueError:
+            print(f"Direct feed: DIRECT_FEED_ADDR {addr!r} is not host:port - direct feed disabled")
+            return
+        self._direct_client = DirectFeedClient(host, port, token, self._on_direct_tick)
+        self._universe_symbols = {f["stock_symbol"] for f in all_filters}
+        self._sync_direct_symbols()
+        self._direct_task = asyncio.create_task(self._direct_client.run())
+
+    def _sync_direct_symbols(self) -> None:
+        """Subscribe the direct channel to the whole stock/index universe plus every option symbol on
+        the option connection (ATM pair, ITM ladder, held contract). Changes apply on the open
+        connection with no reconnect."""
+        if self._direct_client is not None:
+            self._direct_client.set_symbols(self._universe_symbols | set(self._option_symbols))
+
+    def _on_direct_tick(self, n: dict) -> None:
+        self._direct_last[(n.get("stock_symbol", ""), n.get("interval", ""))] = time.monotonic()
+        self._process_tick(n, direct=True)
 
     async def stop(self) -> None:
         self._running = False
         all_tasks = list(self._tasks)
         if self._option_task:
             all_tasks.append(self._option_task)
+        if self._direct_task:
+            all_tasks.append(self._direct_task)
         for t in all_tasks:
             t.cancel()
         if all_tasks:
             await asyncio.gather(*all_tasks, return_exceptions=True)
         self._option_task = None
+        self._direct_task = None
+        self._direct_client = None
+        self._direct_last.clear()
         # Cancellation skips _run_ws's post-loop status update — set it here so
         # the dashboard doesn't show "WS Connected" after the EOD shutdown.
         self.state.ws_status = "WS Stopped"
@@ -250,6 +292,7 @@ class MarketDataService:
             merged.setdefault(sym, cfg.BN_OPTION_UNDERLYING if sym.startswith(cfg.BN_OPTION_UNDERLYING)
                                    else cfg.NF_OPTION_UNDERLYING)
         self._option_symbols = frozenset(merged)
+        self._sync_direct_symbols()
         new_filters = [{"stock_symbol": sym, "stockname": merged[sym], "interval": "1m"}
                        for sym in sorted(merged)]
         if new_filters == self._option_filters:
@@ -381,11 +424,48 @@ class MarketDataService:
 
     # ── Tick processing ───────────────────────────────────────────────────────
 
-    def _process_tick(self, n: dict) -> None:
+    def _older_than_stored(self, symbol: str, interval: str, n: dict) -> bool:
+        """True if tick `n` is the SAME 5m bar as the stored last candle but with lower volume."""
+        if interval != "5m":
+            return False
+        try:
+            if symbol == cfg.BN_INDEX_TOKEN:
+                lst = self.state.bn_index_candles_5m
+            elif symbol == cfg.NF_INDEX_TOKEN:
+                lst = self.state.nf_index_candles_5m
+            else:
+                lst = self.state.candles_5m.get(symbol)
+            if not lst:
+                return False
+            last = lst[-1]
+            return last.start_time == n.get("start_time") and last.volume > float(n.get("volume", 0) or 0)
+        except (TypeError, ValueError, IndexError):
+            return False
+
+    def _process_tick(self, n: dict, direct: bool = False) -> None:
         symbol    = n.get("stock_symbol", "")
         interval  = n.get("interval",     "")
         if not symbol:
             return
+
+        # The direct channel is fresher than the websocket path (which lags by the feed's DB write
+        # throttle + NOTIFY + fetch). While it has served this (symbol, interval) in the last few
+        # seconds, a websocket tick for it is older state and would regress the candle - drop it.
+        # If the direct channel goes quiet the entry ages out and the websocket path resumes by
+        # itself, so there is no failover step to get wrong.
+        if not direct:
+            last_direct = self._direct_last.get((symbol, interval))
+            if last_direct is not None and time.monotonic() - last_direct < 3.0:
+                return
+        # A websocket tick for a key the direct channel has served this session - or a direct SNAPSHOT line
+        # (sent on subscribe; it can be older than a live line that reached us first) - is dropped when it is
+        # the same bar as the stored candle but carries LOWER volume: bar volume only grows, so it is older
+        # state. Without this, once the 3 s window lapses (an illiquid stock, a websocket reconnect replay)
+        # such a tick rolled the candle back until the symbol's next tick. Live direct ticks are never
+        # dropped by this, so a feed restart mid-bar (volume restarts) cannot lock them out.
+        if (not direct and (symbol, interval) in self._direct_last) or n.get("snapshot"):
+            if self._older_than_stored(symbol, interval, n):
+                return
 
         # Live ATM CE/PE watchlist (2026-09-18) — never touches candles_5m/ltp
         # (those are documented as "the fixed BN/NF stock universe only");
@@ -429,13 +509,13 @@ class MarketDataService:
                 # every (re)connect the server first resends each contract's LAST STORED price; stamping
                 # that with "now" made a price from hours ago look fresh and tradable. A live tick
                 # arrives inside its candle's minute, so it keeps its receipt time.
-                stamp = time.time()
                 try:
                     bar_start = datetime.fromisoformat(str(n.get("start_time", ""))).replace(tzinfo=IST)
-                    stamp = min(stamp, bar_start.timestamp() + 60.0)
+                    st.opt_ltp[symbol] = (opt_ltp, min(time.time(), bar_start.timestamp() + 60.0))
                 except ValueError:
+                    # No usable bar time means we cannot tell how old this price is. It used to be stamped
+                    # "now", which let an hours-old resent price look fresh and tradable - skip it instead.
                     pass
-                st.opt_ltp[symbol] = (opt_ltp, stamp)
         with st._atm_watch_lock:
             is_bn_atm_ce = st.bn_atm_ce_symbol and symbol == st.bn_atm_ce_symbol
             is_bn_atm_pe = st.bn_atm_pe_symbol and symbol == st.bn_atm_pe_symbol

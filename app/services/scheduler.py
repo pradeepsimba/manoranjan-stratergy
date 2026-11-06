@@ -15,6 +15,7 @@ import asyncio
 import copy
 import json
 import math
+import time
 from collections import deque as _deque
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, List, Optional
@@ -501,6 +502,7 @@ class SchedulerService:
         st = get_state()
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
             fallback_s = max(0.01, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)   # re-read: it is a dynamic setting
+            pass_started = time.monotonic()
             try:
                 if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
                     st.phase = TradingPhase.CUTOFF
@@ -533,6 +535,13 @@ class SchedulerService:
                     await stage()
                 except Exception as e:
                     print(f"Tick loop error in {stage.__name__}: {e}")
+
+            # Pace the loop: a pass per tick is cheap (~0.5 ms) but ticks can now arrive at hundreds
+            # per second (direct feed), so enforce a minimum spacing between passes. Ticks arriving
+            # during the pause just leave tick_event set, so the next pass sees all of them at once.
+            spare = cfg.TICK_MIN_PASS_MS / 1000.0 - (time.monotonic() - pass_started)
+            if spare > 0:
+                await asyncio.sleep(spare)
 
             try:
                 await asyncio.wait_for(st.tick_event.wait(), timeout=fallback_s)

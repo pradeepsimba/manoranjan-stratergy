@@ -73,6 +73,15 @@ POSTGRES_DSN = os.getenv(
 # page/API route except /ws/dashboard and /login itself. Same credential the
 # Settings page used to gate on its own before this covered the whole app.
 SETTINGS_USER     = os.getenv("SETTINGS_USER", "admin")
+# Direct live-tick channel from the feed process (see app/services/direct_feed.py). Both must be set
+# to enable it; "host:port", e.g. "host.docker.internal:8091". Unset = websocket path only.
+DIRECT_FEED_ADDR  = os.getenv("DIRECT_FEED_ADDR", "")
+# Floor on how often the tick-driven engine loop runs a full pass (ms). The direct feed delivers every
+# tick unthrottled, and every tick wakes the loop; a pass costs ~0.5 ms, so at ~1000 ticks/s an
+# uncapped loop would burn about half a core. 5 ms caps it at 200 passes/s (~10% of a core) and adds
+# at most 5 ms of reaction delay - small next to the ~1 ms transport.
+TICK_MIN_PASS_MS  = 5.0
+DIRECT_FEED_TOKEN = os.getenv("DIRECT_FEED_TOKEN", "")
 SETTINGS_PASSWORD = os.getenv("SETTINGS_PASSWORD", "")
 
 # Signs the login session cookie (itsdangerous) - a random signing key, not a

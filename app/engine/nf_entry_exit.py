@@ -286,19 +286,15 @@ def evaluate_exit(trade: NFTrade, now: datetime, current_index_price: float,
 
     should_exit = False
     exit_reason: Optional[str] = None
-    # Target/stop are tested against the price a SELL would actually fill at (mark minus the spread
-    # penalty), not the raw mark. They are frozen from entry_premium, which already includes the
-    # penalty paid on the way in; comparing them to the raw mark made a TARGET fire only after the
-    # price had risen target_rs + penalty above the paid price and a STOP after it fell just
-    # stop_rs - penalty, so a win then settled at +(target_rs - penalty) and a loss at
-    # -(stop_rs + penalty) - e.g. +1.75 / -3.00 per lot instead of the configured +2.75 / -2.00
-    # (a 63% break-even win rate against 42% as configured). Settlement (resolve_delayed_exit_premium,
-    # force_close) already sells at mark - penalty, so a trigger on that same basis realises exactly
-    # the configured target_rs / stop_rs. current_premium below stays the raw mark (display).
-    executable = premium - trade.spread_penalty
-    if executable >= trade.target:
+    # Target/stop are compared to the RAW mark. (2026-11-06: an attempt to compare them to the executable
+    # price - mark minus the spread penalty - was REVERTED the same day. Those levels are frozen from
+    # entry_premium, which already contains the penalty paid on entry, so on the executable basis the
+    # round-trip spread (2 x penalty) is subtracted before any price move: with the defaults, stop_rs 2.0
+    # and penalty 1.0, an UNCHANGED price already sat exactly on the stop and every trade was stopped out
+    # on its first evaluation. The levels/spread interplay needs a proper redesign - see CLAUDE.md.)
+    if premium >= trade.target:
         should_exit, exit_reason = True, "TARGET"
-    elif executable <= trade.current_sl:
+    elif premium <= trade.current_sl:
         should_exit, exit_reason = True, "STOP"
     elif elapsed_s >= trade.time_stop_s:
         should_exit, exit_reason = True, "TIME_SCRATCH"
