@@ -1,18 +1,19 @@
 """
 Direct live-tick channel from the feed process (ws_real_time_data's DirectFeedServer).
 
-The normal tick path is broker -> feed -> Postgres (one write per candle per 200 ms) -> NOTIFY ->
-websocket server -> this app: 0.3-0.7 s end to end. This client connects straight to the feed
-process over plain TCP and receives every candle update the moment the feed processes the tick, at
-network latency. It is ADDITIVE: the websocket path keeps running and takes over automatically
-whenever this one is quiet (see MarketDataService._process_tick's source check), so a feed restart,
-a dropped connection or a stall can never leave the app without data.
+The old live path was broker -> feed -> Postgres (<=1 write per candle per 200 ms) -> NOTIFY -> websocket
+server -> this app: 0.3-0.7 s end to end. This client connects straight to the feed process over plain TCP
+and receives every candle update the moment the feed processes the tick (measured: ~1 ms feed-to-client on
+the local link; ~80 ms from the exchange timestamp, whose own resolution is one second).
 
-Protocol: newline-delimited JSON (see DirectFeedServer's class comment). Candle updates carry the
-full current candle state, in the same shape MarketDataService._process_tick already consumes from
-the websocket server, so they are fed through exactly the same code.
+When configured (DIRECT_FEED_ADDR + DIRECT_FEED_TOKEN) it is the ONLY live-tick source: MarketDataService
+opens no websocket connections to the Spring service unless LIVE_TICKS_WS_FALLBACK=true. Because nothing
+backs it up, MarketDataService watches its health (see ticks_fresh/symbols_fresh) and the engine stops
+opening trades while ticks are not flowing.
 
-Disabled unless DIRECT_FEED_ADDR ("host:port") and DIRECT_FEED_TOKEN are both configured.
+Protocol: newline-delimited JSON (see DirectFeedServer's class comment). Candle updates carry the full
+current candle state, in the same shape MarketDataService._process_tick consumes, so they go through exactly
+the same code.
 """
 import asyncio
 import json

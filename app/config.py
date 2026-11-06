@@ -81,6 +81,10 @@ DIRECT_FEED_ADDR  = os.getenv("DIRECT_FEED_ADDR", "")
 # uncapped loop would burn about half a core. 5 ms caps it at 200 passes/s (~10% of a core) and adds
 # at most 5 ms of reaction delay - small next to the ~1 ms transport.
 TICK_MIN_PASS_MS  = 5.0
+# Must match backend_server_algo's `poll_index_options --strikes-each-side` (docker-compose.yml): the broker only
+# streams contracts the backend tracks. The option ladder (scheduler._option_ladder) needs the ITM strike
+# distance n + 2 (band) + 1 (centre drift) + 1 (rounding / backend-vs-strategy ATM difference) within it.
+BACKEND_TRACKED_STRIKES_EACH_SIDE = 7
 # When the direct feed is configured, live ticks come ONLY from it (the database/Spring-websocket path is
 # not opened at all) - one source, no duplicate or out-of-order ticks. Set LIVE_TICKS_WS_FALLBACK=true to
 # ALSO keep the Spring websocket connections open as an automatic fallback.

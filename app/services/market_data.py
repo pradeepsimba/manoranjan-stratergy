@@ -225,8 +225,9 @@ class MarketDataService:
         self._start_direct_feed(all_filters)
 
     def _start_direct_feed(self, all_filters: list) -> None:
-        """Start the direct tick channel if configured. Additive: the websocket connections above keep
-        running and carry the data whenever this channel is not delivering."""
+        """Start the direct tick channel (when configured). In direct-only mode (the default once configured)
+        it is the sole live source; with LIVE_TICKS_WS_FALLBACK=true the websocket connections started in
+        start() run alongside it and _process_tick drops their older duplicates."""
         parsed = self._direct_addr()
         if parsed is None or self._direct_task is not None:
             if parsed is None and cfg.DIRECT_FEED_ADDR:
@@ -488,6 +489,34 @@ class MarketDataService:
 
     # ── Tick processing ───────────────────────────────────────────────────────
 
+    @staticmethod
+    def _merge_same_bar(stored: Candle, new: Candle) -> Candle:
+        """Fold a live direct tick into the stored candle for the SAME bar. In steady state the feed's candle is
+        cumulative for the bar, so this is the identity (open unchanged, high/low only ever widen). It matters
+        when the feed process restarts mid-bar: its in-memory candle then restarts from its first tick since the
+        restart, and replacing the stored bar with it permanently lost the real open/high/low and the volume so
+        far (the DB path protects itself with GREATEST/LEAST; the direct path bypasses that). Also keeps the true
+        open of a bar that was loaded from REST history. Close/last-qty come from the new tick; volume never
+        moves backwards."""
+        return Candle(
+            start_time=new.start_time,
+            open=stored.open if stored.open > 0 else new.open,
+            close=new.close,
+            high=max(stored.high, new.high),
+            low=min((v for v in (stored.low, new.low) if v > 0), default=new.low),
+            volume=max(stored.volume, new.volume),
+            last_qty=new.last_qty, buy_qty=new.buy_qty, sell_qty=new.sell_qty,
+        )
+
+    def _stored_last(self, symbol: str):
+        if symbol == cfg.BN_INDEX_TOKEN:
+            lst = self.state.bn_index_candles_5m
+        elif symbol == cfg.NF_INDEX_TOKEN:
+            lst = self.state.nf_index_candles_5m
+        else:
+            lst = self.state.candles_5m.get(symbol)
+        return lst[-1] if lst else None
+
     def _older_than_stored(self, symbol: str, interval: str, n: dict) -> bool:
         """True if tick `n` is the SAME 5m bar as the stored last candle but with lower volume."""
         if interval != "5m":
@@ -575,7 +604,16 @@ class MarketDataService:
                 # arrives inside its candle's minute, so it keeps its receipt time.
                 try:
                     bar_start = datetime.fromisoformat(str(n.get("start_time", ""))).replace(tzinfo=IST)
-                    st.opt_ltp[symbol] = (opt_ltp, min(time.time(), bar_start.timestamp() + 60.0))
+                    if n.get("snapshot"):
+                        # A snapshot line (sent on subscribe) carries the candle's CLOSE, i.e. the last trade
+                        # in that minute - which may be up to ~59 s old, and its `ts` is just the snapshot
+                        # time. Stamping it "now" made a minute-old price look fresh and defeated the
+                        # OPTION_PRICE_MAX_AGE_S freshness limit. Stamp it at the candle's START instead
+                        # (conservative: it ages out of the entry window until a real tick refreshes it).
+                        stamp = bar_start.timestamp()
+                    else:
+                        stamp = min(time.time(), bar_start.timestamp() + 60.0)
+                    st.opt_ltp[symbol] = (opt_ltp, stamp)
                 except ValueError:
                     # No usable bar time means we cannot tell how old this price is. It used to be stamped
                     # "now", which let an hours-old resent price look fresh and tradable - skip it instead.
@@ -668,6 +706,11 @@ class MarketDataService:
         # permanently on a tick that carried no usable data.
         candle_ok = bool(candle.start_time) and all(
             math.isfinite(x) and x > 0 for x in (candle.open, candle.close, candle.high, candle.low))
+
+        if candle_ok and direct and interval == "5m":
+            stored = self._stored_last(symbol)
+            if stored is not None and stored.start_time == candle.start_time:
+                candle = self._merge_same_bar(stored, candle)
 
         if not candle_ok:
             pass   # no usable bar in this tick: skip every candle write below; a valid ltp is still applied

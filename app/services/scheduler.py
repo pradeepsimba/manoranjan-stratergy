@@ -108,6 +108,7 @@ class SchedulerService:
         # at the Tuesday-15:30-IST expiry rollover independent of strike).
         # ITM option ladder (see _option_ladder): the strike the ladder is currently centred on, and
         # the symbols last handed to MarketDataService.set_option_ladder.
+        self._offset_warned: set = set()
         self._bn_ladder_center: int | None = None
         self._nf_ladder_center: int | None = None
         self._bn_ladder_symbols: tuple = ()
@@ -1000,6 +1001,17 @@ class SchedulerService:
             return last_strike
         return round_fn(spot)
 
+    def _warn_if_offset_untracked(self, step: int, itm_offset: float, name: str) -> None:
+        """One-time warning: an ITM offset so large that the strikes the strategy trades fall outside what the
+        backend tracks means their real prices never arrive (every entry is then skipped as 'no live price')."""
+        n = int(math.ceil(itm_offset / step)) if itm_offset > 0 else 0
+        key = (name, n)
+        if n + 4 > cfg.BACKEND_TRACKED_STRIKES_EACH_SIDE and key not in self._offset_warned:
+            self._offset_warned.add(key)
+            print(f"WARNING: {name} ITM offset {itm_offset:g} pts = {n} strikes from ATM, but the backend only tracks "
+                  f"ATM +/-{cfg.BACKEND_TRACKED_STRIKES_EACH_SIDE} - raise poll_index_options --strikes-each-side "
+                  f"(and BACKEND_TRACKED_STRIKES_EACH_SIDE) or real option prices will not arrive for these strikes")
+
     @staticmethod
     def _option_ladder(center: int, step: int, itm_offset: float, underlying: str, expiry, build) -> tuple:
         """CE and PE symbols for a band of strikes around where the deep-ITM contracts sit.
@@ -1069,6 +1081,7 @@ class SchedulerService:
                 self._bn_atm_watch_last_resub_at = now
                 self._mkt.set_bn_atm_watch(ce, pe, strike=strike)
         if st.bn_index_ltp > 0 and cfg.USE_REAL_OPTION_PRICES:
+            self._warn_if_offset_untracked(100, cfg.BN_ITM_OFFSET_POINTS, "BankNifty")
             atm = get_atm_strike(st.bn_index_ltp)
             if self._bn_ladder_center is None or abs(atm - self._bn_ladder_center) >= 2 * 100:
                 self._bn_ladder_center = atm
@@ -1091,6 +1104,7 @@ class SchedulerService:
                 self._nf_atm_watch_last_resub_at = now
                 self._mkt.set_nf_atm_watch(ce, pe, strike=strike)
         if st.nf_index_ltp > 0 and cfg.USE_REAL_OPTION_PRICES:
+            self._warn_if_offset_untracked(50, cfg.NF_ITM_OFFSET_POINTS, "Nifty 50")
             atm = nf_get_atm_strike(st.nf_index_ltp)
             if self._nf_ladder_center is None or abs(atm - self._nf_ladder_center) >= 2 * 50:
                 self._nf_ladder_center = atm
