@@ -613,7 +613,12 @@ class MarketDataService:
                         stamp = bar_start.timestamp()
                     else:
                         stamp = min(time.time(), bar_start.timestamp() + 60.0)
-                    st.opt_ltp[symbol] = (opt_ltp, stamp)
+                    # Never let an OLDER observation replace a newer one: a snapshot line (stamped at its candle
+                    # start) or a late tick for a previous minute arriving after a live price regressed the
+                    # cached price (and the exit mark read from it).
+                    existing = st.opt_ltp.get(symbol)
+                    if existing is None or stamp >= existing[1]:
+                        st.opt_ltp[symbol] = (opt_ltp, stamp)
                 except ValueError:
                     # No usable bar time means we cannot tell how old this price is. It used to be stamped
                     # "now", which let an hours-old resent price look fresh and tradable - skip it instead.
@@ -708,7 +713,13 @@ class MarketDataService:
             math.isfinite(x) and x > 0 for x in (candle.open, candle.close, candle.high, candle.low))
 
         if candle_ok and direct and interval == "5m":
-            stored = self._stored_last(symbol)
+            # An index whose latch is still synthetic holds a bar built from the constituent stocks' % moves
+            # (anchored open, envelope high/low). Merging the first REAL tick into it kept that synthetic open
+            # and widened high/low with synthetic extremes (wrong open/low for the bar). Let the real tick
+            # REPLACE it - the latch flips just below, so every later tick merges into a real bar.
+            synthetic_index = ((symbol == cfg.BN_INDEX_TOKEN and self.state.bn_index_synthetic) or
+                               (symbol == cfg.NF_INDEX_TOKEN and self.state.nf_index_synthetic))
+            stored = None if synthetic_index else self._stored_last(symbol)
             if stored is not None and stored.start_time == candle.start_time:
                 candle = self._merge_same_bar(stored, candle)
 
