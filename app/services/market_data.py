@@ -146,9 +146,72 @@ class MarketDataService:
                 f"misroute live ticks for this stock."
             )
 
+    def _direct_addr(self):
+        """(host, port) when the direct feed is fully configured, else None."""
+        addr, token = (cfg.DIRECT_FEED_ADDR or "").strip(), (cfg.DIRECT_FEED_TOKEN or "").strip()
+        if not addr or not token:
+            return None
+        try:
+            host, port_s = addr.rsplit(":", 1)
+            host, port = host.strip(), int(port_s.strip())
+        except ValueError:
+            return None
+        # Anything that cannot possibly connect (a URL, a blank host, port 0 or > 65535) must return None so
+        # the app falls back to the websocket path. Accepting it made the app "direct-only" against a feed it
+        # could never reach: every entry blocked, all session, with no fallback.
+        if not host or "/" in host or any(ch.isspace() for ch in host) or not (1 <= port <= 65535):
+            return None
+        return host, port
+
+    def _is_direct_only(self) -> bool:
+        """Live ticks come ONLY from the direct feed (the Spring websocket path is not opened)."""
+        return self._direct_addr() is not None and not cfg.LIVE_TICKS_WS_FALLBACK
+
+    def live_feed_ok(self) -> bool:
+        """Is it safe to act on live prices? Always True unless running direct-only, where a feed that
+        has stopped delivering would otherwise leave the engine trading on frozen prices. Outside the
+        trading phases silence is normal (no candles before 09:15), so only the connection matters then."""
+        if not self._is_direct_only():
+            return True
+        c = self._direct_client
+        if c is None or not c.connected:
+            return False
+        if self.state.phase in (TradingPhase.WAIT_ZONE, TradingPhase.ACTIVE, TradingPhase.CUTOFF):
+            # Both INDEX prices must be arriving. "Any tick" was too weak: option or stock ticks kept the
+            # gate open while an index (the price every decision is anchored to) was frozen.
+            return c.symbols_fresh((cfg.BN_INDEX_TOKEN, cfg.NF_INDEX_TOKEN), cfg.LIVE_FEED_MAX_SILENCE_S)
+        return True
+
+    def refresh_status(self) -> None:
+        """Update st.live_feed_ok and, in direct-only mode, the dashboard's connection badge. Cheap; the
+        scheduler calls it every second."""
+        ok = self.live_feed_ok()
+        self.state.live_feed_ok = ok
+        if self._is_direct_only() and self._running:
+            c = self._direct_client
+            if c is not None and not c.connected and not getattr(self, "_never_connected_warned", False):
+                # Direct-only with nothing to fall back on: say so loudly if it has not come up after 30 s
+                # (wrong address/token, feed container down, port not published).
+                started = getattr(self, "_direct_started_at", None)
+                if started is not None and time.monotonic() - started > 30.0 and c.ticks_received == 0:
+                    self._never_connected_warned = True
+                    print("CRITICAL: direct-only live feed has not connected in 30 s - NO live data and no fallback "
+                          f"(check DIRECT_FEED_ADDR={cfg.DIRECT_FEED_ADDR!r}, DIRECT_FEED_TOKEN, and that the feed container publishes the port)")
+            if c is None or not c.connected:
+                self.state.ws_status = "Live feed disconnected"
+            else:
+                self.state.ws_status = "WS Connected" if ok else "Live feed silent (no ticks)"
+
     def start(self) -> None:
         self._running = True
         all_filters = self._build_filters()
+        if self._is_direct_only():
+            # Direct feed is the ONLY live source: open no websocket connections to the Spring service.
+            self._tasks = []
+            self._conn_status = {}
+            self._start_direct_feed(all_filters)
+            self.refresh_status()
+            return
         chunk_size  = cfg.WS_MAX_FILTERS_PER_CONN
         chunks = [all_filters[i:i + chunk_size] for i in range(0, len(all_filters), chunk_size)] or [[]]
         self._conn_status = {i: "Disconnected" for i in range(len(chunks))}
@@ -164,16 +227,15 @@ class MarketDataService:
     def _start_direct_feed(self, all_filters: list) -> None:
         """Start the direct tick channel if configured. Additive: the websocket connections above keep
         running and carry the data whenever this channel is not delivering."""
-        addr, token = cfg.DIRECT_FEED_ADDR, cfg.DIRECT_FEED_TOKEN
-        if not addr or not token or self._direct_task is not None:
+        parsed = self._direct_addr()
+        if parsed is None or self._direct_task is not None:
+            if parsed is None and cfg.DIRECT_FEED_ADDR:
+                print(f"Direct feed: DIRECT_FEED_ADDR {cfg.DIRECT_FEED_ADDR!r} is not host:port - direct feed disabled")
             return
-        try:
-            host, port_s = addr.rsplit(":", 1)
-            port = int(port_s)
-        except ValueError:
-            print(f"Direct feed: DIRECT_FEED_ADDR {addr!r} is not host:port - direct feed disabled")
-            return
-        self._direct_client = DirectFeedClient(host, port, token, self._on_direct_tick)
+        host, port = parsed
+        self._direct_client = DirectFeedClient(host, port, cfg.DIRECT_FEED_TOKEN.strip(), self._on_direct_tick)
+        self._direct_started_at = time.monotonic()
+        self._never_connected_warned = False
         self._universe_symbols = {f["stock_symbol"] for f in all_filters}
         self._sync_direct_symbols()
         self._direct_task = asyncio.create_task(self._direct_client.run())
@@ -293,6 +355,8 @@ class MarketDataService:
                                    else cfg.NF_OPTION_UNDERLYING)
         self._option_symbols = frozenset(merged)
         self._sync_direct_symbols()
+        if self._is_direct_only():
+            return   # option ticks arrive on the direct channel; no separate websocket connection
         new_filters = [{"stock_symbol": sym, "stockname": merged[sym], "interval": "1m"}
                        for sym in sorted(merged)]
         if new_filters == self._option_filters:

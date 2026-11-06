@@ -25,6 +25,9 @@ services:
       # disabled, websocket path only. Must match DIRECT_FEED_TOKEN in ws_real_time_data's .env.
       DIRECT_FEED_ADDR: ${DIRECT_FEED_ADDR:-}
       DIRECT_FEED_TOKEN: ${DIRECT_FEED_TOKEN:-}
+      # With the direct feed configured, live ticks come ONLY from it. Set to true to also keep the Spring
+      # websocket connections open as an automatic fallback.
+      LIVE_TICKS_WS_FALLBACK: ${LIVE_TICKS_WS_FALLBACK:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:

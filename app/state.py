@@ -32,6 +32,10 @@ class AppState:
         # ── Session ───────────────────────────────────────────────────────────
         self.phase:      TradingPhase = TradingPhase.PRE_MARKET
         self.ws_status:  str          = "—"
+        # False while live ticks are not flowing (direct-only mode, market hours, silent > LIVE_FEED_MAX_SILENCE_S).
+        # New entries and manual orders are refused while False - without the websocket fallback a dead feed would
+        # otherwise mean trading on frozen prices. Updated by MarketDataService.refresh_status().
+        self.live_feed_ok: bool       = True
         self.api_status: str          = "—"
 
         # ── Candle stores — BankNifty index + the 12 BN stocks, all keyed by

@@ -81,6 +81,13 @@ DIRECT_FEED_ADDR  = os.getenv("DIRECT_FEED_ADDR", "")
 # uncapped loop would burn about half a core. 5 ms caps it at 200 passes/s (~10% of a core) and adds
 # at most 5 ms of reaction delay - small next to the ~1 ms transport.
 TICK_MIN_PASS_MS  = 5.0
+# When the direct feed is configured, live ticks come ONLY from it (the database/Spring-websocket path is
+# not opened at all) - one source, no duplicate or out-of-order ticks. Set LIVE_TICKS_WS_FALLBACK=true to
+# ALSO keep the Spring websocket connections open as an automatic fallback.
+LIVE_TICKS_WS_FALLBACK = os.getenv("LIVE_TICKS_WS_FALLBACK", "false").strip().lower() in ("1", "true", "yes")
+# During market hours, no live tick for this long = the feed is considered dead: new entries are blocked
+# (an index ticks every second or so, so 15 s of silence is never normal).
+LIVE_FEED_MAX_SILENCE_S = 15.0
 DIRECT_FEED_TOKEN = os.getenv("DIRECT_FEED_TOKEN", "")
 SETTINGS_PASSWORD = os.getenv("SETTINGS_PASSWORD", "")
 

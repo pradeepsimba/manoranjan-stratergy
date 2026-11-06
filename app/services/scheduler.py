@@ -503,6 +503,14 @@ class SchedulerService:
         while not _past(cfg.SESSION_END_HOUR, cfg.SESSION_END_MIN):
             fallback_s = max(0.01, cfg.TICK_EVAL_INTERVAL_MS / 1000.0)   # re-read: it is a dynamic setting
             pass_started = time.monotonic()
+            # The engine's own gate must not depend on the dashboard push loop (which can stall on a hung
+            # browser client): refresh feed health here too. Cheap (a few comparisons).
+            try:
+                self._mkt.refresh_status()
+            except Exception as e:  # noqa: BLE001 - the engine loop must never die over a status refresh
+                if time.monotonic() - getattr(self, "_fh_err_at", 0.0) > 10.0:   # at most one line per 10 s
+                    self._fh_err_at = time.monotonic()
+                    print(f"Feed-health refresh error: {e}")
             try:
                 if _past(cfg.CUTOFF_HOUR, cfg.CUTOFF_MIN):
                     st.phase = TradingPhase.CUTOFF
@@ -747,6 +755,12 @@ class SchedulerService:
         # No recent REAL broker price for the contract -> don't arm. Arming would only be dropped at fill
         # time and re-armed on the very next tick (an arm/log loop). Checked before the diagnostic is
         # published, like the entry filters above.
+        if signal is not None and not st.live_feed_ok:
+            # Direct-only mode and no live ticks flowing: the prices this signal was computed from may be
+            # frozen. Never open a trade on them.
+            diagnostic.no_trade_reason = "Live feed silent - no new entries until ticks resume"
+            signal = None
+
         if signal is not None and option_prices.use_real_prices():
             sym = build_monthly_option_symbol(cfg.BN_OPTION_UNDERLYING, datetime.fromisoformat(signal.expiry),
                                               signal.strike, "CE" if signal.direction == "BUY" else "PE")
@@ -880,6 +894,12 @@ class SchedulerService:
         # No recent REAL broker price for the contract -> don't arm. Arming would only be dropped at fill
         # time and re-armed on the very next tick (an arm/log loop). Checked before the diagnostic is
         # published, like the entry filters above.
+        if signal is not None and not st.live_feed_ok:
+            # Direct-only mode and no live ticks flowing: the prices this signal was computed from may be
+            # frozen. Never open a trade on them.
+            diagnostic.no_trade_reason = "Live feed silent - no new entries until ticks resume"
+            signal = None
+
         if signal is not None and option_prices.use_real_prices():
             sym = build_weekly_option_symbol(cfg.NF_OPTION_UNDERLYING, datetime.fromisoformat(signal.expiry),
                                              signal.strike, "CE" if signal.direction == "BUY" else "PE")
@@ -1654,6 +1674,7 @@ class SchedulerService:
         st = get_state()
         while True:
             try:
+                self._mkt.refresh_status()   # live-feed health + connection badge (direct-only mode)
                 if self._ws.count() > 0:
                     active_snapshot    = copy.copy(st.active_trade) if st.active_trade is not None else None
                     active_nf_snapshot = copy.copy(st.active_trade_nf) if st.active_trade_nf is not None else None

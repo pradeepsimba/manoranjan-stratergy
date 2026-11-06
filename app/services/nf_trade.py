@@ -98,6 +98,11 @@ def try_fill_pending_entry(now: datetime, current_index_price: float,
     pending = st.pending_entry_nf
     if pending is None:
         return None
+    if not st.live_feed_ok:
+        # Armed just before the feed went quiet: never fill it on prices that may be frozen.
+        st.pending_entry_nf = None
+        print("NF pending entry cancelled - live feed silent")
+        return None
 
     fill_after = datetime.fromisoformat(pending.fill_after)
     if now < fill_after:
@@ -144,6 +149,8 @@ def place_manual_order(direction: str, now: datetime) -> NFTrade:
     # gate the automated _tick_entries_nf applies (found in review, 2026-09-23).
     if st.phase != TradingPhase.ACTIVE:
         raise ValueError("Manual orders are only allowed during the active trading session (09:30-15:00 IST).")
+    if not st.live_feed_ok:
+        raise ValueError("The live feed is not delivering ticks right now - not placing an order on possibly frozen prices.")
     if st.active_trade_nf is not None:
         raise ValueError("A trade is already active — exit it before placing a new one.")
     # See bn_trade.place_manual_order's identical 2026-09-24 fix (found in

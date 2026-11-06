@@ -134,6 +134,11 @@ def try_fill_pending_entry(now: datetime, current_index_price: float,
     pending = st.pending_entry
     if pending is None:
         return None
+    if not st.live_feed_ok:
+        # Armed just before the feed went quiet: never fill it on prices that may be frozen.
+        st.pending_entry = None
+        print("BN pending entry cancelled - live feed silent")
+        return None
 
     fill_after = datetime.fromisoformat(pending.fill_after)
     if now < fill_after:
@@ -198,6 +203,8 @@ def place_manual_order(direction: str, now: datetime) -> BNTrade:
     # running to ever close it until the next day's ACTIVE phase.
     if st.phase != TradingPhase.ACTIVE:
         raise ValueError("Manual orders are only allowed during the active trading session (09:30-15:00 IST).")
+    if not st.live_feed_ok:
+        raise ValueError("The live feed is not delivering ticks right now - not placing an order on possibly frozen prices.")
     if st.active_trade is not None:
         raise ValueError("A trade is already active — exit it before placing a new one.")
     # 2026-09-24 fix, found in review: an algo signal can be armed

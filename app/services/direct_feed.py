@@ -42,6 +42,8 @@ class DirectFeedClient:
         self._symbols: frozenset = frozenset()
         self._writer: Optional[asyncio.StreamWriter] = None
         self._last_msg = 0.0           # time.monotonic() of the last line received (tick OR heartbeat)
+        self._last_tick = 0.0          # time.monotonic() of the last real LIVE tick (not a heartbeat or snapshot)
+        self._last_tick_by_symbol: dict = {}   # symbol -> time.monotonic() of its last live tick
         self.connected = False
         self.ticks_received = 0
 
@@ -50,6 +52,20 @@ class DirectFeedClient:
     def is_live(self) -> bool:
         """True while the channel is delivering (a line arrived within LIVE_TIMEOUT_S)."""
         return self.connected and (time.monotonic() - self._last_msg) < LIVE_TIMEOUT_S
+
+    def symbols_fresh(self, symbols: Iterable[str], max_age_s: float) -> bool:
+        """True only if EVERY given symbol had a live tick within max_age_s. Lets the caller insist on the
+        instruments that matter (the two indices) rather than 'some tick for something' - option or stock
+        ticks must not keep the feed looking healthy while an index is frozen."""
+        if not self.connected:
+            return False
+        now = time.monotonic()
+        return all(now - self._last_tick_by_symbol.get(s, -1e9) < max_age_s for s in symbols)
+
+    def ticks_fresh(self, max_age_s: float) -> bool:
+        """True if a real live tick arrived within max_age_s. Heartbeats do NOT count: they keep flowing
+        while the feed's broker stream is dead, so only ticks prove prices are actually arriving."""
+        return self.connected and self._last_tick > 0 and (time.monotonic() - self._last_tick) < max_age_s
 
     def set_symbols(self, symbols: Iterable[str]) -> None:
         """Replace the subscription. Takes effect on the open connection immediately (no reconnect),
@@ -129,6 +145,11 @@ class DirectFeedClient:
                 if "hb" in msg:
                     continue
                 self.ticks_received += 1
+                if not msg.get("snapshot"):
+                    self._last_tick = time.monotonic()
+                    sym = msg.get("stock_symbol")
+                    if sym:
+                        self._last_tick_by_symbol[sym] = self._last_tick
                 try:
                     self._on_tick(msg)
                 except Exception as e:  # noqa: BLE001 - one bad tick must not drop the connection
