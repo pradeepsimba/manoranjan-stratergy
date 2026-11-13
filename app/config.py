@@ -1110,10 +1110,10 @@ _DEFAULTS: Dict[str, Any] = {
     # (unlike time-stop) a real, meaningful bt=True backtest override —
     # see config.py's own comment on the now-removed static originals of
     # these four keys for why.
-    "BN_SCALP_TARGET_RS": 2.75,
-    "BN_SCALP_STOP_RS":   2.00,
-    "NF_SCALP_TARGET_RS": 2.75,
-    "NF_SCALP_STOP_RS":   2.00,
+    "BN_SCALP_TARGET_RS": 6.00,
+    "BN_SCALP_STOP_RS":   4.00,
+    "NF_SCALP_TARGET_RS": 6.00,
+    "NF_SCALP_STOP_RS":   4.00,
     # Shared (not per-instrument) daily trade cap, added to this group
     # 2026-09-25 (explicit user decision). NOT frozen onto a trade — it
     # gates whether a NEW trade can open, read live every check via
