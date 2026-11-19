@@ -2062,7 +2062,7 @@ class SchedulerService:
         }
 
     async def _push_tick_updates_loop(self) -> None:
-        """Live-price ticker delta — every ~100ms in all active/wait/cutoff phases."""
+        """Live-price ticker delta — every ~30ms in all active/wait/cutoff phases."""
         st = get_state()
         while True:
             try:
@@ -2087,4 +2087,4 @@ class SchedulerService:
                             )
             except Exception as e:
                 print(f"Tick delta push error: {e}")
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.03)   # was 0.1: dashboard prices lag the feed by <=30 ms (only sends when something changed)
