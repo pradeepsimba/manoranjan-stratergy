@@ -888,8 +888,12 @@ NF_SCALP_BASKET: Dict[str, float] = _top_n_basket(
 # (ltp-vwap)/vwap*100 — see app/engine/scalp_signals.compute_basket_reading).
 # Score is a small percentage (basket legs rarely deviate >0.5% from session
 # VWAP intraday), so this is deliberately a small number, not points.
-BN_SCALP_SCORE_THRESHOLD = 0.08
-NF_SCALP_SCORE_THRESHOLD = 0.08
+# 2026-11-19 (user: "improve the strategy, continuous loss"): raised 0.08 -> 0.30. 70 live trades since
+# 30 Oct by |score| at entry: <0.15 -> 36% wins, -1,165; 0.15-0.30 -> 46%, -582; >=0.30 -> 70%, +1,128
+# (10 trades only - small sample, re-check after ~2 weeks). Fewer, stronger trades also cut fees (~89/trade).
+# Static: needs an app restart.
+BN_SCALP_SCORE_THRESHOLD = 0.30
+NF_SCALP_SCORE_THRESHOLD = 0.30
 
 # 60% Cumulative Weight Rule (2026-10-01, explicit user decision — REPLACES
 # the old "top 2 heaviest-weighted legs must individually agree with the
